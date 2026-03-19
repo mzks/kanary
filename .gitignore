@@ -191,6 +191,12 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# Local runtime artifacts
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+
 # PyPI configuration file
 .pypirc
 
@@ -205,3 +211,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# uv.lock
+uv.lock

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kanary"
+version = "0.1.0"
+description = "KamLAND alarm notification and reliability"
+requires-python = ">=3.13"
+dependencies = [
+    "psycopg[binary]>=3.2",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

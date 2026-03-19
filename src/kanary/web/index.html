@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KANARY Viewer</title>
+    <link rel="stylesheet" href="/viewer/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <h1>KANARY Viewer</h1>
+          <p class="subtitle">Alarm dashboard, operator workflow, and runtime inspection for the local KANARY node.</p>
+        </div>
+        <div class="topbar-controls">
+          <label class="compact-control">
+            <span>Timezone</span>
+            <select id="timezone-select">
+              <option value="browser">Browser Local</option>
+            </select>
+          </label>
+          <label class="compact-control">
+            <span>Refresh</span>
+            <select id="refresh-interval">
+              <option value="1000">1 s</option>
+              <option value="5000">5 s</option>
+              <option value="10000">10 s</option>
+              <option value="30000">30 s</option>
+              <option value="60000">60 s</option>
+              <option value="300000">5 min</option>
+              <option value="600000">10 min</option>
+              <option value="1800000">30 min</option>
+              <option value="0">Manual</option>
+            </select>
+          </label>
+          <button id="refresh-now-button" class="button button-secondary">Refresh Now</button>
+          <span id="refresh-status" class="muted">Waiting for first refresh</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <nav class="sidebar">
+          <a href="#dashboard" class="nav-link" data-route="dashboard">Dashboard</a>
+          <a href="#alerts" class="nav-link" data-route="alerts">Alerts</a>
+          <a href="#plugins" class="nav-link" data-route="plugins">Plugins</a>
+          <a href="#outputs" class="nav-link" data-route="outputs">Outputs</a>
+          <a href="#silences" class="nav-link" data-route="silences">Silences</a>
+          <a href="#admin" class="nav-link" data-route="admin">Admin</a>
+        </nav>
+
+        <main class="page-area">
+          <section id="page-dashboard" class="page">
+            <div class="hero-grid" id="dashboard-cards"></div>
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Priority View</div>
+                  <h2>Open Alerts</h2>
+                </div>
+                <div class="dashboard-aside">
+                  <span class="muted" id="dashboard-summary">Only FIRING, ACKED, and SILENCED alerts are shown here.</span>
+                  <div id="dashboard-severity-breakdown" class="severity-breakdown"></div>
+                </div>
+              </div>
+              <div id="dashboard-active-alerts" class="alert-card-grid"></div>
+            </section>
+          </section>
+
+          <section id="page-alerts" class="page hidden">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Full Inventory</div>
+                  <h2>All Alerts</h2>
+                </div>
+                <div class="toolbar">
+                  <input id="alert-filter" type="search" placeholder="Filter by rule, state, message, output" />
+                  <select id="state-filter">
+                    <option value="">All states</option>
+                    <option value="FIRING">FIRING</option>
+                    <option value="ACKED">ACKED</option>
+                    <option value="SILENCED">SILENCED</option>
+                    <option value="SUPPRESSED">SUPPRESSED</option>
+                    <option value="OK">OK</option>
+                    <option value="RESOLVED">RESOLVED</option>
+                  </select>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Rule</th>
+                      <th>State</th>
+                      <th>Severity</th>
+                      <th>Acked By</th>
+                      <th>Silences</th>
+                      <th>Outputs</th>
+                      <th>Message</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="alerts-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-detail" class="page hidden">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Alert Detail</div>
+                  <h2 id="detail-title">Alert</h2>
+                </div>
+                <a href="#alerts" class="button button-secondary">Back to Alerts</a>
+              </div>
+              <div id="detail-empty" class="muted">Select an alert from Dashboard or Alerts.</div>
+              <div id="detail-content" class="hidden">
+                <div id="detail-summary" class="detail-grid"></div>
+
+                <div class="detail-actions">
+                  <section class="panel-subsection">
+                    <h3>Acknowledge</h3>
+                    <label>
+                      Operator
+                      <input id="ack-operator" type="text" placeholder="Keita" />
+                    </label>
+                    <label>
+                      Reason
+                      <input id="ack-reason" type="text" placeholder="Investigating the issue" />
+                    </label>
+                    <div class="inline-actions">
+                      <button id="ack-button" class="button">ACK</button>
+                      <button id="unack-button" class="button button-secondary">UNACK</button>
+                    </div>
+                  </section>
+
+                  <section class="panel-subsection">
+                    <h3>Silence For</h3>
+                    <label>
+                      Operator
+                      <input id="silence-for-operator" type="text" placeholder="Keita" />
+                    </label>
+                    <label>
+                      Minutes
+                      <input id="silence-for-minutes" type="number" min="1" value="10" />
+                    </label>
+                    <label>
+                      Reason
+                      <input id="silence-for-reason" type="text" placeholder="Maintenance or triage" />
+                    </label>
+                    <button id="silence-for-button" class="button">Create Silence</button>
+                  </section>
+
+                  <section class="panel-subsection">
+                    <h3>Silence Window</h3>
+                    <label>
+                      Operator
+                      <input id="silence-window-operator" type="text" placeholder="Keita" />
+                    </label>
+                    <label>
+                      Start
+                      <input id="silence-window-start" type="datetime-local" />
+                    </label>
+                    <label>
+                      End
+                      <input id="silence-window-end" type="datetime-local" />
+                    </label>
+                    <label>
+                      Reason
+                      <input id="silence-window-reason" type="text" placeholder="Scheduled maintenance" />
+                    </label>
+                    <button id="silence-window-button" class="button">Create Window</button>
+                  </section>
+                </div>
+
+                <div class="split-panels">
+                  <section class="panel-subsection">
+                    <h3>History</h3>
+                    <div id="history-content" class="history-list"></div>
+                  </section>
+
+                  <section class="panel-subsection">
+                    <h3>Payload</h3>
+                    <pre id="payload-content" class="code-block"></pre>
+                  </section>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-plugins" class="page hidden">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Runtime Health</div>
+                  <h2>Source And Rule Plugins</h2>
+                </div>
+                <div class="toolbar">
+                  <input id="plugin-filter" type="search" placeholder="Filter by type, plugin, state, file, error" />
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th>Plugin</th>
+                      <th>State</th>
+                      <th>Updated</th>
+                      <th>File</th>
+                      <th>Last Error</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="plugins-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-outputs" class="page hidden">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Delivery Layer</div>
+                  <h2>Output Plugins</h2>
+                </div>
+                <div class="toolbar">
+                  <input id="output-filter" type="search" placeholder="Filter by plugin, state, file, error" />
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Plugin</th>
+                      <th>State</th>
+                      <th>Runs</th>
+                      <th>Updated</th>
+                      <th>File</th>
+                      <th>Last Error</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="outputs-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-silences" class="page hidden">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Operator Scheduling</div>
+                  <h2>Silences</h2>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Status</th>
+                      <th>Window</th>
+                      <th>Targets</th>
+                      <th>By</th>
+                      <th>Reason</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="silences-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-admin" class="page hidden">
+            <div class="admin-grid">
+              <section class="panel">
+                <div class="panel-header">
+                  <div>
+                    <div class="panel-kicker">Planning</div>
+                    <h2>Register Silence By Pattern Or Tag</h2>
+                  </div>
+                </div>
+                <div class="admin-forms">
+                  <section class="panel-subsection">
+                    <h3>Silence For</h3>
+                    <label>
+                      Operator
+                      <input id="admin-duration-operator" type="text" placeholder="Keita" />
+                    </label>
+                    <label>
+                      Rule Pattern
+                      <input id="admin-duration-rules" type="text" placeholder="sqlite.*.stale,postgres.*" />
+                    </label>
+                    <label>
+                      Tags
+                      <input id="admin-duration-tags" type="text" placeholder="sqlite,infra" />
+                    </label>
+                    <label>
+                      Minutes
+                      <input id="admin-duration-minutes" type="number" min="1" value="30" />
+                    </label>
+                    <label>
+                      Optional Start
+                      <input id="admin-duration-start" type="datetime-local" />
+                    </label>
+                    <label>
+                      Reason
+                      <input id="admin-duration-reason" type="text" placeholder="Planned work" />
+                    </label>
+                    <button id="admin-duration-button" class="button">Create Duration Silence</button>
+                  </section>
+
+                  <section class="panel-subsection">
+                    <h3>Silence Window</h3>
+                    <label>
+                      Operator
+                      <input id="admin-window-operator" type="text" placeholder="Keita" />
+                    </label>
+                    <label>
+                      Rule Pattern
+                      <input id="admin-window-rules" type="text" placeholder="sqlite.value1.*" />
+                    </label>
+                    <label>
+                      Tags
+                      <input id="admin-window-tags" type="text" placeholder="sqlite" />
+                    </label>
+                    <label>
+                      Start
+                      <input id="admin-window-start" type="datetime-local" />
+                    </label>
+                    <label>
+                      End
+                      <input id="admin-window-end" type="datetime-local" />
+                    </label>
+                    <label>
+                      Reason
+                      <input id="admin-window-reason" type="text" placeholder="Scheduled maintenance" />
+                    </label>
+                    <button id="admin-window-button" class="button">Create Window Silence</button>
+                  </section>
+                </div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-header">
+                  <div>
+                    <div class="panel-kicker">Runtime Control</div>
+                    <h2>Management</h2>
+                  </div>
+                </div>
+                <div class="admin-actions">
+                  <button id="admin-reload-button" class="button">Reload Engine</button>
+                  <div class="note-block">
+                    <strong>Operational note</strong>
+                    <p>All write operations in this viewer also exist in <code>kanaryctl</code>. Use the CLI for automation, the viewer for fast triage and dashboard monitoring.</p>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <div id="source-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-close-source></div>
+        <div class="modal-panel">
+          <div class="modal-header">
+            <div>
+              <div class="panel-kicker">Read Only Source</div>
+              <h2 id="source-modal-title">Plugin Source</h2>
+              <div id="source-modal-meta" class="muted"></div>
+            </div>
+            <button id="source-modal-close" class="button button-secondary">Close</button>
+          </div>
+          <div id="source-modal-body" class="source-viewer"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/viewer/app.js"></script>
+  </body>
+</html>
