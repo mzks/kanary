@@ -131,7 +131,7 @@ http://127.0.0.1:8000/viewer
 ```
 
 起動引数の一覧は `uv run python -m kanary --help` で確認できます。  
-`kanaryctl` の引数と subcommand は `./kanaryctl help` で確認できます。
+`kanaryctl` の引数と subcommand は `kanaryctl help` で確認できます。
 
 ## 環境変数
 
@@ -181,3 +181,5 @@ KANARY には組み込みの Web viewer が含まれています。
   - HTTP API と `kanaryctl`
 - [docs/development.md](docs/development.md)
   - 開発、lint、tests
+- [docs/deployment.md](docs/deployment.md)
+  - installable CLI と deployment の考え方

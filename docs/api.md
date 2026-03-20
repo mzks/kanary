@@ -63,9 +63,9 @@
 例:
 
 ```bash
-./kanaryctl alerts
-./kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
-./kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
-./kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
-./kanaryctl reload
+kanaryctl alerts
+kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
+kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
+kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
+kanaryctl reload
 ```
