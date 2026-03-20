@@ -139,6 +139,7 @@ history API と viewer の History 表示は、SQLite 永続化が有効なと�
 - [examples/discord_webhook_output.py](../examples/discord_webhook_output.py)
 - [examples/latest_postgres.py](../examples/latest_postgres.py)
 - [examples/peer_monitoring.py](../examples/peer_monitoring.py)
+- [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)
 
 開発用 SQLite demo:
 

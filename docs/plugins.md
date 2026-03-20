@@ -178,6 +178,25 @@ class Value1Threshold(kanary.ThresholdRule):
 `RangeRule` と `ThresholdRule` の `hysteresis` は組み込み helper class のための簡潔な実装です。  
 low 側と high 側で別の戻り幅が欲しい場合や、もっと特殊な解除条件が欲しい場合は、custom rule として実装します。
 
+#### RemoteKanarySource
+
+- 他の KANARY の `/alerts` を読みます
+- 各 remote alert を measurement として返します
+- `ack`, `unack`, `silence`, `unsilence` を remote API に転送する helper も持ちます
+- 通常は `base_url` と `interval` を設定して使います
+
+#### RemoteAlarm
+
+- `remote_alarm_id` で 1 個の remote alert を local rule に mirror します
+- remote の state と severity を local alert に写します
+- `propagate_ack`, `propagate_silence` を `True` にすると、local operator action を remote に転送できます
+
+#### import_remote_alarms
+
+- 複数の `RemoteAlarm` rule をまとめて生成する factory です
+- `prefix`, `suffix`, `add_tags`, `include_rule_ids`, `exclude_rule_ids`, `include_tags`, `exclude_tags` を使えます
+- factory が生成した rule も、それぞれ独立した rule として扱われます
+
 ## 状態と依存関係
 
 rule 間関係:

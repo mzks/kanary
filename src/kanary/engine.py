@@ -172,6 +172,8 @@ class Engine:
 
     def acknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
         with self._lock:
+            rule = self.rules[rule_id]
+            self._propagate_remote_ack(rule, operator=operator, reason=reason)
             now = self._now_fn()
             alert = self.alerts[rule_id]
             previous_state = alert.state
@@ -196,15 +198,18 @@ class Engine:
                     alert=alert,
                     occurred_at=now,
                 ),
-                definition_file=getattr(self.rules[rule_id].__class__, "__kanary_definition_file__", None),
-                matched_outputs=list(getattr(self.rules[rule_id], "matched_outputs", [])),
+                definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
+                matched_outputs=list(getattr(rule, "matched_outputs", [])),
             )
             return alert
 
     def unacknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
         with self._lock:
-            if rule_id not in self.acknowledgements:
+            alert = self.alerts.get(rule_id)
+            rule = self.rules[rule_id]
+            if rule_id not in self.acknowledgements and (alert is None or alert.state != AlertState.ACKED):
                 raise ValueError(f"rule '{rule_id}' is not acknowledged")
+            self._propagate_remote_unack(rule, operator=operator, reason=reason)
             now = self._now_fn()
             alert = self.alerts[rule_id]
             previous_state = alert.state
@@ -229,8 +234,8 @@ class Engine:
                         alert=alert,
                         occurred_at=now,
                     ),
-                    definition_file=getattr(self.rules[rule_id].__class__, "__kanary_definition_file__", None),
-                    matched_outputs=list(getattr(self.rules[rule_id], "matched_outputs", [])),
+                    definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
+                    matched_outputs=list(getattr(rule, "matched_outputs", [])),
                 )
             return alert
 
@@ -258,6 +263,14 @@ class Engine:
                 end_at=end_at,
                 rule_patterns=tuple(rule_patterns or []),
                 tags=tuple(tags or []),
+                remote_silence_refs=self._propagate_remote_silence(
+                    operator=operator,
+                    reason=reason,
+                    start_at=start_at,
+                    end_at=end_at,
+                    rule_patterns=tuple(rule_patterns or []),
+                    tags=tuple(tags or []),
+                ),
             )
             self.silences[silence.silence_id] = silence
             self.store.create_silence(silence)
@@ -266,6 +279,11 @@ class Engine:
     def cancel_silence(self, silence_id: str, *, operator: str, reason: str | None = None) -> Silence:
         with self._lock:
             silence = self.silences[silence_id]
+            self._cancel_remote_silence_refs(
+                silence.remote_silence_refs,
+                operator=operator,
+                reason=reason,
+            )
             silence.cancelled_at = self._now_fn()
             silence.cancelled_by = operator
             silence.cancel_reason = reason
@@ -583,6 +601,21 @@ class Engine:
             if self._silence_matches_rule(silence, rule, now)
         ]
 
+    def _matching_rules_for_targets(
+        self,
+        *,
+        rule_patterns: tuple[str, ...],
+        tags: tuple[str, ...],
+    ) -> list[Rule]:
+        matched: list[Rule] = []
+        tag_set = set(tags)
+        for rule in self.rules.values():
+            matches_rule = any(fnmatch(rule.rule_id, pattern) for pattern in rule_patterns)
+            matches_tag = bool(set(rule.tags).intersection(tag_set))
+            if matches_rule or matches_tag:
+                matched.append(rule)
+        return matched
+
     def _silence_matches_rule(self, silence: Silence, rule: Rule, now: datetime) -> bool:
         if silence.cancelled_at is not None:
             return False
@@ -622,6 +655,62 @@ class Engine:
 
     def _is_rule_excluded(self, rule_id: str) -> bool:
         return any(fnmatch(rule_id, pattern) for pattern in self._exclude_rule_patterns)
+
+    def _propagate_remote_ack(self, rule: Rule, *, operator: str, reason: str | None) -> None:
+        acknowledge_remote = getattr(rule, "acknowledge_remote", None)
+        if callable(acknowledge_remote):
+            acknowledge_remote(self, operator=operator, reason=reason)
+
+    def _propagate_remote_unack(self, rule: Rule, *, operator: str, reason: str | None) -> None:
+        unacknowledge_remote = getattr(rule, "unacknowledge_remote", None)
+        if callable(unacknowledge_remote):
+            unacknowledge_remote(self, operator=operator, reason=reason)
+
+    def _propagate_remote_silence(
+        self,
+        *,
+        operator: str,
+        reason: str | None,
+        start_at: datetime,
+        end_at: datetime,
+        rule_patterns: tuple[str, ...],
+        tags: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        remote_refs: list[str] = []
+        seen_rule_ids: set[str] = set()
+        for rule in self._matching_rules_for_targets(rule_patterns=rule_patterns, tags=tags):
+            if rule.rule_id in seen_rule_ids:
+                continue
+            seen_rule_ids.add(rule.rule_id)
+            create_remote_silence = getattr(rule, "create_remote_silence", None)
+            if not callable(create_remote_silence):
+                continue
+            remote_silence_id = create_remote_silence(
+                self,
+                operator=operator,
+                reason=reason,
+                start_at=start_at.isoformat(),
+                end_at=end_at.isoformat(),
+            )
+            if remote_silence_id:
+                remote_refs.append(f"{rule.source}:{remote_silence_id}")
+        return tuple(remote_refs)
+
+    def _cancel_remote_silence_refs(
+        self,
+        remote_silence_refs: tuple[str, ...],
+        *,
+        operator: str,
+        reason: str | None,
+    ) -> None:
+        for ref in remote_silence_refs:
+            source_id, _, remote_silence_id = ref.partition(":")
+            if not source_id or not remote_silence_id:
+                continue
+            source = self.sources.get(source_id)
+            cancel_remote_silence = getattr(source, "cancel_remote_silence", None)
+            if callable(cancel_remote_silence):
+                cancel_remote_silence(remote_silence_id, operator=operator, reason=reason)
 
     def _initialize_output(self, output_id: str, output: Output) -> None:
         status = self._plugin_status("output", output_id)

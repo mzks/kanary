@@ -49,6 +49,7 @@ class Silence:
     end_at: datetime
     rule_patterns: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
+    remote_silence_refs: tuple[str, ...] = ()
     cancelled_at: datetime | None = None
     cancelled_by: str | None = None
     cancel_reason: str | None = None

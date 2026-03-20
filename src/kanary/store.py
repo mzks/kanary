@@ -129,6 +129,7 @@ class SQLiteStore:
                     end_at TEXT NOT NULL,
                     rule_patterns_json TEXT NOT NULL DEFAULT '[]',
                     tags_json TEXT NOT NULL DEFAULT '[]',
+                    remote_silence_refs_json TEXT NOT NULL DEFAULT '[]',
                     cancelled_at TEXT,
                     cancelled_by TEXT,
                     cancel_reason TEXT
@@ -141,6 +142,12 @@ class SQLiteStore:
                     ON silences (cancelled_at);
                 """
             )
+            try:
+                conn.execute(
+                    "ALTER TABLE silences ADD COLUMN remote_silence_refs_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
             self._conn = conn
 
@@ -202,6 +209,7 @@ class SQLiteStore:
                     end_at=_parse_datetime(row["end_at"]),
                     rule_patterns=tuple(json.loads(row["rule_patterns_json"])),
                     tags=tuple(json.loads(row["tags_json"])),
+                    remote_silence_refs=tuple(json.loads(row["remote_silence_refs_json"])),
                     cancelled_at=_parse_datetime(row["cancelled_at"]) if row["cancelled_at"] else None,
                     cancelled_by=row["cancelled_by"],
                     cancel_reason=row["cancel_reason"],
@@ -287,10 +295,11 @@ class SQLiteStore:
                     end_at,
                     rule_patterns_json,
                     tags_json,
+                    remote_silence_refs_json,
                     cancelled_at,
                     cancelled_by,
                     cancel_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     silence.silence_id,
@@ -301,6 +310,7 @@ class SQLiteStore:
                     silence.end_at.isoformat(),
                     json.dumps(list(silence.rule_patterns), ensure_ascii=False),
                     json.dumps(list(silence.tags), ensure_ascii=False),
+                    json.dumps(list(silence.remote_silence_refs), ensure_ascii=False),
                     silence.cancelled_at.isoformat() if silence.cancelled_at else None,
                     silence.cancelled_by,
                     silence.cancel_reason,
@@ -318,6 +328,7 @@ class SQLiteStore:
                 "end_at": silence.end_at.isoformat(),
                 "rule_patterns": list(silence.rule_patterns),
                 "tags": list(silence.tags),
+                "remote_silence_refs": list(silence.remote_silence_refs),
             },
             created_at=silence.created_at,
         )

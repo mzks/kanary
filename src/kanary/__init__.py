@@ -5,6 +5,7 @@ from .engine import Engine
 from .loader import RuleDirectoryLoader
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
 from .output import Output
+from .remote import RemoteAlarm, RemoteKanarySource, import_remote_alarms
 from .registry import (
     clear_registries,
     get_output_registry,
@@ -58,6 +59,8 @@ __all__ = [
     "NullStore",
     "RangeRule",
     "RateRule",
+    "RemoteAlarm",
+    "RemoteKanarySource",
     "RESOLVED",
     "RuleDirectoryLoader",
     "Rule",
@@ -86,6 +89,7 @@ __all__ = [
     "register_source",
     "rule",
     "source",
+    "import_remote_alarms",
     "severity_label",
     "get_by_path",
 ]

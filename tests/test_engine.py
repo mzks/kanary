@@ -184,6 +184,24 @@ class TemperatureCustomThreshold:
         )
 
 
+@kanary.source(source_id="remote-api", interval=60.0)
+class RemoteAPISource(kanary.RemoteKanarySource):
+    url = "http://127.0.0.1:1"
+
+
+@kanary.rule(
+    rule_id="mirror.postgres.temperature.stale",
+    source="remote-api",
+    severity=kanary.ERROR,
+    tags=["remote", "mirror"],
+    owner="expert_remote",
+)
+class MirroredTemperatureStale(kanary.RemoteAlarm):
+    remote_alarm_id = "postgres.temperature.stale"
+    propagate_ack = True
+    propagate_silence = True
+
+
 @kanary.rule(
     rule_id="postgres.temperature_humidity.balance",
     source="postgres",
@@ -1071,6 +1089,32 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("alert_states", payload)
         self.assertIn("failed_plugins", payload["counts"])
 
+    def test_alerts_endpoint_includes_tags_and_owner(self) -> None:
+        engine = kanary.Engine(output_registry={})
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            source = engine.sources["postgres"]
+            now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+            engine.evaluate_source(source.source_id, source.poll({}), now=now)
+            port = api._server.server_address[1]
+            payload = fetch_json(f"http://127.0.0.1:{port}/alerts")
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+
+        alert_row = next(row for row in payload["alerts"] if row["rule_id"] == "postgres.temperature.stale")
+        self.assertEqual(alert_row["owner"], "expert_db")
+        self.assertEqual(alert_row["tags"], ["infra", "postgres"])
+
     def test_plugin_source_endpoint_returns_class_source(self) -> None:
         engine = kanary.Engine(output_registry={})
         engine.start()
@@ -1181,6 +1225,169 @@ class ControlAPITest(unittest.TestCase):
 
         self.assertIn("silence_id", silence_payload)
         self.assertIn("silence target uses a very broad wildcard pattern", silence_payload["warnings"])
+
+    def test_remote_source_and_rule_can_mirror_alerts(self) -> None:
+        remote_engine = kanary.Engine(output_registry={})
+        remote_engine.start()
+        remote_api = kanary.ControlAPI(
+            engine_getter=lambda: remote_engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        remote_thread = threading.Thread(target=remote_api.start, daemon=True)
+        remote_thread.start()
+        local_engine = None
+        try:
+            remote_source = remote_engine.sources["postgres"]
+            now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+            remote_engine.evaluate_source(remote_source.source_id, remote_source.poll({}), now=now)
+            RemoteAPISource.url = f"http://127.0.0.1:{remote_api._server.server_address[1]}"
+            local_engine = kanary.Engine(
+                now_fn=lambda: now,
+                source_registry={"remote-api": RemoteAPISource},
+                rule_registry={"mirror.postgres.temperature.stale": MirroredTemperatureStale},
+                output_registry={},
+            )
+            local_engine.start()
+            local_source = local_engine.sources["remote-api"]
+            alerts = local_engine.evaluate_source(
+                local_source.source_id,
+                local_source.poll({"engine": local_engine}),
+                now=now,
+            )
+        finally:
+            remote_api.shutdown()
+            remote_thread.join(timeout=2.0)
+            remote_engine.shutdown()
+            if local_engine is not None:
+                local_engine.shutdown()
+
+        mirrored = alerts["mirror.postgres.temperature.stale"]
+        self.assertEqual(mirrored.state, kanary.AlertState.FIRING)
+        self.assertEqual(mirrored.severity, kanary.ERROR)
+        self.assertIn("remote_alarm", mirrored.payload)
+
+    def test_remote_alarm_can_propagate_ack_and_silence(self) -> None:
+        remote_engine = kanary.Engine(output_registry={})
+        remote_engine.start()
+        remote_api = kanary.ControlAPI(
+            engine_getter=lambda: remote_engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        remote_thread = threading.Thread(target=remote_api.start, daemon=True)
+        remote_thread.start()
+        local_engine = None
+        try:
+            remote_source = remote_engine.sources["postgres"]
+            now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+            remote_engine.evaluate_source(remote_source.source_id, remote_source.poll({}), now=now)
+            RemoteAPISource.url = f"http://127.0.0.1:{remote_api._server.server_address[1]}"
+            local_engine = kanary.Engine(
+                now_fn=lambda: now,
+                source_registry={"remote-api": RemoteAPISource},
+                rule_registry={"mirror.postgres.temperature.stale": MirroredTemperatureStale},
+                output_registry={},
+            )
+            local_engine.start()
+            local_source = local_engine.sources["remote-api"]
+            local_engine.evaluate_source(
+                local_source.source_id,
+                local_source.poll({"engine": local_engine}),
+                now=now,
+            )
+
+            local_engine.acknowledge(
+                "mirror.postgres.temperature.stale",
+                operator="operator_name",
+                reason="checking",
+            )
+            self.assertEqual(
+                remote_engine.alerts["postgres.temperature.stale"].state,
+                kanary.AlertState.ACKED,
+            )
+
+            silence = local_engine.create_silence(
+                operator="operator_name",
+                reason="maintenance",
+                start_at=now,
+                end_at=now + timedelta(minutes=10),
+                rule_patterns=["mirror.postgres.temperature.stale"],
+            )
+            self.assertEqual(len(remote_engine.list_silences()), 1)
+            self.assertEqual(len(silence.remote_silence_refs), 1)
+
+            local_engine.cancel_silence(
+                silence.silence_id,
+                operator="operator_name",
+                reason="done",
+            )
+            remote_silence = remote_engine.list_silences()[0]
+            self.assertIsNotNone(remote_silence.cancelled_at)
+        finally:
+            remote_api.shutdown()
+            remote_thread.join(timeout=2.0)
+            remote_engine.shutdown()
+            if local_engine is not None:
+                local_engine.shutdown()
+
+    def test_remote_alarm_can_unack_remote_acknowledgement(self) -> None:
+        remote_engine = kanary.Engine(output_registry={})
+        remote_engine.start()
+        remote_api = kanary.ControlAPI(
+            engine_getter=lambda: remote_engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        remote_thread = threading.Thread(target=remote_api.start, daemon=True)
+        remote_thread.start()
+        local_engine = None
+        try:
+            remote_source = remote_engine.sources["postgres"]
+            now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+            remote_engine.evaluate_source(remote_source.source_id, remote_source.poll({}), now=now)
+            remote_engine.acknowledge(
+                "postgres.temperature.stale",
+                operator="operator_name",
+                reason="remote ack",
+            )
+            RemoteAPISource.url = f"http://127.0.0.1:{remote_api._server.server_address[1]}"
+            local_engine = kanary.Engine(
+                now_fn=lambda: now,
+                source_registry={"remote-api": RemoteAPISource},
+                rule_registry={"mirror.postgres.temperature.stale": MirroredTemperatureStale},
+                output_registry={},
+            )
+            local_engine.start()
+            local_source = local_engine.sources["remote-api"]
+            local_engine.evaluate_source(
+                local_source.source_id,
+                local_source.poll({"engine": local_engine}),
+                now=now,
+            )
+            self.assertEqual(
+                local_engine.alerts["mirror.postgres.temperature.stale"].state,
+                kanary.AlertState.ACKED,
+            )
+
+            local_engine.unacknowledge(
+                "mirror.postgres.temperature.stale",
+                operator="operator_name",
+                reason="re-open",
+            )
+            self.assertEqual(
+                remote_engine.alerts["postgres.temperature.stale"].state,
+                kanary.AlertState.FIRING,
+            )
+        finally:
+            remote_api.shutdown()
+            remote_thread.join(timeout=2.0)
+            remote_engine.shutdown()
+            if local_engine is not None:
+                local_engine.shutdown()
 
 
 class SQLiteStoreTest(unittest.TestCase):
@@ -1397,6 +1604,44 @@ class OutputTest(unittest.TestCase):
             engine.shutdown()
 
 
+class RemoteAlarmFactoryTest(unittest.TestCase):
+    def test_factory_can_generate_prefixed_remote_alarm_rules(self) -> None:
+        remote_engine = kanary.Engine(output_registry={})
+        remote_engine.start()
+        remote_api = kanary.ControlAPI(
+            engine_getter=lambda: remote_engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        remote_thread = threading.Thread(target=remote_api.start, daemon=True)
+        remote_thread.start()
+        try:
+            source = remote_engine.sources["postgres"]
+            now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+            remote_engine.evaluate_source(source.source_id, source.poll({}), now=now)
+            RemoteAPISource.url = f"http://127.0.0.1:{remote_api._server.server_address[1]}"
+            generated = kanary.import_remote_alarms(
+                source="remote-api",
+                prefix="imported",
+                add_tags=["remote"],
+                include_rule_ids=["postgres.temperature.*"],
+                exclude_rule_ids=["*.rate"],
+            )
+        finally:
+            remote_api.shutdown()
+            remote_thread.join(timeout=2.0)
+            remote_engine.shutdown()
+
+        generated_ids = {cls.rule_id for cls in generated}
+        self.assertIn("imported.postgres.temperature.stale", generated_ids)
+        self.assertIn("imported.postgres.temperature.range", generated_ids)
+        self.assertNotIn("imported.postgres.temperature.rate", generated_ids)
+        generated_rule = next(cls for cls in generated if cls.rule_id == "imported.postgres.temperature.stale")
+        self.assertIn("remote", generated_rule.tags)
+        self.assertIn("postgres", generated_rule.tags)
+
+
 class ControlAPITest(unittest.TestCase):
     def setUp(self) -> None:
         self.now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
@@ -1437,7 +1682,7 @@ class ControlAPITest(unittest.TestCase):
     def test_plugins_endpoint_returns_output_status(self) -> None:
         with urlopen("http://127.0.0.1:18080/plugins") as response:
             body = json.loads(response.read().decode())
-        self.assertEqual(len(body["plugins"]), 10)
+        self.assertEqual(len(body["plugins"]), len(self.engine.plugin_states))
         self.assertIn("source", {plugin["type"] for plugin in body["plugins"]})
         self.assertIn("rule", {plugin["type"] for plugin in body["plugins"]})
         plugin_ids = {plugin["plugin_id"] for plugin in body["plugins"]}
