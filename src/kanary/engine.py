@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 import logging
+import socket
 from uuid import uuid4
 import threading
 from typing import Callable
@@ -27,12 +28,14 @@ class Engine:
         exclude_rule_patterns: list[str] | None = None,
         now_fn: Callable[[], datetime] | None = None,
         store: object | None = None,
+        node_id: str | None = None,
     ) -> None:
         self._source_registry = source_registry or get_source_registry()
         self._rule_registry = rule_registry or get_rule_registry()
         self._output_registry = output_registry or get_output_registry()
         self._exclude_rule_patterns = exclude_rule_patterns or []
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self.node_id = node_id or socket.gethostname()
         self.started_at = self._now_fn()
         self.last_reload_at: datetime | None = None
         self.store = store or NullStore()
@@ -350,6 +353,7 @@ class Engine:
             latest_activity_at = max(latest_activity_candidates) if latest_activity_candidates else None
             return {
                 "status": "ok",
+                "node_id": self.node_id,
                 "generated_at": now,
                 "started_at": self.started_at,
                 "uptime_seconds": (now - self.started_at).total_seconds(),

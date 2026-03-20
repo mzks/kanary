@@ -123,25 +123,27 @@ class ControlAPI:
                     alerts = []
                     for alert in engine.alerts.values():
                         rule = engine.rules.get(alert.rule_id)
-                        alerts.append(
-                            {
-                                "rule_id": alert.rule_id,
-                                "state": alert.state.value,
-                                "severity": int(alert.severity),
-                                "owner": alert.owner,
-                                "tags": list(alert.tags),
-                                "message": alert.message,
-                                "payload": alert.payload,
-                                "last_evaluated_at": alert.last_evaluated_at,
-                                "matched_outputs": list(getattr(rule, "matched_outputs", [])) if rule is not None else [],
-                                "definition_file": getattr(rule.__class__, "__kanary_definition_file__", None) if rule is not None else None,
-                                "acked_at": alert.acked_at,
-                                "acked_by": alert.acked_by,
-                                "ack_reason": alert.ack_reason,
-                                "active_silence_ids": list(alert.active_silence_ids),
-                            }
-                        )
+                        alerts.append(_viewer_alert_payload(engine, alert, rule))
                     self._write_json(HTTPStatus.OK, {"alerts": alerts})
+                    return
+
+                if request_path == "/export-alerts":
+                    engine = engine_getter()
+                    if engine is None:
+                        self._write_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"status": "starting"},
+                        )
+                        return
+
+                    alerts = []
+                    for alert in engine.alerts.values():
+                        rule = engine.rules.get(alert.rule_id)
+                        alerts.append(_export_alert_payload(engine, alert, rule))
+                    self._write_json(
+                        HTTPStatus.OK,
+                        {"node_id": engine.node_id, "alerts": alerts},
+                    )
                     return
 
                 if request_path.startswith("/history/"):
@@ -414,6 +416,49 @@ def _resolve_plugin(engine: Engine, plugin_type: str, plugin_id: str) -> object 
     if plugin_type == "output":
         return engine.outputs.get(plugin_id)
     return None
+
+
+def _viewer_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
+    payload = _export_alert_payload(engine, alert, rule)
+    payload["acked_by"] = alert.acked_by
+    payload["acked_at"] = alert.acked_at
+    payload["active_silence_ids"] = list(alert.active_silence_ids)
+    payload["matched_outputs"] = list(getattr(rule, "matched_outputs", [])) if rule else []
+    return payload
+
+
+def _export_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
+    payload = alert.payload if isinstance(alert.payload, dict) else {}
+    remote_alarm = payload.get("remote_alarm") if isinstance(payload, dict) else None
+    if isinstance(remote_alarm, dict):
+        origin_node_id = str(remote_alarm.get("origin_node_id") or remote_alarm.get("node_id") or engine.node_id)
+        origin_rule_id = str(remote_alarm.get("origin_rule_id") or remote_alarm.get("rule_id") or alert.rule_id)
+        mirror_path = [str(node_id) for node_id in list(remote_alarm.get("mirror_path") or [])]
+        if engine.node_id not in mirror_path:
+            mirror_path.append(engine.node_id)
+        is_mirrored = True
+    else:
+        origin_node_id = engine.node_id
+        origin_rule_id = alert.rule_id
+        mirror_path = [engine.node_id]
+        is_mirrored = False
+
+    return {
+        "node_id": engine.node_id,
+        "rule_id": alert.rule_id,
+        "state": alert.state.value,
+        "severity": alert.severity.value,
+        "owner": alert.owner,
+        "tags": list(alert.tags),
+        "message": alert.message,
+        "payload": alert.payload,
+        "last_evaluated_at": alert.last_evaluated_at,
+        "definition_file": getattr(rule.__class__, "__kanary_definition_file__", None) if rule is not None else None,
+        "origin_node_id": origin_node_id,
+        "origin_rule_id": origin_rule_id,
+        "mirror_path": mirror_path,
+        "is_mirrored": is_mirrored,
+    }
 
 
 def _plugin_source_payload(engine: Engine, plugin_type: str, plugin_id: str) -> dict[str, object]:

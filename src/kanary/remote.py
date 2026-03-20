@@ -17,7 +17,7 @@ class RemoteKanarySource(Source):
     base_url: str | None = None
     url: str | None = None
     timeout_seconds: float = 5.0
-    alerts_path: str = "/alerts"
+    alerts_path: str = "/export-alerts"
     ack_path_template: str = "/alerts/{rule_id}/ack"
     unack_path_template: str = "/alerts/{rule_id}/unack"
     silence_window_path: str = "/silences/window"
@@ -25,8 +25,12 @@ class RemoteKanarySource(Source):
 
     def poll(self, ctx: dict[str, Any]) -> SourceResult:
         alerts = self.fetch_remote_alerts()
+        local_node_id = getattr(ctx.get("engine"), "node_id", None)
         measurements: list[Measurement] = []
         for alert in alerts:
+            mirror_path = [str(node_id) for node_id in list(alert.get("mirror_path") or [])]
+            if local_node_id is not None and local_node_id in mirror_path:
+                continue
             timestamp = _parse_remote_datetime(alert.get("last_evaluated_at")) or ctx["engine"]._now_fn()
             state = str(alert.get("state", OK.value))
             measurements.append(

@@ -15,6 +15,7 @@
 - `GET /health`
 - `GET /peer-status`
 - `GET /alerts`
+- `GET /export-alerts`
 - `GET /history/{rule_id}`
 - `GET /silences`
 - `GET /plugins`
@@ -36,6 +37,8 @@
 - history は SQLite 永続化が有効なときだけ残ります
 - `/plugins/{type}/{plugin_id}/source` は loaded plugin に紐づく source code だけを返します
 - raw file path は受け取りません
+- `/export-alerts` は remote import 用の endpoint です
+- `/export-alerts` は `origin_node_id`, `origin_rule_id`, `mirror_path` を返します
 
 ## kanaryctl
 

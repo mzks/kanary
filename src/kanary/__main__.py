@@ -42,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("KANARY_SQLITE_PATH"),
         help="Optional SQLite database path for persisted history and runtime actions. Defaults to KANARY_SQLITE_PATH if set.",
     )
+    run_parser.add_argument(
+        "--node-id",
+        default=os.environ.get("KANARY_NODE_ID"),
+        help="Optional node identifier used for peer export/import. Defaults to KANARY_NODE_ID or the local hostname.",
+    )
 
     lint_parser = subparsers.add_parser("lint", help="Lint a KANARY rule directory")
     lint_parser.add_argument(
@@ -100,6 +105,7 @@ def main() -> int:
             log_level=args.log_level,
             api_port=args.api_port,
             state_db_path=Path(args.state_db) if args.state_db else None,
+            node_id=args.node_id,
         )
     )
     runtime.run_forever()

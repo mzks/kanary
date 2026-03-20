@@ -43,6 +43,8 @@ uv run python -m kanary ./rules --exclude 'sqlite.*.stale' --exclude 'discord'
   - `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
 - `--state-db`
   - SQLite 永続化先を指定します。
+- `--node-id`
+  - peer export/import に使う node identifier を指定します。未指定時は hostname を使います。
 - `--exclude`
   - `rule_id`, `source_id`, `output_id` の glob pattern で plugin を除外します。
 
@@ -52,6 +54,8 @@ uv run python -m kanary ./rules --exclude 'sqlite.*.stale' --exclude 'discord'
   - SQLite 永続化先
 - `KANARY_API_URL`
   - `kanaryctl` の接続先
+- `KANARY_NODE_ID`
+  - peer export/import に使う node identifier
 
 KANARY 本体の起動に必須の環境変数はありません。監視対象ごとの接続情報は、各 `Source` 実装側で定義します。
 

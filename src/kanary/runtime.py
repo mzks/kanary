@@ -29,6 +29,7 @@ class RuntimeConfig:
     exclude_plugins: list[str] | None = None
     log_level: str = DEFAULT_LOG_LEVEL
     state_db_path: Path | None = None
+    node_id: str | None = None
 
 
 class EngineRuntime:
@@ -58,6 +59,7 @@ class EngineRuntime:
             rule_registry=snapshot.rules,
             output_registry=snapshot.outputs,
             store=self.store,
+            node_id=self.config.node_id,
         )
         self.engine.start()
         logger.info("engine started with %d sources, %d rules, %d outputs", len(self.engine.sources), len(self.engine.rules), len(self.engine.outputs))
