@@ -424,6 +424,8 @@ def _viewer_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
     payload["acked_at"] = alert.acked_at
     payload["active_silence_ids"] = list(alert.active_silence_ids)
     payload["matched_outputs"] = list(getattr(rule, "matched_outputs", [])) if rule else []
+    payload["description"] = getattr(rule, "description", None) if rule else None
+    payload["runbook"] = getattr(rule, "runbook", None) if rule else None
     return payload
 
 

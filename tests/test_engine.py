@@ -337,6 +337,78 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(ctx.value("temperature", previous=True), 123)
         self.assertEqual(ctx.metadata("temperature"), {})
 
+    def test_rule_context_measurement_accessors_support_dotted_names(self) -> None:
+        source_state = kanary.SourceState(
+            source_id="postgres",
+            current=kanary.SourceSnapshot(
+                payload={
+                    "channels": {
+                        "kernel_machine_room.oxygen_concentration": {
+                            "value": 20.9,
+                            "timestamp": self.now,
+                            "metadata": {"source_name": "raw.channel"},
+                        }
+                    }
+                },
+                observed_at=self.now,
+            ),
+        )
+        ctx = kanary.RuleContext(
+            now=self.now,
+            source_id="postgres",
+            source_state=source_state,
+        )
+        self.assertEqual(ctx.value("kernel_machine_room.oxygen_concentration"), 20.9)
+        self.assertEqual(ctx.timestamp("kernel_machine_room.oxygen_concentration"), self.now)
+        self.assertEqual(
+            ctx.metadata("kernel_machine_room.oxygen_concentration"),
+            {"source_name": "raw.channel"},
+        )
+
+    def test_helper_rules_support_dotted_measurement_names(self) -> None:
+        source_state = kanary.SourceState(
+            source_id="postgres",
+            current=kanary.SourceSnapshot(
+                payload={
+                    "channels": {
+                        "kernel_machine_room.oxygen_concentration": {
+                            "value": 20.9,
+                            "timestamp": self.now,
+                            "metadata": {},
+                        }
+                    }
+                },
+                observed_at=self.now,
+            ),
+        )
+        ctx = kanary.RuleContext(
+            now=self.now,
+            source_id="postgres",
+            source_state=source_state,
+        )
+
+        class DottedStale(kanary.StaleRule):
+            rule_id = "test.dotted.stale"
+            source = "postgres"
+            severity = kanary.ERROR
+            tags = ["test"]
+            measurement = "kernel_machine_room.oxygen_concentration"
+            timeout = 60.0
+
+        class DottedRange(kanary.RangeRule):
+            rule_id = "test.dotted.range"
+            source = "postgres"
+            severity = kanary.WARN
+            tags = ["test"]
+            measurement = "kernel_machine_room.oxygen_concentration"
+            high = 21.0
+
+        stale_alert = DottedStale().evaluate(source_state.current.payload, ctx)
+        range_alert = DottedRange().evaluate(source_state.current.payload, ctx)
+
+        self.assertEqual(stale_alert.state, kanary.AlertState.OK)
+        self.assertEqual(range_alert.state, kanary.AlertState.OK)
+
     def test_engine_can_exclude_rules_by_glob(self) -> None:
         engine = kanary.Engine(
             now_fn=lambda: self.now,
@@ -689,7 +761,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
         self.assertEqual(report.errors, [])
         self.assertIn("rule 'example.rule' has no owner", report.warnings)
 
-    def test_inspect_rejects_rule_interval_shorter_than_source_interval(self) -> None:
+    def test_inspect_rejects_non_positive_stale_timeout(self) -> None:
         with TemporaryDirectory() as tmp:
             rule_file = Path(tmp) / "rules.py"
             rule_file.write_text(
@@ -709,11 +781,9 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         tags=["example"],
                         owner="expert",
                     )
-                    class ExampleRule:
-                        interval = 5.0
-
-                        def evaluate(self, payload, ctx):
-                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                    class ExampleRule(kanary.StaleRule):
+                        measurement = "value"
+                        timeout = 0.0
                     """
                 )
             )
@@ -721,11 +791,11 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
             _, report = loader.inspect()
 
         self.assertIn(
-            "rule 'example.rule' interval 5s is shorter than source 'example.source' interval 10s",
+            "rule 'example.rule' timeout must be a positive number",
             report.errors,
         )
 
-    def test_inspect_warns_when_rule_interval_is_not_multiple_of_source_interval(self) -> None:
+    def test_inspect_rejects_non_numeric_stale_timeout(self) -> None:
         with TemporaryDirectory() as tmp:
             rule_file = Path(tmp) / "rules.py"
             rule_file.write_text(
@@ -745,21 +815,18 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         tags=["example"],
                         owner="expert",
                     )
-                    class ExampleRule:
-                        interval = 12.0
-
-                        def evaluate(self, payload, ctx):
-                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                    class ExampleRule(kanary.StaleRule):
+                        measurement = "value"
+                        timeout = "slow"
                     """
                 )
             )
             loader = kanary.RuleDirectoryLoader(tmp)
             _, report = loader.inspect()
 
-        self.assertEqual(report.errors, [])
         self.assertIn(
-            "rule 'example.rule' interval 12s is not a multiple of source 'example.source' interval 5s",
-            report.warnings,
+            "rule 'example.rule' timeout must be a positive number",
+            report.errors,
         )
 
     def test_inspect_sets_matched_outputs_on_rule_classes(self) -> None:
@@ -1115,6 +1182,8 @@ class ControlAPITest(unittest.TestCase):
         alert_row = next(row for row in payload["alerts"] if row["rule_id"] == "postgres.temperature.stale")
         self.assertEqual(alert_row["owner"], "expert_db")
         self.assertEqual(alert_row["tags"], ["infra", "postgres"])
+        self.assertIn("description", alert_row)
+        self.assertIn("runbook", alert_row)
 
     def test_export_alerts_endpoint_includes_origin_metadata(self) -> None:
         engine = kanary.Engine(output_registry={}, node_id="node-a")

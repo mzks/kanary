@@ -36,7 +36,7 @@ uv run python -m kanary lint ./examples --exclude console
 - `owner` 未設定 warning
 - source 参照の整合
 - plugin ID 重複
-- `source.interval` と `rule.interval` の整合
+- `StaleRule.timeout` の妥当性
 - no matching output warning
 
 ## Reload

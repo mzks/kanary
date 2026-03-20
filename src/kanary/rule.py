@@ -31,7 +31,11 @@ class RuleContext:
 
     def measurement(self, name: str, *, previous: bool = False) -> dict[str, Any]:
         snapshot = self.previous if previous else self.current
-        measurement = get_by_path(snapshot, f"channels.{name}", default={})
+        channels = snapshot.get("channels", {})
+        if isinstance(channels, Mapping) and name in channels:
+            measurement = channels[name]
+        else:
+            measurement = get_by_path(snapshot, f"channels.{name}", default={})
         if isinstance(measurement, Mapping):
             return dict(measurement)
         return {}
@@ -73,7 +77,6 @@ class Rule:
     owner: str | None = None
     description: str | None = None
     runbook: str | None = None
-    interval: float = 60.0
     depends_on: list[str] = []
     suppressed_by: list[str] = []
 
@@ -115,7 +118,7 @@ class StaleRule(Rule):
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
         result_payload = dict(payload)
         timestamp_field = self._timestamp_field()
-        timestamp_value = get_by_path(payload, timestamp_field)
+        timestamp_value = self._current_timestamp_value(payload, ctx)
 
         if timestamp_value is None:
             return Evaluation(
@@ -152,6 +155,11 @@ class StaleRule(Rule):
     def _timestamp_field(self) -> str:
         return self.timestamp_field or self.measurement_timestamp_path() or "timestamp"
 
+    def _current_timestamp_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
+        if self.timestamp_field is None and self.measurement is not None:
+            return ctx.timestamp(self.measurement)
+        return get_by_path(payload, self._timestamp_field())
+
 
 class RangeRule(Rule):
     field: str | None = None
@@ -163,7 +171,7 @@ class RangeRule(Rule):
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
         field = self._field()
-        value = get_by_path(payload, field)
+        value = self._current_field_value(payload, ctx)
         result_payload = dict(payload)
 
         if value is None:
@@ -271,9 +279,16 @@ class RangeRule(Rule):
         return self.field or self.measurement_value_path() or "value"
 
     def _previous_field_value(self, ctx: RuleContext) -> Any:
+        if self.field is None and self.measurement is not None:
+            return ctx.value(self.measurement, previous=True)
         if ctx.previous_alert is None:
             return None
         return get_by_path(ctx.previous_alert.payload, self._field())
+
+    def _current_field_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
+        if self.field is None and self.measurement is not None:
+            return ctx.value(self.measurement)
+        return get_by_path(payload, self._field())
 
 
 class ThresholdRule(Rule):
@@ -284,7 +299,7 @@ class ThresholdRule(Rule):
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
         field = self._field()
-        value = get_by_path(payload, field)
+        value = self._current_field_value(payload, ctx)
         result_payload = dict(payload)
 
         if value is None:
@@ -328,6 +343,11 @@ class ThresholdRule(Rule):
 
     def _field(self) -> str:
         return self.field or self.measurement_value_path() or "value"
+
+    def _current_field_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
+        if self.field is None and self.measurement is not None:
+            return ctx.value(self.measurement)
+        return get_by_path(payload, self._field())
 
     def _match_threshold(self, value: float) -> Severity | None:
         if self.direction == "high":
@@ -391,10 +411,10 @@ class RateRule(RangeRule):
         previous_field = self._previous_field()
         previous_timestamp_field = self._previous_timestamp_field()
 
-        current_value = get_by_path(payload, field)
-        current_timestamp = get_by_path(payload, timestamp_field)
-        previous_value = get_by_path(ctx.previous, previous_field)
-        previous_timestamp = get_by_path(ctx.previous, previous_timestamp_field)
+        current_value = self._current_field_value(payload, ctx)
+        current_timestamp = self._current_timestamp_value(payload, ctx)
+        previous_value = self._previous_field_value(ctx)
+        previous_timestamp = self._previous_timestamp_value(ctx)
         result_payload = dict(payload)
 
         if current_value is None or current_timestamp is None:
@@ -468,6 +488,16 @@ class RateRule(RangeRule):
 
     def _previous_timestamp_field(self) -> str:
         return self.previous_timestamp_field or self._timestamp_field()
+
+    def _current_timestamp_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
+        if self.timestamp_field is None and self.measurement is not None:
+            return ctx.timestamp(self.measurement)
+        return get_by_path(payload, self._timestamp_field())
+
+    def _previous_timestamp_value(self, ctx: RuleContext) -> Any:
+        if self.previous_timestamp_field is None and self.timestamp_field is None and self.measurement is not None:
+            return ctx.timestamp(self.measurement, previous=True)
+        return get_by_path(ctx.previous, self._previous_timestamp_field())
 
     def _format_rate_message(self, rate: float, rate_per_second: float) -> str:
         if self.per_seconds == second:

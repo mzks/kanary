@@ -57,6 +57,14 @@ kanary.SourceResult(
 `severity` は必須です。default / fallback として使われます。  
 `kanary.Evaluation(severity=...)` を返せば、その評価だけ override できます。
 
+任意 metadata:
+
+- `owner`
+- `description`
+- `runbook`
+
+これらは alert API と Web viewer の detail 表示で参照できます。
+
 ### RuleContext
 
 高レベル accessor:
@@ -65,6 +73,9 @@ kanary.SourceResult(
 - `ctx.value(name)`
 - `ctx.timestamp(name)`
 - `ctx.metadata(name)`
+
+`name` には `.` を含められます。  
+helper rule も `measurement` を accessor 経由で読むので、measurement 名に `.` を含めても動作します。
 
 低レベル accessor:
 

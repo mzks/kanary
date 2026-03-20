@@ -87,7 +87,7 @@ def validate_registries(
         if severity is not None and not isinstance(severity, Severity):
             report.errors.append(f"rule '{rule_id}' severity must be one of kanary.INFO/WARN/ERROR/CRITICAL")
 
-        report.extend(_validate_rule_interval(rule_id, rule_cls, sources))
+        report.extend(_validate_rule_settings(rule_id, rule_cls))
 
         matched_outputs = _matching_outputs(rule_cls, outputs)
         rule_cls.matched_outputs = matched_outputs
@@ -163,35 +163,15 @@ def _validate_plugin_id_uniqueness(
     return report
 
 
-def _validate_rule_interval(
+def _validate_rule_settings(
     rule_id: str,
     rule_cls: type[Any],
-    sources: dict[str, type[Source]],
 ) -> ValidationReport:
     report = ValidationReport()
-    source_id = getattr(rule_cls, "source", None)
-    source_cls = sources.get(source_id)
-    if source_cls is None:
+    timeout = getattr(rule_cls, "timeout", None)
+    if timeout is not None and not isinstance(timeout, (int, float)):
+        report.errors.append(f"rule '{rule_id}' timeout must be a positive number")
         return report
-
-    source_interval = getattr(source_cls, "interval", None)
-    rule_interval = getattr(rule_cls, "interval", None)
-    if rule_interval is None:
-        return report
-    if not isinstance(rule_interval, (int, float)) or rule_interval <= 0:
-        report.errors.append(f"rule '{rule_id}' interval must be a positive number")
-        return report
-    if not isinstance(source_interval, (int, float)) or source_interval <= 0:
-        return report
-    if rule_interval < source_interval:
-        report.errors.append(
-            f"rule '{rule_id}' interval {rule_interval:g}s is shorter than source '{source_id}' interval {source_interval:g}s"
-        )
-        return report
-
-    remainder = rule_interval % source_interval
-    if remainder and abs(remainder) > 1e-9 and abs(remainder - source_interval) > 1e-9:
-        report.warnings.append(
-            f"rule '{rule_id}' interval {rule_interval:g}s is not a multiple of source '{source_id}' interval {source_interval:g}s"
-        )
+    if isinstance(timeout, (int, float)) and timeout <= 0:
+        report.errors.append(f"rule '{rule_id}' timeout must be a positive number")
     return report
