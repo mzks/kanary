@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Logging level for engine/runtime logs.",
     )
     run_parser.add_argument(
+        "--api-host",
+        default=os.environ.get("KANARY_API_HOST", "0.0.0.0"),
+        help="Host for the local control API and web viewer. Defaults to KANARY_API_HOST or 0.0.0.0.",
+    )
+    run_parser.add_argument(
         "--api-port",
         default=8000,
         type=int,
@@ -103,6 +108,7 @@ def main() -> int:
             rule_directories=[Path(path) for path in args.rule_directories],
             exclude_plugins=args.exclude,
             log_level=args.log_level,
+            api_host=args.api_host,
             api_port=args.api_port,
             state_db_path=Path(args.state_db) if args.state_db else None,
             node_id=args.node_id,

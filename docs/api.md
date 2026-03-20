@@ -5,10 +5,10 @@
 既定 bind:
 
 ```text
-127.0.0.1:8000
+0.0.0.0:8000
 ```
 
-起動時に `--api-port` を指定すると port を変更できます。
+起動時に `--api-host` と `--api-port` を指定すると bind address を変更できます。
 
 ### Read endpoints
 

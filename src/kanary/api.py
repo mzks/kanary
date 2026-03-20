@@ -19,7 +19,7 @@ class ControlAPI:
         *,
         engine_getter: Callable[[], Engine | None],
         reload_callback: Callable[[], bool],
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int = 8000,
     ) -> None:
         self._engine_getter = engine_getter

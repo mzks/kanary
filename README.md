@@ -1,6 +1,6 @@
 # KANARY
 
-KANARY は、KamLAND Slow Control および関連システムのための、ルールベースのアラーム・通知・信頼性監視システムです。  
+KANARY は、アラーム・通知・信頼性監視システムです。  
 監視対象から値を取得する `Source`、値を評価する `Rule`、状態変化を外部へ送る `Output` を、Python で記述して運用できます。
 
 ## KANARY の考え方
@@ -118,6 +118,12 @@ API / Web viewer の port を変更する場合:
 uv run python -m kanary ./demo --api-port 18000
 ```
 
+別マシンから API / Web viewer にアクセスする場合:
+
+```bash
+uv run python -m kanary ./demo --api-host 0.0.0.0 --api-port 18000
+```
+
 履歴を SQLite に保存する場合:
 
 ```bash
@@ -127,7 +133,7 @@ uv run python -m kanary ./demo --state-db ./var/kanary.db
 Web viewer は、既定では次の URL で利用できます。
 
 ```text
-http://127.0.0.1:8000/viewer
+http://<host>:8000/viewer
 ```
 
 起動引数の一覧は `uv run python -m kanary --help` で確認できます。  
@@ -142,6 +148,10 @@ KANARY 本体の実行に必須の環境変数はありません。
   - SQLite 永続化先を環境変数で指定したい場合に使います。
 - `KANARY_API_URL`
   - `kanaryctl` の接続先を変えたい場合に使います。
+- `KANARY_API_HOST`
+  - KANARY 本体の bind host を変えたい場合に使います。既定は `0.0.0.0` です。
+- `KANARY_NODE_ID`
+  - peer export/import に使う node identifier を指定したい場合に使います。未指定時は hostname を使います。
 
 監視対象ごとの接続情報は、各 `Source` 実装側で別途定義します。  
 たとえば PostgreSQL の例では `KANARY_POSTGRES_DSN` を使います。

@@ -23,7 +23,7 @@ LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 class RuntimeConfig:
     rule_directories: list[Path]
     reload_interval: float = 1.0
-    api_host: str = "127.0.0.1"
+    api_host: str = "0.0.0.0"
     api_port: int = 8000
     print_alerts: bool = False
     exclude_plugins: list[str] | None = None
