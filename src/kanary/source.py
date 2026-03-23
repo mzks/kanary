@@ -3,11 +3,13 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .models import Measurement, SourceResult
+from .schedule import CronSchedule, parse_schedule
 
 
 class Source:
     source_id: str
-    interval: float = 60.0
+    interval: float | None = None
+    schedule: str | None = None
 
     def init(self, ctx: dict[str, Any]) -> None:
         return None
@@ -104,7 +106,6 @@ class BufferedSource(Source):
 
 
 def prepare_source_class(cls: type[Any]) -> type[Any]:
-    _setdefault(cls, "interval", 60.0)
     if "init" not in cls.__dict__ and getattr(cls, "init", None) in {None, Source.init}:
         cls.init = Source.init
     if "terminate" not in cls.__dict__ and getattr(cls, "terminate", None) in {None, Source.terminate}:
@@ -115,6 +116,25 @@ def prepare_source_class(cls: type[Any]) -> type[Any]:
         raise ValueError(f"source '{cls.__name__}' must define non-empty string source_id")
     if not callable(getattr(cls, "poll", None)):
         raise ValueError(f"source '{source_id}' must implement poll(ctx)")
+
+    interval = getattr(cls, "interval", None)
+    schedule = getattr(cls, "schedule", None)
+    if interval is None and schedule is None:
+        interval = 60.0
+        cls.interval = interval
+    if interval is not None and schedule is not None:
+        raise ValueError(f"source '{source_id}' must not define both interval and schedule")
+    if interval is not None:
+        if not isinstance(interval, (int, float)) or interval <= 0:
+            raise ValueError(f"source '{source_id}' interval must be a positive number")
+        cls._kanary_compiled_schedule = None
+    else:
+        if not isinstance(schedule, str) or not schedule.strip():
+            raise ValueError(f"source '{source_id}' schedule must be a non-empty cron-like string")
+        try:
+            cls._kanary_compiled_schedule = parse_schedule(schedule)
+        except ValueError as exc:
+            raise ValueError(f"source '{source_id}' schedule is invalid: {exc}") from exc
     return cls
 
 
@@ -122,3 +142,7 @@ def _setdefault(cls: type[Any], attr_name: str, value: Any) -> None:
     if hasattr(cls, attr_name):
         return
     setattr(cls, attr_name, value)
+
+
+def compiled_schedule(source: Source) -> CronSchedule | None:
+    return getattr(source.__class__, "_kanary_compiled_schedule", None)

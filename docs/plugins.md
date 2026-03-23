@@ -14,10 +14,23 @@ Required:
 Optional:
 
 - `interval`
+- `schedule`
 - `init(ctx)`
 - `terminate(ctx)`
 
-`interval` is optional. If you do not specify it, the default is `60.0` seconds.
+If you omit both `interval` and `schedule`, Kanary uses `interval = 60.0`.
+If you use `schedule`, do not set `interval` at the same time.
+
+`interval` is a polling interval in seconds.
+`schedule` is a Unix cron-compatible 5-field string interpreted in the local time
+of the Kanary server. A small set of macros is also supported, such as
+`@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly`.
+
+Examples:
+
+- `interval = 60.0`
+- `schedule = "*/5 * * * *"`
+- `schedule = "@hourly"`
 
 Example:
 

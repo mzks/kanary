@@ -14,10 +14,24 @@
 任意:
 
 - `interval`
+- `schedule`
 - `init(ctx)`
 - `terminate(ctx)`
 
-`interval` は任意で、既定値は `60.0` 秒です。
+`interval` と `schedule` を両方省略した場合は、Kanary は
+`interval = 60.0` を使います。  
+`schedule` を使う場合は `interval` を同時に指定しないでください。
+
+`interval` は秒単位の polling 間隔です。  
+`schedule` は Unix cron 互換の 5-field 文字列で、Kanary server の local time
+で解釈されます。`@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` のような
+少数の macro も使えます。
+
+例:
+
+- `interval = 60.0`
+- `schedule = "*/5 * * * *"`
+- `schedule = "@hourly"`
 
 例:
 
