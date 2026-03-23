@@ -12,13 +12,35 @@ You define three kinds of plugins in Python:
 
 This separation keeps collection, evaluation, and notification independent, so monitoring definitions stay manageable as the system grows.
 
+## Installation
+
+The normal installation method is PyPI:
+
+```bash
+pip install kanary
+```
+
+If you use `uv`, this also works:
+
+```bash
+uv tool install kanary
+```
+
+Installing from a source checkout is still supported, but it should be treated as a development workflow:
+
+```bash
+git clone https://github.com/mzks/kanary
+cd kanary
+uv sync
+uv run python -m kanary ./demo
+```
+
 ## What To Do First
 
 Start by running the smallest example from `demo/`.
 
 ```bash
-uv sync
-uv run python -m kanary ./demo
+kanary ./demo
 ```
 
 Then move in this order:
@@ -105,25 +127,25 @@ If you want shorter definitions later, you can switch to built-in helper classes
 Basic run:
 
 ```bash
-uv run python -m kanary ./demo
+kanary ./demo
 ```
 
 Change the API and Web viewer port:
 
 ```bash
-uv run python -m kanary ./demo --api-port 18000
+kanary ./demo --api-port 8000
 ```
 
 Expose the API and Web viewer on the LAN:
 
 ```bash
-uv run python -m kanary ./demo --api-host 0.0.0.0 --api-port 18000
+kanary ./demo --api-host 0.0.0.0 --api-port 8000
 ```
 
 Persist history in SQLite:
 
 ```bash
-uv run python -m kanary ./demo --state-db ./var/kanary.db
+kanary ./demo --state-db ./var/kanary.db
 ```
 
 The Web viewer is available at:
@@ -135,7 +157,7 @@ http://<host>:8000/viewer
 See all CLI options with:
 
 ```bash
-uv run python -m kanary --help
+kanary --help
 kanaryctl help
 ```
 

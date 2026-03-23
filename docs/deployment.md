@@ -1,59 +1,36 @@
 # Deployment
 
-## Current Status
+## Standard Installation
 
-Kanary already has package metadata and installable CLI entry points, but it is not published on PyPI yet.
-
-This means:
-
-- `pip install kanary` does not work yet
-- local installation from a checkout does work
-- the recommended deployment method for now is `git clone + uv sync`
-
-Kanary currently requires Python `3.13` or newer.
-
-## Recommended Temporary Installation
-
-Clone the repository on the target machine and create a local environment:
+The normal installation method is PyPI:
 
 ```bash
-git clone <your-kanary-repo-url>
+pip install kanary
+```
+
+If you prefer `uv`:
+
+```bash
+uv tool install kanary
+```
+
+After installation, these commands should be available:
+
+- `kanary`
+- `kanaryctl`
+
+## Development Installation
+
+Installing from a source checkout is still supported, but it should be treated as a development workflow:
+
+```bash
+git clone https://github.com/mzks/kanary
 cd kanary
 uv sync
+uv run python -m kanary ./demo
 ```
 
-After `uv sync`, the project virtual environment contains:
-
-- `.venv/bin/kanary`
-- `.venv/bin/kanaryctl`
-
-Check the available CLI options with:
-
-```bash
-.venv/bin/kanary --help
-.venv/bin/kanaryctl help
-```
-
-You can also run them through `uv run`:
-
-```bash
-uv run kanary --help
-uv run kanaryctl help
-```
-
-## Local pip Installation
-
-If the target machine already has Python `3.13+`, you can install from a checkout:
-
-```bash
-python3.13 -m pip install --no-build-isolation .
-```
-
-Editable install:
-
-```bash
-python3.13 -m pip install --no-build-isolation -e .
-```
+Kanary currently requires Python `3.13` or newer.
 
 ## Recommended Layout
 
@@ -86,7 +63,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/kanary
 EnvironmentFile=/etc/kanary/kanary.env
-ExecStart=/opt/kanary/.venv/bin/kanary run /etc/kanary/rules --state-db /var/lib/kanary/kanary.db
+ExecStart=/usr/local/bin/kanary /etc/kanary/rules --state-db /var/lib/kanary/kanary.db --api-port 8000
 Restart=always
 RestartSec=3
 
@@ -94,7 +71,7 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-Adjust paths if your installation layout is different.
+Adjust `ExecStart` if your installation path is different.
 
 ## Runtime Options
 
@@ -103,7 +80,7 @@ Common runtime options:
 - `--api-host`
   Bind host for the local API and Web viewer. Default: `0.0.0.0`
 - `--api-port`
-  API and Web viewer port.
+  API and Web viewer port. Examples in the documentation use `8000`.
 - `--state-db`
   SQLite path for persisted history.
 - `--log-level`
@@ -122,9 +99,14 @@ Source-specific connection settings such as PostgreSQL DSNs or Discord webhooks 
 
 One simple deployment model is:
 
-1. Update the checked-out `kanary` repository.
+1. Upgrade the installed package.
+2. Keep monitoring definitions in `/etc/kanary/rules/` under separate version control.
+3. Restart the `kanary` service after package upgrades.
+
+If you use the source checkout workflow instead, the equivalent is:
+
+1. Update the checked-out repository.
 2. Run `uv sync` again.
-3. Keep monitoring definitions in `/etc/kanary/rules/` under separate version control.
-4. Restart the `kanary` service after package upgrades.
+3. Restart the `kanary` service.
 
 This keeps engine upgrades and site-specific rule changes independent.

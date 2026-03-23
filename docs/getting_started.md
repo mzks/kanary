@@ -8,24 +8,22 @@ All code used in this guide is collected in [examples/getting_started.py](../exa
 
 ## 1. Install And Start
 
-For now, the expected workflow is to use a Git checkout rather than PyPI.
+The normal installation method is PyPI:
 
 ```bash
-git clone <your-kanary-repo-url>
-cd kanary
-uv sync
+pip install kanary
 ```
 
 Start Kanary:
 
 ```bash
-uv run python -m kanary ./examples
+kanary ./examples
 ```
 
 If you want to access the Web viewer from another machine, bind explicitly:
 
 ```bash
-uv run python -m kanary ./examples --api-host 0.0.0.0 --api-port 8000
+kanary ./examples --api-host 0.0.0.0 --api-port 8000
 ```
 
 ## 2. Viewer
@@ -293,7 +291,7 @@ kanaryctl --base-url http://127.0.0.1:8000 silence-for --operator operator_name 
 Run lint before starting Kanary to catch definition mistakes early.
 
 ```bash
-uv run python -m kanary lint ./examples
+kanary lint ./examples
 ```
 
 Lint checks things such as:
@@ -304,6 +302,17 @@ Lint checks things such as:
 - rules with no matching output
 
 `lint ok` means the directory is loadable. Warnings do not stop execution, but should usually be reviewed before production use.
+
+## Development Install
+
+If you want to work from a source checkout while developing Kanary itself, use:
+
+```bash
+git clone https://github.com/mzks/kanary
+cd kanary
+uv sync
+uv run python -m kanary ./examples
+```
 
 ## 9. Next Documents
 

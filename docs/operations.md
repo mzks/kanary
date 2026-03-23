@@ -5,38 +5,37 @@
 Basic run:
 
 ```bash
-uv sync
-uv run python -m kanary ./rules
+kanary ./rules
 ```
 
 Read multiple directories:
 
 ```bash
-uv run python -m kanary ./rules ./local-rules
+kanary ./rules ./local-rules
 ```
 
-Change the API and viewer port:
+Use the standard API and viewer port:
 
 ```bash
-uv run python -m kanary ./rules --api-port 18000
+kanary ./rules --api-port 8000
 ```
 
 Expose the API and viewer on the LAN:
 
 ```bash
-uv run python -m kanary ./rules --api-host 0.0.0.0 --api-port 18000
+kanary ./rules --api-host 0.0.0.0 --api-port 8000
 ```
 
 Change the log level:
 
 ```bash
-uv run python -m kanary ./rules --log-level DEBUG
+kanary ./rules --log-level DEBUG
 ```
 
 Exclude plugins:
 
 ```bash
-uv run python -m kanary ./rules --exclude 'sqlite.*.stale' --exclude 'discord'
+kanary ./rules --exclude 'sqlite.*.stale' --exclude 'discord'
 ```
 
 Main arguments:
@@ -81,7 +80,7 @@ The built-in viewer provides:
 - plugins
 - outputs
 - silences
-- an admin page
+- admin page
 - read-only plugin source display
 
 Every write operation available in the viewer is also available through `kanaryctl`.
@@ -111,7 +110,7 @@ kanaryctl reload
 Enable SQLite history with `--state-db` or `KANARY_SQLITE_PATH`.
 
 ```bash
-uv run python -m kanary ./rules --state-db ./var/kanary.db
+kanary ./rules --state-db ./var/kanary.db
 ```
 
 Stored data:
