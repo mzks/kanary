@@ -2,7 +2,7 @@
 
 ## Current Status
 
-KANARY already has package metadata and installable CLI entry points, but it is not published on PyPI yet.
+Kanary already has package metadata and installable CLI entry points, but it is not published on PyPI yet.
 
 This means:
 
@@ -10,7 +10,7 @@ This means:
 - local installation from a checkout does work
 - the recommended deployment method for now is `git clone + uv sync`
 
-KANARY currently requires Python `3.13` or newer.
+Kanary currently requires Python `3.13` or newer.
 
 ## Recommended Temporary Installation
 
@@ -27,7 +27,7 @@ After `uv sync`, the project virtual environment contains:
 - `.venv/bin/kanary`
 - `.venv/bin/kanaryctl`
 
-You can inspect the installed CLI options with:
+Check the available CLI options with:
 
 ```bash
 .venv/bin/kanary --help
@@ -43,25 +43,21 @@ uv run kanaryctl help
 
 ## Local pip Installation
 
-If the target machine already has Python `3.13+`, you can also install from a checkout:
+If the target machine already has Python `3.13+`, you can install from a checkout:
 
 ```bash
 python3.13 -m pip install --no-build-isolation .
 ```
 
-For editable installation:
+Editable install:
 
 ```bash
 python3.13 -m pip install --no-build-isolation -e .
 ```
 
-After the repository is pushed to GitHub, the same approach can be used from a Git URL.
+## Recommended Layout
 
-## Recommended layout
-
-It is usually better to separate the installed package from site-specific monitoring definitions.
-
-Example layout:
+It is usually cleaner to separate the installed package from site-specific monitoring definitions.
 
 ```text
 /etc/kanary/
@@ -73,17 +69,17 @@ Example layout:
 ```
 
 - `/etc/kanary/rules/`
-  - site-specific `Source`, `Rule`, and `Output` definitions
+  Site-specific `Source`, `Rule`, and `Output` definitions.
 - `/etc/kanary/kanary.env`
-  - environment variables such as DSNs or webhook URLs
+  Environment variables such as DSNs or webhook URLs.
 - `/var/lib/kanary/kanary.db`
-  - SQLite history and runtime state
+  SQLite history and runtime state.
 
-## systemd example
+## systemd Example
 
 ```ini
 [Unit]
-Description=KANARY monitoring engine
+Description=Kanary monitoring engine
 After=network.target
 
 [Service]
@@ -98,37 +94,33 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-Adjust the command path if your environment installs `kanary` somewhere else.
+Adjust paths if your installation layout is different.
 
-## Runtime options
+## Runtime Options
 
 Common runtime options:
 
 - `--api-host`
-  - local API and Web viewer bind host, default `0.0.0.0`
+  Bind host for the local API and Web viewer. Default: `0.0.0.0`
 - `--api-port`
-  - local API and Web viewer port
+  API and Web viewer port.
 - `--state-db`
-  - SQLite path for persisted history
+  SQLite path for persisted history.
 - `--log-level`
-  - runtime logging level
+  Runtime logging level.
 
 Common environment variables:
 
 - `KANARY_SQLITE_PATH`
-  - alternative way to specify the SQLite path
 - `KANARY_API_URL`
-  - used by `kanaryctl`
 - `KANARY_API_HOST`
-  - bind host for the local API and Web viewer, default `0.0.0.0`
 - `KANARY_NODE_ID`
-  - node identifier for peer export/import
 
 Source-specific connection settings such as PostgreSQL DSNs or Discord webhooks are defined by the deployed monitoring definitions.
 
-## Upgrade strategy
+## Upgrade Strategy
 
-A simple deployment model is:
+One simple deployment model is:
 
 1. Update the checked-out `kanary` repository.
 2. Run `uv sync` again.

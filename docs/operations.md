@@ -1,106 +1,95 @@
 # Operations
 
-## 起動方法
+## Starting Kanary
 
-基本実行:
+Basic run:
 
 ```bash
 uv sync
 uv run python -m kanary ./rules
 ```
 
-複数 directory を読む場合:
+Read multiple directories:
 
 ```bash
 uv run python -m kanary ./rules ./local-rules
 ```
 
-API / viewer の port を変える場合:
+Change the API and viewer port:
 
 ```bash
 uv run python -m kanary ./rules --api-port 18000
 ```
 
-別マシンから API / viewer にアクセスする場合:
+Expose the API and viewer on the LAN:
 
 ```bash
 uv run python -m kanary ./rules --api-host 0.0.0.0 --api-port 18000
 ```
 
-ログレベルを変える場合:
+Change the log level:
 
 ```bash
 uv run python -m kanary ./rules --log-level DEBUG
 ```
 
-plugin を除外する場合:
+Exclude plugins:
 
 ```bash
 uv run python -m kanary ./rules --exclude 'sqlite.*.stale' --exclude 'discord'
 ```
 
-主な `kanary` 引数:
+Main arguments:
 
 - `rule_directories...`
-  - 読み込む directory を 1 個以上指定します。
 - `--api-port`
-  - HTTP API と Web viewer の port を指定します。
 - `--api-host`
-  - HTTP API と Web viewer の bind host を指定します。既定は `0.0.0.0` です。
 - `--log-level`
-  - `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
 - `--state-db`
-  - SQLite 永続化先を指定します。
 - `--node-id`
-  - peer export/import に使う node identifier を指定します。未指定時は hostname を使います。
 - `--exclude`
-  - `rule_id`, `source_id`, `output_id` の glob pattern で plugin を除外します。
 
-環境変数として指定できるもの:
+Environment variables:
 
 - `KANARY_SQLITE_PATH`
-  - SQLite 永続化先
 - `KANARY_API_URL`
-  - `kanaryctl` の接続先
 - `KANARY_API_HOST`
-  - KANARY 本体の bind host
 - `KANARY_NODE_ID`
-  - peer export/import に使う node identifier
 
-KANARY 本体の起動に必須の環境変数はありません。監視対象ごとの接続情報は、各 `Source` 実装側で定義します。
+Kanary itself does not require any environment variables. Source-specific connection settings belong to each source implementation.
 
-## 実行時の挙動
+## Runtime Behavior
 
-- 起動時に 1 個以上の rule directory を読み込みます
-- `@kanary.source`, `@kanary.rule`, `@kanary.output` が登録対象になります
-- 各 `Source` は `interval` ごとに独立スレッドで poll されます
-- `Rule` は、対応する source の最新結果を使って評価されます
-- rule directory は継続監視され、変更時に自動 reload されます
+- Kanary loads one or more rule directories at startup.
+- `@kanary.source`, `@kanary.rule`, and `@kanary.output` are the registration points.
+- Each source is polled in its own thread according to `interval`.
+- Rules are evaluated against the latest result from their source.
+- Rule directories are watched continuously and reloaded automatically.
 
-## Web viewer
+## Web Viewer
 
-Web viewer は、既定では次の URL で利用できます。
+The viewer is available at:
 
 ```text
 http://<host>:8000/viewer
 ```
 
-機能:
+The built-in viewer provides:
 
 - dashboard
 - alerts
 - plugins
 - outputs
 - silences
-- admin page
-- plugin source の read-only 表示
+- an admin page
+- read-only plugin source display
 
-Web からできる write operation は、すべて `kanaryctl` でも実行できます。  
-また、viewer は HTTP API を使う標準 UI であり、必要に応じて API ベースで独自実装することもできます。
+Every write operation available in the viewer is also available through `kanaryctl`.
+The viewer is the standard UI built on top of the HTTP API.
 
 ## CLI
 
-`kanaryctl` は API の thin client です。install 済み環境では `kanaryctl` コマンドとして使えます。
+`kanaryctl` is the thin client for the API.
 
 ```bash
 kanaryctl health
@@ -117,49 +106,29 @@ kanaryctl unsilence <silence_id> --operator operator_name
 kanaryctl reload
 ```
 
-## 永続化
+## Persistence
 
-履歴を SQLite に保存するには、`--state-db` か `KANARY_SQLITE_PATH` を使います。
+Enable SQLite history with `--state-db` or `KANARY_SQLITE_PATH`.
 
 ```bash
 uv run python -m kanary ./rules --state-db ./var/kanary.db
 ```
 
-または:
+Stored data:
 
-```bash
-export KANARY_SQLITE_PATH=./var/kanary.db
-uv run python -m kanary ./rules
-```
-
-保存対象:
-
-- alert state change
-- operator action
+- alert state changes
+- operator actions
 - silences
 
-history API と viewer の History 表示は、SQLite 永続化が有効なときだけ内容が残ります。
+The history API and the viewer's History panel only retain data when SQLite persistence is enabled.
 
-## Examples と Demo
-
-最小構成:
+## Demo And Examples
 
 - [demo/basic_monitoring.py](../demo/basic_monitoring.py)
-
-より実用的な例:
-
+- [examples/getting_started.py](../examples/getting_started.py)
 - [examples/sqlite_monitoring.py](../examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](../examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](../examples/discord_webhook_output.py)
 - [examples/latest_postgres.py](../examples/latest_postgres.py)
 - [examples/peer_monitoring.py](../examples/peer_monitoring.py)
 - [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)
-
-開発用 SQLite demo:
-
-```bash
-uv sync
-export KANARY_SQLITE_PATH=dev_data.db
-uv run python dev/emulate_sqlite.py --init
-uv run python -m kanary ./examples
-```

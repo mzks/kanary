@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import importlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1660,17 +1661,58 @@ class BrokenEmitOutput(kanary.Output):
         raise RuntimeError("send failed")
 
 
+class FakeSMTP:
+    sent_messages = []
+    started_tls = False
+    login_args = None
+
+    def __init__(self, host, port, timeout=None):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def starttls(self):
+        type(self).started_tls = True
+
+    def login(self, username, password):
+        type(self).login_args = (username, password)
+
+    def send_message(self, message):
+        type(self).sent_messages.append(message)
+
+
+class TestMailOutput(kanary.MailOutput):
+    output_id = "mail"
+    smtp_host = "smtp.example.invalid"
+    smtp_port = 2525
+    sender = "kanary@example.invalid"
+    recipients = ["operator@example.invalid"]
+
+
 class OutputTest(unittest.TestCase):
     def setUp(self) -> None:
         RecordingOutput.events = []
+        FakeSMTP.sent_messages = []
+        FakeSMTP.started_tls = False
+        FakeSMTP.login_args = None
         self.now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
         self.engine = kanary.Engine(
             now_fn=lambda: self.now,
             output_registry={"recording": RecordingOutput},
         )
         self.engine.start()
+        self.output_module = importlib.import_module("kanary.output")
+        self.original_smtp = self.output_module.smtplib.SMTP
+        self.output_module.smtplib.SMTP = FakeSMTP
 
     def tearDown(self) -> None:
+        self.output_module.smtplib.SMTP = self.original_smtp
         self.engine.shutdown()
 
     def test_output_plugin_receives_alert_event_on_state_change(self) -> None:
@@ -1744,6 +1786,27 @@ class OutputTest(unittest.TestCase):
             self.assertIsNotNone(status.last_updated_at)
         finally:
             engine.shutdown()
+
+    def test_mail_output_sends_message(self) -> None:
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"mail": TestMailOutput},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            source.now = self.now - timedelta(seconds=10)
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        finally:
+            engine.shutdown()
+
+        self.assertEqual(len(FakeSMTP.sent_messages), 1)
+        message = FakeSMTP.sent_messages[0]
+        self.assertEqual(message["From"], "kanary@example.invalid")
+        self.assertEqual(message["To"], "operator@example.invalid")
+        self.assertIn("postgres.temperature.stale", message["Subject"])
+        self.assertTrue(FakeSMTP.started_tls)
 
 
 class RemoteAlarmFactoryTest(unittest.TestCase):

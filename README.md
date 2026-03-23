@@ -1,40 +1,36 @@
-# KANARY
+# Kanary
 
-KANARY は、アラーム・通知・信頼性監視システムです。  
-監視対象から値を取得する `Source`、値を評価する `Rule`、状態変化を外部へ送る `Output` を、Python で記述して運用できます。
-
-## KANARY の考え方
-
-KANARY は、次の分離を大切にしています。
+Kanary is a Python-based alerting, notification, and reliability monitoring runtime.
+You define three kinds of plugins in Python:
 
 - `Source`
-  - どこから値を取るかを記述します。
+  Reads values from a system, database, API, or device.
 - `Rule`
-  - どの値を見て、どの条件で異常とみなすかを記述します。
+  Evaluates those values and decides whether an alert should fire.
 - `Output`
-  - 状態変化をどこへ送るかを記述します。
+  Sends state changes to humans or other systems.
 
-この分離により、データ取得、評価、通知の責務が混ざりにくくなり、監視対象や通知先が増えても構成を整理しやすくなります。
+This separation keeps collection, evaluation, and notification independent, so monitoring definitions stay manageable as the system grows.
 
-## まず何をすればよいか
+## What To Do First
 
-最初は、`demo/` の最小構成をそのまま動かすのがおすすめです。
+Start by running the smallest example from `demo/`.
 
 ```bash
 uv sync
 uv run python -m kanary ./demo
 ```
 
-そのあとに次の順で進めると、実際の監視定義へ早くたどり着けます。
+Then move in this order:
 
-1. `demo/basic_monitoring.py` を読んで、`Source`, `Rule`, `Output` の最小形を把握します。
-2. `examples/` を読んで、複数 measurement や PostgreSQL、Discord、peer monitoring の例を確認します。
-3. 自分の `rules/` directory を作り、最初は `Source` を 1 つ、`Rule` を 1 つだけ書きます。
-4. 必要に応じて `RangeRule`, `StaleRule`, `ThresholdRule` などの組み込み helper class を使います。
+1. Read [demo/basic_monitoring.py](demo/basic_monitoring.py) to understand the smallest possible `Source`, `Rule`, and `Output`.
+2. Read [docs/getting_started.md](docs/getting_started.md) and work through the examples in [examples/getting_started.py](examples/getting_started.py).
+3. Browse `examples/` for PostgreSQL, Discord, peer monitoring, and remote alert import.
+4. Create your own `rules/` directory and start with one `Source` and one `Rule`.
 
-## 最小構成
+## Minimal Example
 
-最小構成は [demo/basic_monitoring.py](demo/basic_monitoring.py) にあります。
+The smallest working example is in [demo/basic_monitoring.py](demo/basic_monitoring.py).
 
 ```python
 from datetime import datetime, timezone
@@ -94,76 +90,80 @@ class ConsoleOutput:
         print(event.rule_id, event.current_state.value, event.alert.message)
 ```
 
-この例では、まず最低限必要な interface だけで書いています。
+In this example, you only implement the minimum interface:
 
-- 値の取得
-- 異常判定
-- 状態変化の出力
+- a source that returns values
+- a rule that evaluates them
+- an output that reacts to state changes
 
-内部では KANARY が、plugin の読み込み、source の定期実行、rule の評価、alert state 管理、HTTP API と Web viewer の提供を行います。
+Internally, Kanary handles plugin loading, periodic source polling, rule evaluation, alert state tracking, the HTTP API, and the Web viewer.
 
-より短く書きたい場合は、あとから `RangeRule`, `StaleRule`, `ThresholdRule` などの組み込み helper class を使えます。
+If you want shorter definitions later, you can switch to built-in helper classes such as `RangeRule`, `StaleRule`, and `ThresholdRule`.
 
-## 実行例
+## Running Kanary
 
-基本実行:
+Basic run:
 
 ```bash
 uv run python -m kanary ./demo
 ```
 
-API / Web viewer の port を変更する場合:
+Change the API and Web viewer port:
 
 ```bash
 uv run python -m kanary ./demo --api-port 18000
 ```
 
-別マシンから API / Web viewer にアクセスする場合:
+Expose the API and Web viewer on the LAN:
 
 ```bash
 uv run python -m kanary ./demo --api-host 0.0.0.0 --api-port 18000
 ```
 
-履歴を SQLite に保存する場合:
+Persist history in SQLite:
 
 ```bash
 uv run python -m kanary ./demo --state-db ./var/kanary.db
 ```
 
-Web viewer は、既定では次の URL で利用できます。
+The Web viewer is available at:
 
 ```text
 http://<host>:8000/viewer
 ```
 
-起動引数の一覧は `uv run python -m kanary --help` で確認できます。  
-`kanaryctl` の引数と subcommand は `kanaryctl help` で確認できます。
+See all CLI options with:
 
-## 環境変数
+```bash
+uv run python -m kanary --help
+kanaryctl help
+```
 
-KANARY 本体の実行に必須の環境変数はありません。  
-必要に応じて、次を使えます。
+## Environment Variables
+
+Kanary does not require any environment variables by default.
+You can use these when needed:
 
 - `KANARY_SQLITE_PATH`
-  - SQLite 永続化先を環境変数で指定したい場合に使います。
+  Alternative way to set the SQLite database path.
 - `KANARY_API_URL`
-  - `kanaryctl` の接続先を変えたい場合に使います。
+  Default API base URL for `kanaryctl`.
 - `KANARY_API_HOST`
-  - KANARY 本体の bind host を変えたい場合に使います。既定は `0.0.0.0` です。
+  Bind host for the local API and Web viewer. The default is `0.0.0.0`.
 - `KANARY_NODE_ID`
-  - peer export/import に使う node identifier を指定したい場合に使います。未指定時は hostname を使います。
+  Optional node identifier for peer export and import. If unset, Kanary uses the hostname.
 
-監視対象ごとの接続情報は、各 `Source` 実装側で別途定義します。  
-たとえば PostgreSQL の例では `KANARY_POSTGRES_DSN` を使います。
+Connection details for actual monitoring targets are defined by each `Source` implementation. For example, a PostgreSQL source may use `KANARY_POSTGRES_DSN`.
 
-## Demo と Examples
+## Demo And Examples
 
-最小構成:
+Smallest example:
 
 - [demo/basic_monitoring.py](demo/basic_monitoring.py)
 
-より実運用に近い例:
+More realistic examples:
 
+- [examples/getting_started.py](examples/getting_started.py)
 - [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](examples/discord_webhook_output.py)
@@ -171,25 +171,26 @@ KANARY 本体の実行に必須の環境変数はありません。
 - [examples/peer_monitoring.py](examples/peer_monitoring.py)
 - [examples/remote_alarm_import.py](examples/remote_alarm_import.py)
 
-`demo/` は最初の一歩のための短い例です。  
-`examples/` は PostgreSQL、Discord、peer monitoring、helper class などを含む、より実運用に近い例です。
+`demo/` is for the first working run. `examples/` is closer to real deployments and includes helper classes, remote monitoring, PostgreSQL, and webhook outputs.
 
-## Web viewer について
+## Web Viewer
 
-KANARY には組み込みの Web viewer が含まれています。  
-ただし、運用上の本体は HTTP API です。viewer はその API を使う標準 UI であり、必要であれば API を使って独自の viewer や運用画面を実装できます。
+Kanary includes a built-in Web viewer.
+The operational surface, however, is the HTTP API. The viewer is the standard UI built on top of that API, and you can replace it with your own tooling if needed.
 
-## ドキュメント
+## Documentation
 
-詳細は `docs/` に分けています。
-
-- [docs/operations.md](docs/operations.md)
-  - 実行方法、viewer、CLI、永続化、examples
+- [docs/getting_started.md](docs/getting_started.md)
+  Hands-on introduction.
 - [docs/plugins.md](docs/plugins.md)
-  - plugin の仕様。最小 interface から組み込み helper class まで
+  Plugin interfaces and built-in helper classes.
+- [docs/operations.md](docs/operations.md)
+  Running Kanary, the viewer, the CLI, and persistence.
 - [docs/api.md](docs/api.md)
-  - HTTP API と `kanaryctl`
+  HTTP API and `kanaryctl`.
 - [docs/development.md](docs/development.md)
-  - 開発、lint、tests
+  Development, linting, and tests.
 - [docs/deployment.md](docs/deployment.md)
-  - installable CLI と deployment の考え方
+  Deployment layout and `systemd`.
+
+Japanese versions are available as `_ja` documents, for example [README_ja.md](README_ja.md).

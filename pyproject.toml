@@ -5,11 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kanary"
 version = "0.1.0"
-description = "KamLAND alarm notification and reliability"
+description = "Python-based alerting, notification, and reliability monitoring runtime"
+readme = {file = "README.md", content-type = "text/markdown"}
+license = "MIT"
 requires-python = ">=3.13"
 dependencies = [
     "psycopg[binary]>=3.2",
 ]
+keywords = ["monitoring", "alerting", "notifications", "reliability", "operations"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://github.com/mzks/kanary"
+Repository = "https://github.com/mzks/kanary"
+Issues = "https://github.com/mzks/kanary/issues"
 
 [project.scripts]
 kanary = "kanary.__main__:main"
@@ -17,9 +35,14 @@ kanaryctl = "kanary.ctl:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["*.tests", "*.tests.*", "tests.*", "tests"]
+
+[tool.setuptools.package-data]
+kanary = ["web/*.html", "web/*.js", "web/*.css"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

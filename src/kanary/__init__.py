@@ -4,7 +4,7 @@ from .constants import AlertState, Severity
 from .engine import Engine
 from .loader import RuleDirectoryLoader
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
-from .output import Output
+from .output import MailOutput, Output
 from .remote import RemoteAlarm, RemoteKanarySource, import_remote_alarms
 from .registry import (
     clear_registries,
@@ -39,6 +39,7 @@ __all__ = [
     "FIRING",
     "INFO",
     "Measurement",
+    "MailOutput",
     "OK",
     "Output",
     "PluginStatus",

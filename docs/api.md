@@ -2,15 +2,15 @@
 
 ## HTTP API
 
-既定 bind:
+Default bind address:
 
 ```text
 0.0.0.0:8000
 ```
 
-起動時に `--api-host` と `--api-port` を指定すると bind address を変更できます。
+Use `--api-host` and `--api-port` to change the bind address.
 
-### Read endpoints
+### Read Endpoints
 
 - `GET /health`
 - `GET /peer-status`
@@ -22,7 +22,7 @@
 - `GET /viewer`
 - `GET /plugins/{type}/{plugin_id}/source`
 
-### Write endpoints
+### Write Endpoints
 
 - `POST /alerts/{rule_id}/ack`
 - `POST /alerts/{rule_id}/unack`
@@ -31,20 +31,20 @@
 - `POST /silences/{silence_id}/cancel`
 - `POST /reload`
 
-## API の考え方
+## Design Notes
 
-- Web viewer と `kanaryctl` は同じ API を使います
-- history は SQLite 永続化が有効なときだけ残ります
-- `/plugins/{type}/{plugin_id}/source` は loaded plugin に紐づく source code だけを返します
-- raw file path は受け取りません
-- `/export-alerts` は remote import 用の endpoint です
-- `/export-alerts` は `origin_node_id`, `origin_rule_id`, `mirror_path` を返します
+- The Web viewer and `kanaryctl` use the same API.
+- History is only persisted when SQLite storage is enabled.
+- `GET /plugins/{type}/{plugin_id}/source` returns source code only for loaded plugins.
+- Raw file paths are not accepted.
+- `GET /export-alerts` is the stable endpoint for remote alert import.
+- `GET /export-alerts` includes `origin_node_id`, `origin_rule_id`, and `mirror_path`.
 
 ## kanaryctl
 
-`kanaryctl` は API の thin client です。
+`kanaryctl` is a thin client for the HTTP API.
 
-主な subcommand:
+Main subcommands:
 
 - `health`
 - `alerts`
@@ -58,12 +58,12 @@
 - `unsilence`
 - `reload`
 
-主な共通引数:
+Common argument:
 
 - `--base-url`
-  - 接続先の KANARY API URL を指定します。
+  Selects the Kanary API base URL.
 
-例:
+Examples:
 
 ```bash
 kanaryctl alerts

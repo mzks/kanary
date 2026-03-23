@@ -2,13 +2,13 @@
 
 ## Environment
 
-KANARY の開発とテストは `uv` を前提とします。
+Kanary development and tests assume `uv`.
 
 ```bash
 uv sync
 ```
 
-初回実行時に `.venv` が自動作成されます。
+This creates `.venv` on the first run.
 
 ## Tests
 
@@ -24,24 +24,24 @@ uv run python -m kanary lint ./rules ./local-rules
 uv run python -m kanary lint ./examples --exclude console
 ```
 
-主な検査内容:
+Typical checks:
 
-- 必須項目
+- required rule fields
   - `rule_id`
   - `source`
   - `severity`
   - `tags`
   - `evaluate()`
-- `tags = []` warning
-- `owner` 未設定 warning
-- source 参照の整合
-- plugin ID 重複
-- `StaleRule.timeout` の妥当性
-- no matching output warning
+- warning for `tags = []`
+- warning for missing `owner`
+- source reference validation
+- duplicate plugin IDs
+- `StaleRule.timeout` validation
+- warning for rules with no matching output
 
 ## Reload
 
-rule directory は継続監視され、変更時に自動 reload されます。
+Rule directories are watched continuously and reloaded automatically on change.
 
 ```text
 file change
@@ -55,7 +55,7 @@ build registry
 atomic swap
 ```
 
-reload 失敗時は旧 registry を維持します。
+If reload fails, the previous registry stays active.
 
 ## Repository Layout
 
@@ -68,9 +68,9 @@ tests/
 docs/
 ```
 
-- `src/kanary/`: engine 本体
-- `demo/`: 最小構成の例
-- `examples/`: 実運用寄りの例
-- `dev/`: 開発補助ツール
-- `tests/`: unittest
-- `docs/`: 利用者向け文書
+- `src/kanary/`: engine and built-in helpers
+- `demo/`: smallest examples
+- `examples/`: more realistic examples
+- `dev/`: development utilities
+- `tests/`: unittest suite
+- `docs/`: user-facing documentation
