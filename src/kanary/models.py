@@ -102,6 +102,7 @@ class PluginStatus:
     state: str = "created"
     init_ok: bool = False
     last_error: str | None = None
+    last_error_detail: str | None = None
     run_count: int = 0
     last_run_at: datetime | None = None
     last_success_at: datetime | None = None

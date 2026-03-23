@@ -5,6 +5,7 @@ from typing import Any
 
 from .models import AlertEvent
 from .constants import severity_label
+from .patterns import matches_any_tag, matches_excluded_tag
 
 
 class Output:
@@ -25,9 +26,9 @@ class Output:
 
     def matches(self, event: AlertEvent) -> bool:
         alert_tags = set(event.alert.tags)
-        if self.include_tags and not alert_tags.intersection(self.include_tags):
+        if self.include_tags and not matches_any_tag(alert_tags, self.include_tags):
             return False
-        if self.exclude_tags and alert_tags.intersection(self.exclude_tags):
+        if self.exclude_tags and matches_excluded_tag(alert_tags, self.exclude_tags):
             return False
         state = event.current_state.value
         if self.include_states and state not in self.include_states:

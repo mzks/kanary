@@ -94,7 +94,7 @@ class FileOutput:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-@kanary.output(output_id="mail", include_tags=["getting-started"])
+@kanary.output(output_id="mail", include_tags=["getting-started", "sqlite"])
 class MailAlert(kanary.MailOutput):
     smtp_host = "127.0.0.1"
     smtp_port = 1025

@@ -25,6 +25,7 @@ class RuntimeConfig:
     reload_interval: float = 1.0
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    enable_default_viewer: bool = True
     print_alerts: bool = False
     exclude_plugins: list[str] | None = None
     log_level: str = DEFAULT_LOG_LEVEL
@@ -49,6 +50,7 @@ class EngineRuntime:
             reload_callback=self.reload_now,
             host=config.api_host,
             port=config.api_port,
+            enable_default_viewer=config.enable_default_viewer,
         )
 
     def start(self) -> None:

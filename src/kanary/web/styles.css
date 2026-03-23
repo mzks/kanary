@@ -117,6 +117,35 @@ h3 {
   line-height: 1.45;
 }
 
+.viewer-build-meta {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.viewer-build-meta:not(.hidden) {
+  display: block;
+}
+
+.viewer-build-meta strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--panel-ink);
+}
+
+.viewer-build-meta a {
+  color: var(--faded-blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.viewer-build-meta-links {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
 .topbar-controls {
   display: flex;
   align-items: end;
@@ -377,6 +406,42 @@ select {
   overflow: auto;
 }
 
+.status-banner {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line-strong);
+}
+
+.status-banner-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.status-banner-body {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.status-banner-failed {
+  background: rgba(147, 54, 22, 0.12);
+  border-color: rgba(147, 54, 22, 0.35);
+}
+
+.status-banner-failed .status-banner-title {
+  color: var(--danger);
+}
+
+.status-banner-ok {
+  background: rgba(74, 105, 65, 0.10);
+  border-color: rgba(74, 105, 65, 0.25);
+}
+
+.status-banner-ok .status-banner-title {
+  color: var(--ok);
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -401,8 +466,65 @@ select {
   color: var(--muted);
 }
 
+.table-row-failed {
+  background: rgba(147, 54, 22, 0.08);
+}
+
+.table-row-failed td {
+  border-bottom-color: rgba(147, 54, 22, 0.18);
+}
+
 .action-cell {
   width: 110px;
+}
+
+.plugin-error-block {
+  min-width: 260px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(147, 54, 22, 0.28);
+  background: rgba(147, 54, 22, 0.10);
+}
+
+.plugin-error-label {
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.plugin-error-text {
+  color: var(--panel-ink);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.plugin-error-detail {
+  margin-top: 8px;
+}
+
+.plugin-error-detail summary {
+  cursor: pointer;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.plugin-error-trace {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #221d17;
+  color: #f5efe4;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 240px;
 }
 
 .state-pill {

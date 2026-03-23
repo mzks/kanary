@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from .constants import ACKED, OK, RESOLVED, AlertState, Severity
 from .models import Evaluation, Measurement, SourceResult
+from .patterns import matches_any_tag, matches_excluded_tag
 from .registry import get_source_registry, register_rule
 from .rule import Rule, RuleContext
 from .source import Source
@@ -220,8 +221,8 @@ def import_remote_alarms(
     generated: list[type[RemoteAlarm]] = []
     include_rule_patterns = include_rule_ids or []
     exclude_rule_patterns = exclude_rule_ids or []
-    include_tag_set = set(include_tags or [])
-    exclude_tag_set = set(exclude_tags or [])
+    include_tag_patterns = list(include_tags or [])
+    exclude_tag_patterns = list(exclude_tags or [])
 
     for alert in discovered_alerts:
         remote_alarm_id = str(alert["rule_id"])
@@ -230,9 +231,9 @@ def import_remote_alarms(
             continue
         if exclude_rule_patterns and any(fnmatch(remote_alarm_id, pattern) for pattern in exclude_rule_patterns):
             continue
-        if include_tag_set and not include_tag_set.intersection(remote_tags):
+        if include_tag_patterns and not matches_any_tag(remote_tags, include_tag_patterns):
             continue
-        if exclude_tag_set and exclude_tag_set.intersection(remote_tags):
+        if exclude_tag_patterns and matches_excluded_tag(remote_tags, exclude_tag_patterns):
             continue
 
         local_rule_id = _compose_local_rule_id(remote_alarm_id, prefix=prefix, suffix=suffix)

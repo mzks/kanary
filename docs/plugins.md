@@ -74,7 +74,7 @@ High-level accessors:
 - `ctx.timestamp(name)`
 - `ctx.metadata(name)`
 
-`name` may contain `.`. Helper rules also use these accessors, so dotted measurement names are supported.
+If you need to access the previous polled value, add `previous=True` in the argument.
 
 Low-level accessors:
 
@@ -98,6 +98,9 @@ Optional:
 - `exclude_tags`
 - `include_states`
 - `exclude_states`
+
+`include_tags` and `exclude_tags` support glob patterns.  
+For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.
 
 Example:
 
@@ -192,6 +195,7 @@ class Value1Threshold(kanary.ThresholdRule):
 
 - factory that generates multiple `RemoteAlarm` rules
 - supports `prefix`, `suffix`, `add_tags`, `include_rule_ids`, `exclude_rule_ids`, `include_tags`, and `exclude_tags`
+- `include_rule_ids`, `exclude_rule_ids`, `include_tags`, and `exclude_tags` support glob patterns
 - each generated rule is treated as an independent local rule
 
 ### Output Helpers
@@ -216,6 +220,35 @@ class MailAlert(kanary.MailOutput):
     sender = "kanary@example.com"
     recipients = ["operator@example.com"]
 ```
+
+## 5. User-Defined Factories
+
+Kanary does not require built-in factories for every repeated pattern.
+If you prefer, you can write your own factory functions in plain Python and generate plugin classes yourself.
+
+The natural pattern is:
+
+1. build a class dynamically with `type(...)`
+2. fill in the class attributes or methods you need
+3. apply `kanary.source(...)`, `kanary.rule(...)`, or `kanary.output(...)` to register it
+
+This keeps the generated plugins as normal, independent plugins after registration.
+
+For example:
+
+- generate one source from a measurement mapping
+- generate several `ThresholdRule` classes from a list of measurements
+
+See [examples/factory_patterns.py](../examples/factory_patterns.py) for a concrete example.
+
+That example includes:
+
+- `make_constant_source(...)`
+  Generates a simple source class from a measurement dictionary.
+- `make_threshold_rule(...)`
+  Generates one `ThresholdRule`-based rule class.
+
+This approach is often enough when only one project needs the factory. If the pattern becomes common across multiple deployments, that is the point where adding a built-in helper may make sense.
 
 ## States And Dependencies
 

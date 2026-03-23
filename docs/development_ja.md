@@ -17,8 +17,8 @@ uv run python -m unittest discover -s tests
 ## Lint
 
 ```bash
-uv run python -m kanary lint ./rules
-uv run python -m kanary lint ./rules ./local-rules
+uv run python -m kanary lint ./plugins
+uv run python -m kanary lint ./plugins ./local-plugins
 uv run python -m kanary lint ./examples --exclude console
 ```
 
@@ -39,7 +39,7 @@ uv run python -m kanary lint ./examples --exclude console
 
 ## Reload
 
-rule directory は継続監視され、変更時に自動 reload されます。
+plugin directory は継続監視され、変更時に自動 reload されます。
 
 ```text
 file change

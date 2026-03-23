@@ -1,0 +1,16 @@
+services:
+  kanary:
+    build: .
+    image: kanary:local
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./plugins:/etc/kanary/plugins
+      - ./state:/var/lib/kanary
+    command:
+      - kanary
+      - /etc/kanary/plugins
+      - --state-db
+      - /var/lib/kanary/kanary.db
+      - --api-port
+      - "8000"

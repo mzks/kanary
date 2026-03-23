@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 import logging
 import socket
+import traceback
 from uuid import uuid4
 import threading
 from typing import Callable
@@ -383,6 +384,7 @@ class Engine:
             status.state = "ready"
             status.init_ok = True
             status.last_error = None
+            status.last_error_detail = None
             status.run_count += 1
             status.last_run_at = now
             status.last_success_at = now
@@ -391,6 +393,7 @@ class Engine:
         except Exception as exc:
             status.state = "failed"
             status.last_error = str(exc)
+            status.last_error_detail = traceback.format_exc()
             status.run_count += 1
             status.last_run_at = now
             status.last_failure_at = now
@@ -427,6 +430,7 @@ class Engine:
         status.state = "ready"
         status.init_ok = True
         status.last_error = None
+        status.last_error_detail = None
         status.run_count += 1
         status.last_run_at = now
         status.last_success_at = now
@@ -646,6 +650,7 @@ class Engine:
                 output.emit(event, {"engine": self})
                 status.state = "ready"
                 status.last_error = None
+                status.last_error_detail = None
                 status.run_count += 1
                 status.last_run_at = event.occurred_at
                 status.last_success_at = event.occurred_at
@@ -653,6 +658,7 @@ class Engine:
             except Exception as exc:
                 status.state = "failed"
                 status.last_error = str(exc)
+                status.last_error_detail = traceback.format_exc()
                 status.last_failure_at = event.occurred_at
                 status.last_updated_at = event.occurred_at
                 logger.exception("output '%s' failed", output.output_id)
@@ -723,12 +729,14 @@ class Engine:
             status.state = "ready"
             status.init_ok = True
             status.last_error = None
+            status.last_error_detail = None
             status.last_success_at = self._now_fn()
             status.last_updated_at = status.last_success_at
         except Exception as exc:
             status.state = "failed"
             status.init_ok = False
             status.last_error = str(exc)
+            status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
             status.last_updated_at = status.last_failure_at
             logger.exception("output '%s' init failed", output_id)
@@ -740,6 +748,7 @@ class Engine:
         except Exception as exc:
             status.state = "failed"
             status.last_error = str(exc)
+            status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
             status.last_updated_at = status.last_failure_at
             logger.exception("output '%s' terminate failed", output_id)
@@ -749,6 +758,7 @@ class Engine:
         status = self._plugin_status("source", source_id)
         status.state = "failed"
         status.last_error = error
+        status.last_error_detail = None
         status.run_count += 1
         status.last_run_at = when
         status.last_failure_at = when
@@ -761,12 +771,14 @@ class Engine:
             status.state = "ready"
             status.init_ok = True
             status.last_error = None
+            status.last_error_detail = None
             status.last_success_at = self._now_fn()
             status.last_updated_at = status.last_success_at
         except Exception as exc:
             status.state = "failed"
             status.init_ok = False
             status.last_error = str(exc)
+            status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
             status.last_updated_at = status.last_failure_at
             raise
@@ -778,6 +790,7 @@ class Engine:
         except Exception as exc:
             status.state = "failed"
             status.last_error = str(exc)
+            status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
             status.last_updated_at = status.last_failure_at
             raise
@@ -834,6 +847,7 @@ class Engine:
                     status.state = "ready"
                     status.init_ok = True
                     status.last_error = None
+                    status.last_error_detail = None
                     status.run_count += 1
                     status.last_run_at = now
                     status.last_success_at = now
@@ -850,6 +864,7 @@ class Engine:
             status.state = "ready"
             status.init_ok = True
             status.last_error = None
+            status.last_error_detail = None
             status.run_count += 1
             status.last_run_at = now
             status.last_success_at = now
@@ -858,6 +873,7 @@ class Engine:
             status.state = "failed"
             status.init_ok = True
             status.last_error = str(exc)
+            status.last_error_detail = traceback.format_exc()
             status.run_count += 1
             status.last_run_at = now
             status.last_failure_at = now

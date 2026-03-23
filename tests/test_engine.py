@@ -6,9 +6,11 @@ from tempfile import TemporaryDirectory
 import textwrap
 import threading
 import unittest
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import kanary
+from kanary import ctl as kanaryctl
 from kanary.runtime import EngineRuntime, RuntimeConfig
 
 
@@ -877,6 +879,42 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
         self.assertEqual(report.warnings, [])
         self.assertEqual(snapshot.rules["example.rule"].matched_outputs, ["match-by-tag", "match-by-state", "match-all"])
 
+    def test_inspect_matches_outputs_with_glob_tag_patterns(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "rules.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source")
+                    class ExampleSource:
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+
+                    @kanary.rule(
+                        rule_id="example.rule",
+                        source="example.source",
+                        severity=kanary.ERROR,
+                        tags=["expert_db", "infra"],
+                        owner="expert",
+                    )
+                    class ExampleRule:
+                        def evaluate(self, payload, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+
+                    @kanary.output(output_id="match-glob", include_tags=["expert_*"])
+                    class MatchGlob:
+                        def emit(self, event, ctx):
+                            return None
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(tmp)
+            snapshot, report = loader.inspect()
+        self.assertEqual(report.errors, [])
+        self.assertIn("match-glob", snapshot.rules["example.rule"].matched_outputs)
+
     def test_inspect_rejects_plugin_id_collisions_across_types(self) -> None:
         with TemporaryDirectory() as tmp:
             rule_file = Path(tmp) / "rules.py"
@@ -1104,6 +1142,35 @@ class ControlAPITest(unittest.TestCase):
         self.assertTrue(str(source_plugin["definition_file"]).endswith("tests/test_engine.py"))
         self.assertTrue(str(rule_plugin["definition_file"]).endswith("tests/test_engine.py"))
 
+    def test_plugins_api_includes_error_detail(self) -> None:
+        engine = kanary.Engine(
+            output_registry={"broken-init": BrokenInitOutput},
+        )
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            port = api._server.server_address[1]
+            plugins_payload = fetch_json(f"http://127.0.0.1:{port}/plugins")
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+
+        output_plugin = next(
+            item
+            for item in plugins_payload["plugins"]
+            if item["type"] == "output" and item["plugin_id"] == "broken-init"
+        )
+        self.assertEqual(output_plugin["last_error"], "webhook is not set")
+        self.assertIn("RuntimeError: webhook is not set", output_plugin["last_error_detail"])
+
     def test_viewer_assets_are_served(self) -> None:
         engine = kanary.Engine(output_registry={})
         engine.start()
@@ -1125,6 +1192,35 @@ class ControlAPITest(unittest.TestCase):
                 javascript = response.read().decode()
             self.assertIn("DEFAULT_REFRESH_MS", javascript)
             self.assertIn("Dashboard", body)
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+
+    def test_viewer_can_be_disabled(self) -> None:
+        engine = kanary.Engine(output_registry={})
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+            enable_default_viewer=False,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            port = api._server.server_address[1]
+            with self.assertRaises(HTTPError) as viewer_error:
+                urlopen(f"http://127.0.0.1:{port}/viewer")
+            self.assertEqual(viewer_error.exception.code, 404)
+
+            with self.assertRaises(HTTPError) as asset_error:
+                urlopen(f"http://127.0.0.1:{port}/viewer/app.js")
+            self.assertEqual(asset_error.exception.code, 404)
+
+            with urlopen(f"http://127.0.0.1:{port}/health") as response:
+                self.assertEqual(response.status, 200)
         finally:
             api.shutdown()
             thread.join(timeout=2.0)
@@ -1157,6 +1253,30 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("alert_states", payload)
         self.assertIn("failed_plugins", payload["counts"])
         self.assertEqual(payload["node_id"], "node-a")
+
+    def test_meta_endpoint_reports_repository_information(self) -> None:
+        engine = kanary.Engine(output_registry={})
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            port = api._server.server_address[1]
+            payload = fetch_json(f"http://127.0.0.1:{port}/meta")
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+
+        self.assertEqual(payload["package_name"], "kanary")
+        self.assertTrue(payload["version"])
+        self.assertIn("git_commit", payload)
+        self.assertEqual(payload["repository_url"], "https://github.com/mzks/kanary")
 
     def test_alerts_endpoint_includes_tags_and_owner(self) -> None:
         engine = kanary.Engine(output_registry={})
@@ -1763,6 +1883,7 @@ class OutputTest(unittest.TestCase):
             self.assertEqual(status.state, "failed")
             self.assertFalse(status.init_ok)
             self.assertEqual(status.last_error, "webhook is not set")
+            self.assertIn("RuntimeError: webhook is not set", status.last_error_detail or "")
             self.assertIsNotNone(status.last_updated_at)
         finally:
             engine.shutdown()
@@ -1782,6 +1903,7 @@ class OutputTest(unittest.TestCase):
             self.assertEqual(status.state, "failed")
             self.assertTrue(status.init_ok)
             self.assertEqual(status.last_error, "send failed")
+            self.assertIn("RuntimeError: send failed", status.last_error_detail or "")
             self.assertIsNotNone(status.last_failure_at)
             self.assertIsNotNone(status.last_updated_at)
         finally:
@@ -1811,6 +1933,27 @@ class OutputTest(unittest.TestCase):
 
 class RemoteAlarmFactoryTest(unittest.TestCase):
     def test_factory_can_generate_prefixed_remote_alarm_rules(self) -> None:
+        generated = kanary.import_remote_alarms(
+            source="remote-api",
+            remote_alarm_ids=[
+                "postgres.temperature.stale",
+                "postgres.temperature.range",
+                "postgres.temperature.rate",
+            ],
+            prefix="imported",
+            add_tags=["remote"],
+            include_rule_ids=["postgres.temperature.*"],
+            exclude_rule_ids=["*.rate"],
+        )
+
+        generated_ids = {cls.rule_id for cls in generated}
+        self.assertIn("imported.postgres.temperature.stale", generated_ids)
+        self.assertIn("imported.postgres.temperature.range", generated_ids)
+        self.assertNotIn("imported.postgres.temperature.rate", generated_ids)
+        generated_rule = next(cls for cls in generated if cls.rule_id == "imported.postgres.temperature.stale")
+        self.assertIn("remote", generated_rule.tags)
+
+    def test_factory_can_filter_remote_alarm_tags_with_glob(self) -> None:
         remote_engine = kanary.Engine(output_registry={})
         remote_engine.start()
         remote_api = kanary.ControlAPI(
@@ -1825,13 +1968,13 @@ class RemoteAlarmFactoryTest(unittest.TestCase):
             source = remote_engine.sources["postgres"]
             now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
             remote_engine.evaluate_source(source.source_id, source.poll({}), now=now)
+            RemoteAPISource.base_url = None
             RemoteAPISource.url = f"http://127.0.0.1:{remote_api._server.server_address[1]}"
             generated = kanary.import_remote_alarms(
                 source="remote-api",
-                prefix="imported",
                 add_tags=["remote"],
-                include_rule_ids=["postgres.temperature.*"],
-                exclude_rule_ids=["*.rate"],
+                include_tags=["*gres"],
+                exclude_tags=["compo*"],
             )
         finally:
             remote_api.shutdown()
@@ -1839,12 +1982,10 @@ class RemoteAlarmFactoryTest(unittest.TestCase):
             remote_engine.shutdown()
 
         generated_ids = {cls.rule_id for cls in generated}
-        self.assertIn("imported.postgres.temperature.stale", generated_ids)
-        self.assertIn("imported.postgres.temperature.range", generated_ids)
-        self.assertNotIn("imported.postgres.temperature.rate", generated_ids)
-        generated_rule = next(cls for cls in generated if cls.rule_id == "imported.postgres.temperature.stale")
-        self.assertIn("remote", generated_rule.tags)
-        self.assertIn("postgres", generated_rule.tags)
+        self.assertIn("postgres.temperature.stale", generated_ids)
+        self.assertIn("postgres.temperature.range", generated_ids)
+        self.assertIn("postgres.temperature.rate", generated_ids)
+        self.assertNotIn("postgres.temperature_humidity.balance", generated_ids)
 
 
 class ControlAPITest(unittest.TestCase):
@@ -1894,6 +2035,13 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("postgres", plugin_ids)
         self.assertIn("postgres.temperature.stale", plugin_ids)
         self.assertTrue(all("last_updated_at" in plugin for plugin in body["plugins"]))
+
+
+class CLIHelpersTest(unittest.TestCase):
+    def test_matches_row_filter_supports_substring_and_glob(self) -> None:
+        self.assertTrue(kanaryctl.matches_row_filter(["postgres.temperature.stale"], "temperature"))
+        self.assertTrue(kanaryctl.matches_row_filter(["expert_db"], "expert_*"))
+        self.assertFalse(kanaryctl.matches_row_filter(["expert_db"], "viewer_*"))
 
 
 if __name__ == "__main__":

@@ -5,11 +5,13 @@ const state = {
   alerts: [],
   plugins: [],
   silences: [],
+  meta: null,
   route: "dashboard",
   selectedRuleId: null,
   alertFilter: "",
   stateFilter: "",
-  pluginFilter: "",
+  sourceFilter: "",
+  ruleFilter: "",
   outputFilter: "",
   refreshMs: DEFAULT_REFRESH_MS,
   refreshTimer: null,
@@ -37,9 +39,13 @@ function bindControls() {
     state.stateFilter = event.target.value;
     renderAlertsPage();
   });
-  document.getElementById("plugin-filter").addEventListener("input", (event) => {
-    state.pluginFilter = event.target.value.toLowerCase();
-    renderPluginsPage();
+  document.getElementById("source-filter").addEventListener("input", (event) => {
+    state.sourceFilter = event.target.value.toLowerCase();
+    renderSourcesPage();
+  });
+  document.getElementById("rule-filter").addEventListener("input", (event) => {
+    state.ruleFilter = event.target.value.toLowerCase();
+    renderRulesPage();
   });
   document.getElementById("output-filter").addEventListener("input", (event) => {
     state.outputFilter = event.target.value.toLowerCase();
@@ -137,7 +143,8 @@ function handleTimeZoneChange(event) {
   state.timeZone = event.target.value || "browser";
   renderDashboardPage();
   renderAlertsPage();
-  renderPluginsPage();
+  renderSourcesPage();
+  renderRulesPage();
   renderOutputsPage();
   renderSilencesPage();
   if (state.route === "detail") {
@@ -147,22 +154,26 @@ function handleTimeZoneChange(event) {
 
 async function refreshAll() {
   try {
-    const [alertsPayload, pluginsPayload, silencesPayload] = await Promise.all([
+    const [alertsPayload, pluginsPayload, silencesPayload, metaPayload] = await Promise.all([
       getJson("/alerts"),
       getJson("/plugins"),
       getJson("/silences"),
+      getJson("/meta"),
     ]);
     state.alerts = alertsPayload.alerts || [];
     state.plugins = pluginsPayload.plugins || [];
     state.silences = silencesPayload.silences || [];
+    state.meta = metaPayload || null;
 
     if (state.selectedRuleId && !state.alerts.find((alert) => alert.rule_id === state.selectedRuleId)) {
       state.selectedRuleId = null;
     }
 
+    renderBuildMeta();
     renderDashboardPage();
     renderAlertsPage();
-    renderPluginsPage();
+    renderSourcesPage();
+    renderRulesPage();
     renderOutputsPage();
     renderSilencesPage();
     if (state.route === "detail") {
@@ -178,6 +189,50 @@ function setRefreshStatus(message, isError) {
   const element = document.getElementById("refresh-status");
   element.textContent = message;
   element.classList.toggle("status-error", Boolean(isError));
+}
+
+function renderBuildMeta() {
+  const element = document.getElementById("viewer-build-meta");
+  const meta = state.meta;
+  if (!meta) {
+    element.classList.add("hidden");
+    element.innerHTML = "";
+    return;
+  }
+
+  const parts = [];
+  if (meta.version) {
+    parts.push(`<span>Kanary ${escapeHtml(String(meta.version))}</span>`);
+  }
+  if (meta.git_commit) {
+    parts.push(`<span>commit ${escapeHtml(shortCommit(String(meta.git_commit)))}</span>`);
+  }
+  if (meta.repository_url) {
+    parts.push(
+      `<a href="${escapeAttribute(String(meta.repository_url))}" target="_blank" rel="noopener noreferrer">GitHub Repository</a>`
+    );
+  } else if (meta.homepage_url) {
+    parts.push(
+      `<a href="${escapeAttribute(String(meta.homepage_url))}" target="_blank" rel="noopener noreferrer">Project Homepage</a>`
+    );
+  }
+  if (meta.documentation_url) {
+    parts.push(
+      `<a href="${escapeAttribute(String(meta.documentation_url))}" target="_blank" rel="noopener noreferrer">Documentation</a>`
+    );
+  }
+
+  if (parts.length === 0) {
+    element.classList.add("hidden");
+    element.innerHTML = "";
+    return;
+  }
+
+  element.classList.remove("hidden");
+  element.innerHTML = `
+    <strong>Project Metadata</strong>
+    <div class="viewer-build-meta-links">${parts.join('<span aria-hidden="true">·</span>')}</div>
+  `;
 }
 
 function renderDashboardPage() {
@@ -319,22 +374,46 @@ async function renderDetailPage() {
   }
 }
 
-function renderPluginsPage() {
-  const tbody = document.getElementById("plugins-body");
+function renderSourcesPage() {
+  const tbody = document.getElementById("sources-body");
   const plugins = state.plugins
-    .filter((plugin) => plugin.type !== "output")
-    .filter(matchesPluginFilter);
+    .filter((plugin) => plugin.type === "source")
+    .filter((plugin) => matchesPluginFilter(plugin, state.sourceFilter));
   tbody.innerHTML = plugins
     .map(
       (plugin) => `
-        <tr>
-          <td>${escapeHtml(plugin.type)}</td>
+        <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td>${escapeHtml(plugin.plugin_id)}</td>
           <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
-          <td>${escapeHtml(plugin.last_error || "-")}</td>
-          <td class="action-cell"><button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="${escapeHtml(plugin.type)}">Source</button></td>
+          <td>${formatPluginError(plugin)}</td>
+          <td class="action-cell"><button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button></td>
+        </tr>
+      `
+    )
+    .join("");
+
+  for (const button of tbody.querySelectorAll("[data-open-source]")) {
+    button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
+  }
+}
+
+function renderRulesPage() {
+  const tbody = document.getElementById("rules-body");
+  const plugins = state.plugins
+    .filter((plugin) => plugin.type === "rule")
+    .filter((plugin) => matchesPluginFilter(plugin, state.ruleFilter));
+  tbody.innerHTML = plugins
+    .map(
+      (plugin) => `
+        <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
+          <td>${escapeHtml(plugin.plugin_id)}</td>
+          <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
+          <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
+          <td>${escapeHtml(plugin.definition_file || "-")}</td>
+          <td>${formatPluginError(plugin)}</td>
+          <td class="action-cell"><button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button></td>
         </tr>
       `
     )
@@ -347,19 +426,38 @@ function renderPluginsPage() {
 
 function renderOutputsPage() {
   const tbody = document.getElementById("outputs-body");
+  const summary = document.getElementById("outputs-summary");
   const outputs = state.plugins
     .filter((plugin) => plugin.type === "output")
-    .filter(matchesOutputFilter);
+    .filter(matchesOutputFilter)
+    .sort(comparePluginHealth);
+
+  const failedOutputs = outputs.filter((plugin) => plugin.state === "failed");
+  summary.innerHTML = failedOutputs.length > 0
+    ? `
+      <div class="status-banner status-banner-failed">
+        <div class="status-banner-title">${escapeHtml(String(failedOutputs.length))} output plugin${failedOutputs.length === 1 ? "" : "s"} failed</div>
+        <div class="status-banner-body">Recent output failures are shown first. The Last Error column includes the current exception message from the runtime.</div>
+      </div>
+    `
+    : `
+      <div class="status-banner status-banner-ok">
+        <div class="status-banner-title">All output plugins are ready</div>
+        <div class="status-banner-body">No current delivery failure is reported by the runtime.</div>
+      </div>
+    `;
+
   tbody.innerHTML = outputs
     .map(
       (plugin) => `
-        <tr>
+        <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td>${escapeHtml(plugin.plugin_id)}</td>
           <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
           <td>${escapeHtml(String(plugin.run_count))}</td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
+          <td title="${escapeHtml(plugin.last_failure_at || "-")}">${escapeHtml(formatDateTime(plugin.last_failure_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
-          <td>${escapeHtml(plugin.last_error || "-")}</td>
+          <td>${formatPluginError(plugin)}</td>
           <td class="action-cell"><button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button></td>
         </tr>
       `
@@ -618,47 +716,34 @@ function matchesAlertFilter(alert) {
   if (!state.alertFilter) {
     return true;
   }
-  const haystack = [
+  return matchesTextFilter([
     alert.rule_id,
     alert.state,
     alert.message || "",
     (alert.matched_outputs || []).join(" "),
     alert.acked_by || "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes(state.alertFilter);
+    alert.owner || "",
+    (alert.tags || []).join(" "),
+  ], state.alertFilter);
 }
 
-function matchesPluginFilter(plugin) {
-  if (!state.pluginFilter) {
-    return true;
-  }
-  const haystack = [
+function matchesPluginFilter(plugin, filterValue) {
+  return matchesTextFilter([
     plugin.type,
     plugin.plugin_id,
     plugin.state,
     plugin.definition_file || "",
     plugin.last_error || "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes(state.pluginFilter);
+  ], filterValue);
 }
 
 function matchesOutputFilter(plugin) {
-  if (!state.outputFilter) {
-    return true;
-  }
-  const haystack = [
+  return matchesTextFilter([
     plugin.plugin_id,
     plugin.state,
     plugin.definition_file || "",
     plugin.last_error || "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes(state.outputFilter);
+  ], state.outputFilter);
 }
 
 function historyActionLabel(actionType) {
@@ -697,6 +782,15 @@ function parseIsoTime(value) {
 
 function compareAlerts(left, right) {
   return alertPriority(left) - alertPriority(right) || left.rule_id.localeCompare(right.rule_id);
+}
+
+function comparePluginHealth(left, right) {
+  const leftFailed = left.state === "failed" ? 0 : 1;
+  const rightFailed = right.state === "failed" ? 0 : 1;
+  if (leftFailed !== rightFailed) {
+    return leftFailed - rightFailed;
+  }
+  return parseIsoTime(right.last_updated_at) - parseIsoTime(left.last_updated_at) || left.plugin_id.localeCompare(right.plugin_id);
 }
 
 function alertPriority(alert) {
@@ -843,6 +937,52 @@ function parseCsv(value) {
     .filter(Boolean);
 }
 
+function matchesTextFilter(values, filterValue) {
+  const normalizedFilter = String(filterValue || "").trim().toLowerCase();
+  if (!normalizedFilter) {
+    return true;
+  }
+  const candidates = values.map((value) => String(value || "").toLowerCase());
+  if (hasGlob(normalizedFilter)) {
+    return candidates.some((candidate) => globToRegExp(normalizedFilter).test(candidate));
+  }
+  return candidates.some((candidate) => candidate.includes(normalizedFilter));
+}
+
+function hasGlob(value) {
+  return value.includes("*") || value.includes("?") || value.includes("[");
+}
+
+function globToRegExp(pattern) {
+  let regex = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      regex += ".*";
+      continue;
+    }
+    if (char === "?") {
+      regex += ".";
+      continue;
+    }
+    if (char === "[") {
+      const endIndex = pattern.indexOf("]", index + 1);
+      if (endIndex > index + 1) {
+        regex += pattern.slice(index, endIndex + 1);
+        index = endIndex;
+        continue;
+      }
+    }
+    regex += escapeRegExp(char);
+  }
+  regex += "$";
+  return new RegExp(regex);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function localDateTimeToIso(value) {
   return new Date(value).toISOString();
 }
@@ -855,6 +995,32 @@ function pluginStateToAlertState(stateName) {
   if (stateName === "failed") return "FIRING";
   if (stateName === "ready") return "OK";
   return "SUPPRESSED";
+}
+
+function pluginTableRowClass(plugin) {
+  return plugin.state === "failed" ? "table-row-failed" : "";
+}
+
+function formatPluginError(plugin) {
+  const errorText = plugin.last_error || "-";
+  if (plugin.state !== "failed") {
+    return escapeHtml(errorText);
+  }
+  const detail = plugin.last_error_detail
+    ? `
+      <details class="plugin-error-detail">
+        <summary>Traceback</summary>
+        <pre class="plugin-error-trace">${escapeHtml(plugin.last_error_detail)}</pre>
+      </details>
+    `
+    : "";
+  return `
+    <div class="plugin-error-block">
+      <div class="plugin-error-label">Plugin failed</div>
+      <div class="plugin-error-text">${escapeHtml(errorText)}</div>
+      ${detail}
+    </div>
+  `;
 }
 
 function statusToColor(status) {
@@ -890,6 +1056,14 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value);
+}
+
+function shortCommit(value) {
+  return value.length > 12 ? value.slice(0, 12) : value;
 }
 
 function highlightPythonLine(line) {

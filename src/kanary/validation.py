@@ -3,6 +3,7 @@ from typing import Any
 
 from .constants import AlertState, Severity
 from .output import Output, prepare_output_class
+from .patterns import matches_any_tag, matches_excluded_tag
 from .rule import Rule, prepare_rule_class
 from .source import Source, prepare_source_class
 
@@ -119,14 +120,14 @@ def _matching_outputs(rule_cls: type[Any], outputs: dict[str, type[Output]]) -> 
     matched: list[str] = []
     possible_states = {state.value for state in AlertState}
     for output_id, output_cls in outputs.items():
-        include_tags = set(getattr(output_cls, "include_tags", []))
-        exclude_tags = set(getattr(output_cls, "exclude_tags", []))
+        include_tags = list(getattr(output_cls, "include_tags", []))
+        exclude_tags = list(getattr(output_cls, "exclude_tags", []))
         include_states = set(getattr(output_cls, "include_states", []))
         exclude_states = set(getattr(output_cls, "exclude_states", []))
 
-        if include_tags and not rule_tags.intersection(include_tags):
+        if include_tags and not matches_any_tag(rule_tags, include_tags):
             continue
-        if exclude_tags and rule_tags.intersection(exclude_tags):
+        if exclude_tags and matches_excluded_tag(rule_tags, exclude_tags):
             continue
 
         allowed_states = set(possible_states)

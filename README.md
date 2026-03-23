@@ -1,6 +1,6 @@
 # Kanary
 
-Kanary is a Python-based alerting, notification, and reliability monitoring runtime.
+Kanary is a Python-based alerting, notification, and reliability monitoring runtime inspired by the historical “canary in a coal mine”
 You define three kinds of plugins in Python:
 
 - `Source`
@@ -25,6 +25,7 @@ If you use `uv`, this also works:
 ```bash
 uv tool install kanary
 ```
+Then `kanary` and `kanaryctl` executables will be installed.
 
 Installing from a source checkout is still supported, but it should be treated as a development workflow:
 
@@ -48,11 +49,12 @@ Then move in this order:
 1. Read [demo/basic_monitoring.py](demo/basic_monitoring.py) to understand the smallest possible `Source`, `Rule`, and `Output`.
 2. Read [docs/getting_started.md](docs/getting_started.md) and work through the examples in [examples/getting_started.py](examples/getting_started.py).
 3. Browse `examples/` for PostgreSQL, Discord, peer monitoring, and remote alert import.
-4. Create your own `rules/` directory and start with one `Source` and one `Rule`.
+4. Create your own `plugins/` directory and start with one `Source` and one `Rule`.
 
 ## Minimal Example
 
 The smallest working example is in [demo/basic_monitoring.py](demo/basic_monitoring.py).
+Make a directory to place plugin files then put the following scripts.
 
 ```python
 from datetime import datetime, timezone
@@ -121,6 +123,7 @@ In this example, you only implement the minimum interface:
 Internally, Kanary handles plugin loading, periodic source polling, rule evaluation, alert state tracking, the HTTP API, and the Web viewer.
 
 If you want shorter definitions later, you can switch to built-in helper classes such as `RangeRule`, `StaleRule`, and `ThresholdRule`.
+Users can create plugin class factory too.
 
 ## Running Kanary
 
@@ -186,6 +189,9 @@ Smallest example:
 More realistic examples:
 
 - [examples/getting_started.py](examples/getting_started.py)
+- [examples/factory_patterns.py](examples/factory_patterns.py)
+- [examples/fake_alarm_monitoring.py](examples/fake_alarm_monitoring.py)
+- [examples/fake_alarm_target.py](examples/fake_alarm_target.py)
 - [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](examples/discord_webhook_output.py)

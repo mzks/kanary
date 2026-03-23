@@ -14,9 +14,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Run the KANARY engine")
     run_parser.add_argument(
-        "rule_directories",
+        "plugin_directories",
         nargs="+",
-        help="One or more directories containing Python rule/source scripts.",
+        help="One or more directories containing Python Source, Rule, and Output plugins.",
     )
     run_parser.add_argument(
         "--exclude",
@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Port for the local control API and web viewer. Defaults to 8000.",
     )
     run_parser.add_argument(
+        "--disable-default-viewer",
+        action="store_true",
+        help="Disable the built-in default Web viewer while keeping the HTTP API enabled.",
+    )
+    run_parser.add_argument(
         "--state-db",
         default=os.environ.get("KANARY_SQLITE_PATH"),
         help="Optional SQLite database path for persisted history and runtime actions. Defaults to KANARY_SQLITE_PATH if set.",
@@ -53,11 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional node identifier used for peer export/import. Defaults to KANARY_NODE_ID or the local hostname.",
     )
 
-    lint_parser = subparsers.add_parser("lint", help="Lint a KANARY rule directory")
+    lint_parser = subparsers.add_parser("lint", help="Lint one or more KANARY plugin directories")
     lint_parser.add_argument(
-        "rule_directories",
+        "plugin_directories",
         nargs="+",
-        help="One or more directories containing Python rule/source scripts.",
+        help="One or more directories containing Python Source, Rule, and Output plugins.",
     )
     lint_parser.add_argument(
         "--exclude",
@@ -83,7 +88,7 @@ def main() -> int:
         return 2
 
     if args.command == "lint":
-        loader = RuleDirectoryLoader([Path(path) for path in args.rule_directories])
+        loader = RuleDirectoryLoader([Path(path) for path in args.plugin_directories])
         try:
             _, report = loader.inspect(exclude_patterns=args.exclude)
         except Exception as exc:
@@ -105,11 +110,12 @@ def main() -> int:
     )
     runtime = EngineRuntime(
         RuntimeConfig(
-            rule_directories=[Path(path) for path in args.rule_directories],
+            rule_directories=[Path(path) for path in args.plugin_directories],
             exclude_plugins=args.exclude,
             log_level=args.log_level,
             api_host=args.api_host,
             api_port=args.api_port,
+            enable_default_viewer=not args.disable_default_viewer,
             state_db_path=Path(args.state_db) if args.state_db else None,
             node_id=args.node_id,
         )

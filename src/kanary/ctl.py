@@ -43,6 +43,7 @@ def main() -> int:
 
     alerts_parser = subparsers.add_parser("alerts", help="Show current alerts")
     alerts_parser.add_argument("--json", action="store_true", help="Print raw JSON")
+    alerts_parser.add_argument("--filter", help="Filter alerts by text or glob")
 
     history_parser = subparsers.add_parser("history", help="Show persisted alert history for a rule")
     history_parser.add_argument("rule_id")
@@ -50,9 +51,11 @@ def main() -> int:
 
     plugins_parser = subparsers.add_parser("plugins", help="Show source/rule/output plugin status")
     plugins_parser.add_argument("--json", action="store_true", help="Print raw JSON")
+    plugins_parser.add_argument("--filter", help="Filter plugins by text or glob")
 
     silences_parser = subparsers.add_parser("silences", help="Show configured silences")
     silences_parser.add_argument("--json", action="store_true", help="Print raw JSON")
+    silences_parser.add_argument("--filter", help="Filter silences by text or glob")
 
     ack_parser = subparsers.add_parser("ack", help="Acknowledge an alert")
     ack_parser.add_argument("rule_id")
@@ -101,6 +104,19 @@ def main() -> int:
 
         if args.command == "alerts":
             payload = fetch_json(f"{args.base_url}/alerts")
+            if args.filter:
+                payload["alerts"] = [alert for alert in payload.get("alerts", []) if matches_row_filter(
+                    [
+                        alert.get("rule_id"),
+                        alert.get("state"),
+                        alert.get("message"),
+                        alert.get("acked_by"),
+                        alert.get("owner"),
+                        " ".join(alert.get("tags", [])),
+                        " ".join(alert.get("matched_outputs", [])),
+                    ],
+                    args.filter,
+                )]
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
@@ -117,6 +133,17 @@ def main() -> int:
 
         if args.command == "plugins":
             payload = fetch_json(f"{args.base_url}/plugins")
+            if args.filter:
+                payload["plugins"] = [plugin for plugin in payload.get("plugins", []) if matches_row_filter(
+                    [
+                        plugin.get("type"),
+                        plugin.get("plugin_id"),
+                        plugin.get("state"),
+                        plugin.get("definition_file"),
+                        plugin.get("last_error"),
+                    ],
+                    args.filter,
+                )]
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
@@ -125,6 +152,17 @@ def main() -> int:
 
         if args.command == "silences":
             payload = fetch_json(f"{args.base_url}/silences")
+            if args.filter:
+                payload["silences"] = [silence for silence in payload.get("silences", []) if matches_row_filter(
+                    [
+                        silence.get("silence_id"),
+                        silence.get("created_by"),
+                        silence.get("reason"),
+                        " ".join(silence.get("rule_patterns", [])),
+                        " ".join(silence.get("tags", [])),
+                    ],
+                    args.filter,
+                )]
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
@@ -212,6 +250,18 @@ def fetch_json(url: str, method: str = "GET", body: dict | None = None) -> dict:
         request.add_header("Content-Type", "application/json")
     with urlopen(request) as response:
         return json.loads(response.read().decode())
+
+
+def matches_row_filter(values: list[object], pattern: str) -> bool:
+    normalized_pattern = str(pattern or "").strip().lower()
+    if not normalized_pattern:
+        return True
+    candidates = [str(value or "").lower() for value in values]
+    if any(char in normalized_pattern for char in "*?["):
+        from fnmatch import fnmatch
+
+        return any(fnmatch(candidate, normalized_pattern) for candidate in candidates)
+    return any(normalized_pattern in candidate for candidate in candidates)
 
 
 def print_health(payload: dict) -> None:

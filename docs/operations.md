@@ -5,48 +5,50 @@
 Basic run:
 
 ```bash
-kanary ./rules
+kanary ./plugins
 ```
 
 Read multiple directories:
 
 ```bash
-kanary ./rules ./local-rules
+kanary ./plugins ./local-plugins
 ```
 
 Use the standard API and viewer port:
 
 ```bash
-kanary ./rules --api-port 8000
+kanary ./plugins --api-port 8000
 ```
 
 Expose the API and viewer on the LAN:
 
 ```bash
-kanary ./rules --api-host 0.0.0.0 --api-port 8000
+kanary ./plugins --api-host 0.0.0.0 --api-port 8000
 ```
 
 Change the log level:
 
 ```bash
-kanary ./rules --log-level DEBUG
+kanary ./plugins --log-level DEBUG
 ```
 
 Exclude plugins:
 
 ```bash
-kanary ./rules --exclude 'sqlite.*.stale' --exclude 'discord'
+kanary ./plugins --exclude 'sqlite.*.stale' --exclude 'discord'
 ```
 
 Main arguments:
 
 - `rule_directories...`
+  Plugin directories to load.
 - `--api-port`
 - `--api-host`
 - `--log-level`
 - `--state-db`
 - `--node-id`
 - `--exclude`
+- `--disable-default-viewer`
 
 Environment variables:
 
@@ -59,11 +61,11 @@ Kanary itself does not require any environment variables. Source-specific connec
 
 ## Runtime Behavior
 
-- Kanary loads one or more rule directories at startup.
+- Kanary loads one or more plugin directories at startup.
 - `@kanary.source`, `@kanary.rule`, and `@kanary.output` are the registration points.
 - Each source is polled in its own thread according to `interval`.
 - Rules are evaluated against the latest result from their source.
-- Rule directories are watched continuously and reloaded automatically.
+- Plugin directories are watched continuously and reloaded automatically.
 
 ## Web Viewer
 
@@ -77,7 +79,8 @@ The built-in viewer provides:
 
 - dashboard
 - alerts
-- plugins
+- sources
+- rules
 - outputs
 - silences
 - admin page
@@ -85,6 +88,7 @@ The built-in viewer provides:
 
 Every write operation available in the viewer is also available through `kanaryctl`.
 The viewer is the standard UI built on top of the HTTP API.
+If you only want the API and CLI, `--disable-default-viewer` makes `/viewer` return `404`.
 
 ## CLI
 
@@ -105,12 +109,12 @@ kanaryctl unsilence <silence_id> --operator operator_name
 kanaryctl reload
 ```
 
-## Persistence
+## Log history Persistence
 
 Enable SQLite history with `--state-db` or `KANARY_SQLITE_PATH`.
 
 ```bash
-kanary ./rules --state-db ./var/kanary.db
+kanary ./plugins --state-db ./var/kanary.db
 ```
 
 Stored data:

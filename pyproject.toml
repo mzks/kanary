@@ -4,10 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kanary"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python-based alerting, notification, and reliability monitoring runtime"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
+authors = [
+    {name = "Keita Mizukoshi"},
+]
 requires-python = ">=3.13"
 dependencies = [
     "psycopg[binary]>=3.2",
@@ -28,6 +31,7 @@ classifiers = [
 Homepage = "https://github.com/mzks/kanary"
 Repository = "https://github.com/mzks/kanary"
 Issues = "https://github.com/mzks/kanary/issues"
+Documentation = "https://github.com/mzks/kanary#readme"
 
 [project.scripts]
 kanary = "kanary.__main__:main"

@@ -43,7 +43,8 @@
         <nav class="sidebar">
           <a href="#dashboard" class="nav-link" data-route="dashboard">Dashboard</a>
           <a href="#alerts" class="nav-link" data-route="alerts">Alerts</a>
-          <a href="#plugins" class="nav-link" data-route="plugins">Plugins</a>
+          <a href="#sources" class="nav-link" data-route="sources">Sources</a>
+          <a href="#rules" class="nav-link" data-route="rules">Rules</a>
           <a href="#outputs" class="nav-link" data-route="outputs">Outputs</a>
           <a href="#silences" class="nav-link" data-route="silences">Silences</a>
           <a href="#admin" class="nav-link" data-route="admin">Admin</a>
@@ -75,7 +76,7 @@
                   <h2>All Alerts</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="alert-filter" type="search" placeholder="Filter by rule, state, message, output" />
+                  <input id="alert-filter" type="search" placeholder="Filter by rule, state, message, output. Supports glob." />
                   <select id="state-filter">
                     <option value="">All states</option>
                     <option value="FIRING">FIRING</option>
@@ -191,23 +192,22 @@
             </section>
           </section>
 
-          <section id="page-plugins" class="page hidden">
+          <section id="page-sources" class="page hidden">
             <section class="panel">
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Runtime Health</div>
-                  <h2>Source And Rule Plugins</h2>
+                  <h2>Source Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="plugin-filter" type="search" placeholder="Filter by type, plugin, state, file, error" />
+                  <input id="source-filter" type="search" placeholder="Filter by source, state, file, error. Supports glob." />
                 </div>
               </div>
               <div class="table-wrap">
                 <table class="data-table">
                   <thead>
                     <tr>
-                      <th>Type</th>
-                      <th>Plugin</th>
+                      <th>Source</th>
                       <th>State</th>
                       <th>Updated</th>
                       <th>File</th>
@@ -215,7 +215,36 @@
                       <th></th>
                     </tr>
                   </thead>
-                  <tbody id="plugins-body"></tbody>
+                  <tbody id="sources-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-rules" class="page hidden">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Runtime Health</div>
+                  <h2>Rule Plugins</h2>
+                </div>
+                <div class="toolbar">
+                  <input id="rule-filter" type="search" placeholder="Filter by rule, state, file, error. Supports glob." />
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Rule</th>
+                      <th>State</th>
+                      <th>Updated</th>
+                      <th>File</th>
+                      <th>Last Error</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="rules-body"></tbody>
                 </table>
               </div>
             </section>
@@ -229,9 +258,10 @@
                   <h2>Output Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="output-filter" type="search" placeholder="Filter by plugin, state, file, error" />
+                  <input id="output-filter" type="search" placeholder="Filter by plugin, state, file, error. Supports glob." />
                 </div>
               </div>
+              <div id="outputs-summary"></div>
               <div class="table-wrap">
                 <table class="data-table">
                   <thead>
@@ -240,6 +270,7 @@
                       <th>State</th>
                       <th>Runs</th>
                       <th>Updated</th>
+                      <th>Last Failure</th>
                       <th>File</th>
                       <th>Last Error</th>
                       <th></th>
@@ -361,6 +392,7 @@
                     <strong>Operational note</strong>
                     <p>All write operations in this viewer also exist in <code>kanaryctl</code>. Use the CLI for automation, the viewer for fast triage and dashboard monitoring.</p>
                   </div>
+                  <div id="viewer-build-meta" class="note-block viewer-build-meta hidden"></div>
                 </div>
               </section>
             </div>

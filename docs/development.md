@@ -19,8 +19,8 @@ uv run python -m unittest discover -s tests
 ## Lint
 
 ```bash
-uv run python -m kanary lint ./rules
-uv run python -m kanary lint ./rules ./local-rules
+uv run python -m kanary lint ./plugins
+uv run python -m kanary lint ./plugins ./local-plugins
 uv run python -m kanary lint ./examples --exclude console
 ```
 
@@ -41,7 +41,7 @@ Typical checks:
 
 ## Reload
 
-Rule directories are watched continuously and reloaded automatically on change.
+Plugin directories are watched continuously and reloaded automatically on change.
 
 ```text
 file change

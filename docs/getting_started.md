@@ -93,7 +93,7 @@ class LocalLoadBusy:
 
     def evaluate(self, payload, ctx):
         load = ctx.value("load1_per_cpu")
-        threshold = 0.70
+        threshold = 0.50
         if load is None:
             return kanary.Evaluation(
                 state=kanary.AlertState.OK,
@@ -140,8 +140,8 @@ class LocalLoadBusyThreshold(kanary.ThresholdRule):
     measurement = "load1_per_cpu"
     direction = "high"
     thresholds = [
-        (0.70, kanary.WARN),
-        (1.00, kanary.ERROR),
+        (0.50, kanary.WARN),
+        (0.90, kanary.ERROR),
     ]
 ```
 
@@ -164,6 +164,8 @@ Other common helper-class settings:
   - `measurement`, `per_seconds`, `high`, `low`
 
 Use a custom rule only when a helper class no longer matches the monitoring logic cleanly.
+
+If your environment is safe, you can test the alarm with the such command `openssl speed -multi 8`.
 
 ## 6. Write An Output
 

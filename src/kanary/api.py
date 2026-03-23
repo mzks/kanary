@@ -3,14 +3,19 @@ from __future__ import annotations
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ast
+from importlib import metadata as importlib_metadata
 import json
+import os
 from pathlib import Path
+import subprocess
+import tomllib
 from typing import Callable
 from urllib.parse import unquote
 
 from .engine import Engine
 
 WEB_ROOT = Path(__file__).with_name("web")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ControlAPI:
@@ -21,12 +26,15 @@ class ControlAPI:
         reload_callback: Callable[[], bool],
         host: str = "0.0.0.0",
         port: int = 8000,
+        enable_default_viewer: bool = True,
     ) -> None:
         self._engine_getter = engine_getter
         self._reload_callback = reload_callback
+        self._enable_default_viewer = enable_default_viewer
         self.host = host
         self.port = port
         self._server = ThreadingHTTPServer((host, port), self._build_handler())
+        self._server.control_api = self
 
     def start(self) -> None:
         self._server.serve_forever()
@@ -44,14 +52,23 @@ class ControlAPI:
                 request_path = self.path.split("?", 1)[0]
 
                 if request_path == "/viewer":
+                    if not self.server.control_api._enable_default_viewer:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                        return
                     self._write_file(WEB_ROOT / "index.html", "text/html; charset=utf-8")
                     return
 
                 if request_path == "/viewer/app.js":
+                    if not self.server.control_api._enable_default_viewer:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                        return
                     self._write_file(WEB_ROOT / "app.js", "application/javascript; charset=utf-8")
                     return
 
                 if request_path == "/viewer/styles.css":
+                    if not self.server.control_api._enable_default_viewer:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                        return
                     self._write_file(WEB_ROOT / "styles.css", "text/css; charset=utf-8")
                     return
 
@@ -97,6 +114,10 @@ class ControlAPI:
                             "alert_count": len(engine.alerts),
                         },
                     )
+                    return
+
+                if request_path == "/meta":
+                    self._write_json(HTTPStatus.OK, _installation_metadata())
                     return
 
                 if request_path == "/peer-status":
@@ -210,6 +231,7 @@ class ControlAPI:
                                 "state": status.state,
                                 "init_ok": status.init_ok,
                                 "last_error": status.last_error,
+                                "last_error_detail": status.last_error_detail,
                                 "run_count": status.run_count,
                                 "last_run_at": status.last_run_at,
                                 "last_success_at": status.last_success_at,
@@ -416,6 +438,86 @@ def _resolve_plugin(engine: Engine, plugin_type: str, plugin_id: str) -> object 
     if plugin_type == "output":
         return engine.outputs.get(plugin_id)
     return None
+
+
+def _installation_metadata() -> dict[str, object]:
+    result = {
+        "package_name": "kanary",
+        "version": None,
+        "git_commit": _git_commit_hash(),
+        "homepage_url": None,
+        "repository_url": None,
+        "documentation_url": None,
+        "issues_url": None,
+    }
+    try:
+        dist_metadata = importlib_metadata.metadata("kanary")
+        result["version"] = importlib_metadata.version("kanary")
+        for line in dist_metadata.get_all("Project-URL", []):
+            try:
+                label, url = [part.strip() for part in line.split(",", 1)]
+            except ValueError:
+                continue
+            if label == "Homepage":
+                result["homepage_url"] = url
+            elif label == "Repository":
+                result["repository_url"] = url
+            elif label == "Documentation":
+                result["documentation_url"] = url
+            elif label == "Issues":
+                result["issues_url"] = url
+        if result["homepage_url"] is None and dist_metadata.get("Home-page"):
+            result["homepage_url"] = dist_metadata.get("Home-page")
+        if result["repository_url"] is None:
+            result["repository_url"] = result["homepage_url"]
+        return result
+    except importlib_metadata.PackageNotFoundError:
+        return _installation_metadata_from_pyproject(result)
+
+
+def _installation_metadata_from_pyproject(base: dict[str, object]) -> dict[str, object]:
+    pyproject_path = PROJECT_ROOT / "pyproject.toml"
+    if not pyproject_path.exists():
+        return base
+    try:
+        project = tomllib.loads(pyproject_path.read_text(encoding="utf-8")).get("project", {})
+    except Exception:
+        return base
+
+    urls = project.get("urls", {})
+    return {
+        "package_name": project.get("name", base["package_name"]),
+        "version": project.get("version"),
+        "git_commit": base["git_commit"],
+        "homepage_url": urls.get("Homepage"),
+        "repository_url": urls.get("Repository") or urls.get("Homepage"),
+        "documentation_url": urls.get("Documentation"),
+        "issues_url": urls.get("Issues"),
+    }
+
+
+def _git_commit_hash() -> str | None:
+    env_value = os.environ.get("KANARY_GIT_COMMIT")
+    if env_value:
+        return env_value
+
+    git_dir = PROJECT_ROOT / ".git"
+    if not git_dir.exists():
+        return None
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    commit_hash = completed.stdout.strip()
+    return commit_hash or None
 
 
 def _viewer_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
