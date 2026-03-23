@@ -52,7 +52,7 @@ docker run --rm \
 ```
 
 公開済み image を使う場合は、`kanary:local` の代わりに
-`ghcr.io/mzks/kanary:latest` や `ghcr.io/mzks/kanary:0.2.0` のような
+`ghcr.io/mzks/kanary:latest` や `ghcr.io/mzks/kanary:0.2.2` のような
 version tag を指定します。
 
 container の既定 command は次です。

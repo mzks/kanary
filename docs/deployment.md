@@ -53,7 +53,7 @@ docker run --rm \
 
 When using the published image, replace `kanary:local` with
 `ghcr.io/mzks/kanary:latest` or a version tag such as
-`ghcr.io/mzks/kanary:0.2.0`.
+`ghcr.io/mzks/kanary:0.2.2`.
 
 The default container command is:
 
