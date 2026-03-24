@@ -69,12 +69,14 @@ Main subcommands:
   `--filter` supports text and glob matching.
 - `history`
   Shows stored history for one rule.
+  `--since` and `--limit` are applied client-side after fetching the history payload.
 - `plugins`
   Shows source, rule, and output plugin status.
   `--filter` supports text and glob matching.
 - `silences`
   Shows configured silences.
   `--filter` supports text and glob matching.
+  `--since` and `--limit` are applied client-side after fetching the silence list.
 - `ack`
   Acknowledges one alert.
 - `unack`
