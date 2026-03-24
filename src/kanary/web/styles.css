@@ -110,6 +110,17 @@ h3 {
   color: var(--muted);
 }
 
+.action-notice {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(76, 105, 135, 0.24);
+  background: rgba(76, 105, 135, 0.08);
+  color: var(--faded-blue);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .subtitle {
   margin-top: 10px;
   max-width: 700px;

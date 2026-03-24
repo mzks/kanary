@@ -65,23 +65,24 @@ class FakeAlarmRule:
     runbook = "Use curl against the fake alarm target to trigger or clear the alarm."
 
     def evaluate(self, payload, ctx):
-        measurement = ctx.measurement("manual_alarm")
-        if measurement is None:
+        value = ctx.value("manual_alarm")
+        metadata = ctx.metadata("manual_alarm")
+        if value is None:
             return kanary.Evaluation(
                 state=kanary.AlertState.OK,
                 payload=payload,
                 message="manual_alarm is missing",
             )
 
-        active = bool(measurement.value)
-        severity_name = str(measurement.metadata.get("severity") or "WARN").upper()
+        active = bool(value)
+        severity_name = str(metadata.get("severity") or "WARN").upper()
         severity = {
             "INFO": kanary.INFO,
             "WARN": kanary.WARN,
             "ERROR": kanary.ERROR,
             "CRITICAL": kanary.CRITICAL,
         }.get(severity_name, kanary.WARN)
-        message = str(measurement.metadata.get("message") or "Fake alarm target updated")
+        message = str(metadata.get("message") or "Fake alarm target updated")
 
         if active:
             return kanary.Evaluation(

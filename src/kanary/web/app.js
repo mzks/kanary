@@ -6,6 +6,9 @@ const state = {
   plugins: [],
   silences: [],
   meta: null,
+  pendingActions: new Set(),
+  lastActionSnapshots: new Map(),
+  expandedPluginErrors: new Set(),
   route: "dashboard",
   selectedRuleId: null,
   alertFilter: "",
@@ -53,6 +56,8 @@ function bindControls() {
   });
   document.getElementById("ack-button").addEventListener("click", submitAck);
   document.getElementById("unack-button").addEventListener("click", submitUnack);
+  document.getElementById("ack-operator").addEventListener("input", syncActionButtonState);
+  document.getElementById("ack-reason").addEventListener("input", syncActionButtonState);
   document.getElementById("silence-for-button").addEventListener("click", submitSilenceFor);
   document.getElementById("silence-window-button").addEventListener("click", submitSilenceWindow);
   document.getElementById("admin-duration-button").addEventListener("click", submitAdminDurationSilence);
@@ -363,6 +368,7 @@ async function renderDetailPage() {
     row("Message", alert.message || "-"),
   ].join("");
   document.getElementById("detail-source-button").addEventListener("click", () => openSourceModal("rule", alert.rule_id));
+  updateDetailActionAvailability(alert);
 
   document.getElementById("payload-content").textContent = JSON.stringify(alert.payload || {}, null, 2);
 
@@ -397,6 +403,7 @@ function renderSourcesPage() {
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
   }
+  bindPluginErrorDetailToggles(tbody);
 }
 
 function renderRulesPage() {
@@ -422,6 +429,7 @@ function renderRulesPage() {
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
   }
+  bindPluginErrorDetailToggles(tbody);
 }
 
 function renderOutputsPage() {
@@ -467,6 +475,7 @@ function renderOutputsPage() {
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
   }
+  bindPluginErrorDetailToggles(tbody);
 }
 
 function renderSilencesPage() {
@@ -543,9 +552,34 @@ function renderHistory(history) {
   container.innerHTML = entries.map((entry) => entry.html).join("") || `<div class="history-item">No history</div>`;
 }
 
+function updateDetailActionAvailability(alert) {
+  const ackButton = document.getElementById("ack-button");
+  const unackButton = document.getElementById("unack-button");
+  const ackNotice = document.getElementById("ack-notice");
+  const duplicateAck = shouldSkipRepeatedAlertAction("ack", alert.rule_id, alert, currentAckActionInput());
+  if (ackButton) {
+    ackButton.disabled = state.pendingActions.has("acknowledge") || duplicateAck;
+  }
+  if (unackButton) {
+    unackButton.disabled = alert.state !== "ACKED" || state.pendingActions.has("acknowledge");
+  }
+  if (ackNotice) {
+    if (duplicateAck) {
+      ackNotice.textContent = "ACK is unavailable because this alert and the current ACK input match the last acknowledged version.";
+      ackNotice.classList.remove("hidden");
+    } else {
+      ackNotice.textContent = "";
+      ackNotice.classList.add("hidden");
+    }
+  }
+}
+
 async function submitAck() {
   const alert = getSelectedAlert();
   if (!alert) {
+    return;
+  }
+  if (state.pendingActions.has("acknowledge")) {
     return;
   }
   const operator = document.getElementById("ack-operator").value.trim();
@@ -554,8 +588,18 @@ async function submitAck() {
     window.alert("Operator is required.");
     return;
   }
-  await postJson(`/alerts/${encodeURIComponent(alert.rule_id)}/ack`, { operator, reason });
-  refreshAll();
+  await runPendingAction("acknowledge", ["ack-button", "unack-button"], async () => {
+    const latestAlert = await fetchLatestAlert(alert.rule_id);
+    const actionInput = { operator, reason };
+    if (shouldSkipRepeatedAlertAction("ack", alert.rule_id, latestAlert, actionInput)) {
+      setRefreshStatus("Skipped duplicate ACK: the alert content and ACK input have not changed.", false);
+      await refreshAll();
+      return;
+    }
+    await postJson(`/alerts/${encodeURIComponent(alert.rule_id)}/ack`, { operator, reason });
+    await refreshAll();
+    rememberAlertActionSnapshot("ack", alert.rule_id, actionInput);
+  });
 }
 
 async function submitUnack() {
@@ -563,14 +607,32 @@ async function submitUnack() {
   if (!alert) {
     return;
   }
+  if (alert.state !== "ACKED" || state.pendingActions.has("acknowledge")) {
+    return;
+  }
   const operator = document.getElementById("ack-operator").value.trim();
   const reason = document.getElementById("ack-reason").value.trim();
   if (!operator) {
     window.alert("Operator is required.");
     return;
   }
-  await postJson(`/alerts/${encodeURIComponent(alert.rule_id)}/unack`, { operator, reason });
-  refreshAll();
+  await runPendingAction("acknowledge", ["ack-button", "unack-button"], async () => {
+    const latestAlert = await fetchLatestAlert(alert.rule_id);
+    if (latestAlert && latestAlert.state !== "ACKED") {
+      setRefreshStatus("Skipped UNACK: the alert is not currently acknowledged.", false);
+      await refreshAll();
+      return;
+    }
+    const actionInput = { operator, reason };
+    if (shouldSkipRepeatedAlertAction("unack", alert.rule_id, latestAlert, actionInput)) {
+      setRefreshStatus("Skipped duplicate UNACK: the alert content and ACK input have not changed.", false);
+      await refreshAll();
+      return;
+    }
+    await postJson(`/alerts/${encodeURIComponent(alert.rule_id)}/unack`, { operator, reason });
+    await refreshAll();
+    rememberAlertActionSnapshot("unack", alert.rule_id, actionInput);
+  });
 }
 
 async function submitSilenceFor() {
@@ -585,13 +647,21 @@ async function submitSilenceFor() {
     window.alert("Operator and minutes are required.");
     return;
   }
-  await postJson("/silences/duration", {
-    operator,
-    duration_minutes: minutes,
-    reason,
-    rule_patterns: [alert.rule_id],
+  await runPendingAction("detail-silence-duration", ["silence-for-button"], async () => {
+    const latestAlert = await fetchLatestAlert(alert.rule_id);
+    if (shouldSkipRepeatedAlertAction("silence-duration", alert.rule_id, latestAlert)) {
+      setRefreshStatus("Skipped duplicate silence: the alert content has not changed.", false);
+      return;
+    }
+    await postJson("/silences/duration", {
+      operator,
+      duration_minutes: minutes,
+      reason,
+      rule_patterns: [alert.rule_id],
+    });
+    await refreshAll();
+    rememberAlertActionSnapshot("silence-duration", alert.rule_id);
   });
-  refreshAll();
 }
 
 async function submitSilenceWindow() {
@@ -607,14 +677,22 @@ async function submitSilenceWindow() {
     window.alert("Operator, start, and end are required.");
     return;
   }
-  await postJson("/silences/window", {
-    operator,
-    start_at: localDateTimeToIso(startAt),
-    end_at: localDateTimeToIso(endAt),
-    reason,
-    rule_patterns: [alert.rule_id],
+  await runPendingAction("detail-silence-window", ["silence-window-button"], async () => {
+    const latestAlert = await fetchLatestAlert(alert.rule_id);
+    if (shouldSkipRepeatedAlertAction("silence-window", alert.rule_id, latestAlert)) {
+      setRefreshStatus("Skipped duplicate silence window: the alert content has not changed.", false);
+      return;
+    }
+    await postJson("/silences/window", {
+      operator,
+      start_at: localDateTimeToIso(startAt),
+      end_at: localDateTimeToIso(endAt),
+      reason,
+      rule_patterns: [alert.rule_id],
+    });
+    await refreshAll();
+    rememberAlertActionSnapshot("silence-window", alert.rule_id);
   });
-  refreshAll();
 }
 
 async function submitAdminDurationSilence() {
@@ -628,16 +706,18 @@ async function submitAdminDurationSilence() {
     window.alert("Operator, minutes, and at least one rule pattern or tag are required.");
     return;
   }
-  await postJson("/silences/duration", {
-    operator,
-    duration_minutes: minutes,
-    start_at: startAt ? localDateTimeToIso(startAt) : undefined,
-    reason,
-    rule_patterns: rulePatterns,
-    tags,
+  await runPendingAction("admin-silence-duration", ["admin-duration-button"], async () => {
+    await postJson("/silences/duration", {
+      operator,
+      duration_minutes: minutes,
+      start_at: startAt ? localDateTimeToIso(startAt) : undefined,
+      reason,
+      rule_patterns: rulePatterns,
+      tags,
+    });
+    await refreshAll();
+    window.location.hash = "#silences";
   });
-  refreshAll();
-  window.location.hash = "#silences";
 }
 
 async function submitAdminWindowSilence() {
@@ -651,21 +731,25 @@ async function submitAdminWindowSilence() {
     window.alert("Operator, start, end, and at least one rule pattern or tag are required.");
     return;
   }
-  await postJson("/silences/window", {
-    operator,
-    start_at: localDateTimeToIso(startAt),
-    end_at: localDateTimeToIso(endAt),
-    reason,
-    rule_patterns: rulePatterns,
-    tags,
+  await runPendingAction("admin-silence-window", ["admin-window-button"], async () => {
+    await postJson("/silences/window", {
+      operator,
+      start_at: localDateTimeToIso(startAt),
+      end_at: localDateTimeToIso(endAt),
+      reason,
+      rule_patterns: rulePatterns,
+      tags,
+    });
+    await refreshAll();
+    window.location.hash = "#silences";
   });
-  refreshAll();
-  window.location.hash = "#silences";
 }
 
 async function reloadEngine() {
-  await postJson("/reload", {});
-  refreshAll();
+  await runPendingAction("reload-engine", ["admin-reload-button"], async () => {
+    await postJson("/reload", {});
+    await refreshAll();
+  });
 }
 
 async function openSourceModal(pluginType, pluginId) {
@@ -1006,9 +1090,10 @@ function formatPluginError(plugin) {
   if (plugin.state !== "failed") {
     return escapeHtml(errorText);
   }
+  const isExpanded = state.expandedPluginErrors.has(plugin.plugin_id);
   const detail = plugin.last_error_detail
     ? `
-      <details class="plugin-error-detail">
+      <details class="plugin-error-detail" data-plugin-error-detail="${escapeAttribute(plugin.plugin_id)}" ${isExpanded ? "open" : ""}>
         <summary>Traceback</summary>
         <pre class="plugin-error-trace">${escapeHtml(plugin.last_error_detail)}</pre>
       </details>
@@ -1021,6 +1106,19 @@ function formatPluginError(plugin) {
       ${detail}
     </div>
   `;
+}
+
+function bindPluginErrorDetailToggles(container) {
+  for (const detail of container.querySelectorAll("[data-plugin-error-detail]")) {
+    const pluginId = detail.dataset.pluginErrorDetail;
+    detail.addEventListener("toggle", () => {
+      if (detail.open) {
+        state.expandedPluginErrors.add(pluginId);
+      } else {
+        state.expandedPluginErrors.delete(pluginId);
+      }
+    });
+  }
 }
 
 function statusToColor(status) {
@@ -1047,6 +1145,122 @@ async function postJson(path, body) {
     throw new Error(await response.text());
   }
   return response.json();
+}
+
+async function runPendingAction(actionKey, buttonIds, callback) {
+  if (state.pendingActions.has(actionKey)) {
+    return;
+  }
+  const buttons = buttonIds
+    .map((buttonId) => document.getElementById(buttonId))
+    .filter((button) => button !== null);
+  const previousLabels = buttons.map((button) => button.textContent);
+  state.pendingActions.add(actionKey);
+  for (const button of buttons) {
+    button.disabled = true;
+    button.dataset.pendingLabel = button.textContent;
+    button.textContent = "Submitting...";
+  }
+  try {
+    await callback();
+  } finally {
+    state.pendingActions.delete(actionKey);
+    buttons.forEach((button, index) => {
+      button.textContent = previousLabels[index];
+    });
+    syncActionButtonState();
+  }
+}
+
+function syncActionButtonState() {
+  const alert = getSelectedAlert();
+  if (alert) {
+    updateDetailActionAvailability(alert);
+  }
+
+  const pendingMappings = [
+    { actionKey: "detail-silence-duration", buttonId: "silence-for-button" },
+    { actionKey: "detail-silence-window", buttonId: "silence-window-button" },
+    { actionKey: "admin-silence-duration", buttonId: "admin-duration-button" },
+    { actionKey: "admin-silence-window", buttonId: "admin-window-button" },
+    { actionKey: "reload-engine", buttonId: "admin-reload-button" },
+  ];
+  for (const mapping of pendingMappings) {
+    const button = document.getElementById(mapping.buttonId);
+    if (!button) {
+      continue;
+    }
+    button.disabled = state.pendingActions.has(mapping.actionKey);
+  }
+}
+
+async function fetchLatestAlert(ruleId) {
+  const payload = await getJson("/alerts");
+  const latestAlert = (payload.alerts || []).find((alert) => alert.rule_id === ruleId);
+  return latestAlert || null;
+}
+
+function rememberAlertActionSnapshot(actionType, ruleId, actionInput = null) {
+  const alert = state.alerts.find((item) => item.rule_id === ruleId);
+  if (!alert) {
+    return;
+  }
+  state.lastActionSnapshots.set(`${actionType}:${ruleId}`, normalizeAlertSnapshot(alert, actionInput));
+}
+
+function shouldSkipRepeatedAlertAction(actionType, ruleId, latestAlert, actionInput = null) {
+  if (!latestAlert) {
+    return false;
+  }
+  const key = `${actionType}:${ruleId}`;
+  const previousSnapshot = state.lastActionSnapshots.get(key);
+  if (!previousSnapshot) {
+    return false;
+  }
+  return JSON.stringify(previousSnapshot) === JSON.stringify(normalizeAlertSnapshot(latestAlert, actionInput));
+}
+
+function normalizeAlertSnapshot(alert, actionInput = null) {
+  const snapshot = {
+    rule_id: alert.rule_id,
+    state: alert.state,
+    severity: alert.severity,
+    message: alert.message || "",
+    payload: stripTimestamps(alert.payload || {}),
+  };
+  if (actionInput) {
+    snapshot.action_input = {
+      operator: actionInput.operator || "",
+      reason: actionInput.reason || "",
+    };
+  }
+  return snapshot;
+}
+
+function currentAckActionInput() {
+  const operatorField = document.getElementById("ack-operator");
+  const reasonField = document.getElementById("ack-reason");
+  return {
+    operator: operatorField ? operatorField.value.trim() : "",
+    reason: reasonField ? reasonField.value.trim() : "",
+  };
+}
+
+function stripTimestamps(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripTimestamps);
+  }
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "timestamp") {
+        continue;
+      }
+      result[key] = stripTimestamps(child);
+    }
+    return result;
+  }
+  return value;
 }
 
 function escapeHtml(value) {
