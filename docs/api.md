@@ -24,6 +24,7 @@ Use `--api-host` and `--api-port` to change the bind address.
   Returns alert events and operator actions for one rule.
 - `GET /silences`
   Returns active, scheduled, and cancelled silences.
+  The raw API does not add a separate `EXPIRED` state. The Web viewer and `kanaryctl` may derive `EXPIRED` locally for silences whose window has already ended.
 - `GET /plugins`
   Returns current status for sources, rules, and outputs.
 - `GET /viewer`
@@ -68,12 +69,14 @@ Main subcommands:
   `--filter` supports text and glob matching.
 - `history`
   Shows stored history for one rule.
+  `--since` and `--limit` are applied client-side after fetching the history payload.
 - `plugins`
   Shows source, rule, and output plugin status.
   `--filter` supports text and glob matching.
 - `silences`
   Shows configured silences.
   `--filter` supports text and glob matching.
+  `--since` and `--limit` are applied client-side after fetching the silence list.
 - `ack`
   Acknowledges one alert.
 - `unack`

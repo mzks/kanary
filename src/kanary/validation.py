@@ -45,10 +45,6 @@ def validate_source_class(source_id: str, source_cls: type[Any]) -> ValidationRe
         prepare_source_class(source_cls)
     except Exception as exc:
         report.errors.append(str(exc))
-        return report
-    interval = getattr(source_cls, "interval", None)
-    if not isinstance(interval, (int, float)) or interval <= 0:
-        report.errors.append(f"source '{source_id}' interval must be a positive number")
     return report
 
 

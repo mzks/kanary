@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -48,6 +49,8 @@ def main() -> int:
     history_parser = subparsers.add_parser("history", help="Show persisted alert history for a rule")
     history_parser.add_argument("rule_id")
     history_parser.add_argument("--json", action="store_true", help="Print raw JSON")
+    history_parser.add_argument("--limit", type=int, help="Show only the most recent N entries in each history section")
+    history_parser.add_argument("--since", help="Show only entries at or after this ISO timestamp")
 
     plugins_parser = subparsers.add_parser("plugins", help="Show source/rule/output plugin status")
     plugins_parser.add_argument("--json", action="store_true", help="Print raw JSON")
@@ -56,6 +59,8 @@ def main() -> int:
     silences_parser = subparsers.add_parser("silences", help="Show configured silences")
     silences_parser.add_argument("--json", action="store_true", help="Print raw JSON")
     silences_parser.add_argument("--filter", help="Filter silences by text or glob")
+    silences_parser.add_argument("--limit", type=int, help="Show only the most recent N silences")
+    silences_parser.add_argument("--since", help="Show only silences at or after this ISO timestamp")
 
     ack_parser = subparsers.add_parser("ack", help="Acknowledge an alert")
     ack_parser.add_argument("rule_id")
@@ -125,6 +130,7 @@ def main() -> int:
 
         if args.command == "history":
             payload = fetch_json(f"{args.base_url}/history/{args.rule_id}")
+            payload = apply_history_filters(payload, since=args.since, limit=args.limit)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
@@ -163,6 +169,7 @@ def main() -> int:
                     ],
                     args.filter,
                 )]
+            payload = apply_silence_filters(payload, since=args.since, limit=args.limit)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
@@ -384,13 +391,8 @@ def print_silences(payload: dict) -> None:
     )
     print(header)
     print("-" * len(header))
-    for row in silences:
-        if row["cancelled_at"] is not None:
-            status = "cancelled"
-        elif row["active"]:
-            status = "active"
-        else:
-            status = "scheduled"
+    for row in sorted(silences, key=silence_sort_key):
+        status = silence_display_status(row).lower()
         target = ", ".join(row["rule_patterns"] or row["tags"]) or "-"
         print(
             f"{row['silence_id']:<{id_width}}  "
@@ -401,6 +403,67 @@ def print_silences(payload: dict) -> None:
             f"{target:<{target_width}}  "
             f"{row.get('reason') or ''}"
         )
+
+
+def apply_silence_filters(payload: dict, *, since: str | None, limit: int | None) -> dict:
+    silences = list(payload.get("silences", []))
+    since_dt = parse_iso_datetime(since)
+    if since_dt is not None:
+        filtered: list[dict] = []
+        for silence in silences:
+            reference = silence_recency_key(silence)
+            if reference >= since_dt:
+                filtered.append(silence)
+        silences = filtered
+    silences = sorted(silences, key=silence_recency_key, reverse=True)
+    if limit is not None and limit >= 0:
+        silences = silences[:limit]
+    payload["silences"] = silences
+    return payload
+
+
+def silence_display_status(row: dict) -> str:
+    if row.get("cancelled_at") is not None:
+        return "CANCELLED"
+    if row.get("active"):
+        return "ACTIVE"
+    now = datetime.now(timezone.utc)
+    end_at = parse_iso_datetime(row.get("end_at"))
+    start_at = parse_iso_datetime(row.get("start_at"))
+    if end_at is not None and end_at <= now:
+        return "EXPIRED"
+    if start_at is not None and start_at > now:
+        return "SCHEDULED"
+    return "EXPIRED"
+
+
+def silence_sort_key(row: dict) -> tuple[int, str]:
+    rank = {
+        "ACTIVE": 0,
+        "SCHEDULED": 1,
+        "EXPIRED": 2,
+        "CANCELLED": 3,
+    }.get(silence_display_status(row), 4)
+    return (rank, str(row.get("start_at") or ""))
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = str(value).replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def silence_recency_key(row: dict) -> datetime:
+    end_at = parse_iso_datetime(row.get("end_at"))
+    start_at = parse_iso_datetime(row.get("start_at"))
+    return end_at or start_at or datetime.min.replace(tzinfo=timezone.utc)
 
 
 def print_history(payload: dict) -> None:
@@ -433,6 +496,38 @@ def print_history(payload: dict) -> None:
                 f"{action['operator']}  "
                 f"{action.get('reason') or ''}"
             )
+
+
+def apply_history_filters(payload: dict, *, since: str | None, limit: int | None) -> dict:
+    since_dt = parse_iso_datetime(since)
+
+    events = list(payload.get("alert_events", []))
+    actions = list(payload.get("operator_actions", []))
+
+    if since_dt is not None:
+        events = [
+            event for event in events
+            if history_entry_time(event.get("occurred_at")) >= since_dt
+        ]
+        actions = [
+            action for action in actions
+            if history_entry_time(action.get("created_at")) >= since_dt
+        ]
+
+    events = sorted(events, key=lambda event: history_entry_time(event.get("occurred_at")), reverse=True)
+    actions = sorted(actions, key=lambda action: history_entry_time(action.get("created_at")), reverse=True)
+
+    if limit is not None and limit >= 0:
+        events = events[:limit]
+        actions = actions[:limit]
+
+    payload["alert_events"] = events
+    payload["operator_actions"] = actions
+    return payload
+
+
+def history_entry_time(value: str | None) -> datetime:
+    return parse_iso_datetime(value) or datetime.min.replace(tzinfo=timezone.utc)
 
 
 def severity_label(value: int | None) -> str:

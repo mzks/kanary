@@ -59,7 +59,9 @@ class LocalLoadSource:
 - `poll(self, ctx)`
 - `kanary.SourceResult(...)` を返すこと
 
-`interval` は source の取得間隔です。省略すると 60 秒です。  
+`interval` は source の取得間隔です。省略すると 60 秒です。wall-clock に
+合わせたい場合は、`*/5 * * * *` のような Unix cron 互換 5-field の
+`schedule` も使えます。ただし `interval` と `schedule` の同時指定はしません。  
 `init(self, ctx)` と `terminate(self, ctx)` も必要に応じて実装できます。
 
 ## 4. Rule を作る

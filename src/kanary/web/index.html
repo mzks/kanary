@@ -136,6 +136,7 @@
                       <button id="ack-button" class="button">ACK</button>
                       <button id="unack-button" class="button button-secondary">UNACK</button>
                     </div>
+                    <div id="ack-notice" class="action-notice hidden" role="status" aria-live="polite"></div>
                   </section>
 
                   <section class="panel-subsection">
@@ -288,6 +289,13 @@
                 <div>
                   <div class="panel-kicker">Operator Scheduling</div>
                   <h2>Silences</h2>
+                </div>
+                <div class="toolbar">
+                  <input id="silence-filter" type="search" placeholder="Filter by id, status, target, operator, reason. Supports glob." />
+                  <label class="toolbar-checkbox">
+                    <input id="silence-hide-past" type="checkbox" checked />
+                    <span>Hide cancelled and expired</span>
+                  </label>
                 </div>
               </div>
               <div class="table-wrap">

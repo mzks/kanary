@@ -72,7 +72,10 @@ The minimum source interface is:
 - `poll(self, ctx)`
 - return `kanary.SourceResult(...)`
 
-`interval` controls how often the source is polled. The default is 60 seconds.
+`interval` controls how often the source is polled. If you omit it, the default
+is 60 seconds. If you prefer wall-clock timing, you can use `schedule` with a
+Unix cron-compatible 5-field expression such as `*/5 * * * *`. Do not set both
+at the same time.
 You can also implement `init(self, ctx)` and `terminate(self, ctx)`.
 
 ## 4. Write A Rule

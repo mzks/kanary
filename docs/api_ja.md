@@ -24,6 +24,7 @@
   1 つの rule に対する alert event と operator action を返します。
 - `GET /silences`
   active, scheduled, cancelled の silence を返します。
+  raw API 自体には `EXPIRED` 状態は追加しません。Web viewer と `kanaryctl` では、すでに終了した silence を表示上 `EXPIRED` と導出することがあります。
 - `GET /plugins`
   source, rule, output plugin の current status を返します。
 - `GET /viewer`
@@ -67,12 +68,14 @@
   `--filter` で text または glob matching が使えます。
 - `history`
   1 つの rule の保存済み history を表示します。
+  `--since` と `--limit` は history payload を取得した後に client-side で適用します。
 - `plugins`
   source, rule, output plugin の状態を表示します。
   `--filter` で text または glob matching が使えます。
 - `silences`
   設定済み silence を表示します。
   `--filter` で text または glob matching が使えます。
+  `--since` と `--limit` は silence 一覧を取得した後に client-side で適用します。
 - `ack`
   1 つの alert を acknowledge します。
 - `unack`

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import threading
@@ -11,6 +11,7 @@ from .api import ControlAPI
 from .engine import Engine
 from .filtering import apply_excludes
 from .loader import RuleDirectoryLoader
+from .source import compiled_schedule
 from .store import build_store
 
 logger = logging.getLogger("kanary.runtime")
@@ -156,11 +157,19 @@ class EngineRuntime:
 
     def _source_loop(self, source_id: str, stop_event: threading.Event) -> None:
         assert self.engine is not None
+        next_run_at: datetime | None = None
         while not stop_event.is_set() and not self._stop_event.is_set():
             source = self.engine.sources.get(source_id)
             if source is None:
                 return
             now = datetime.now().astimezone()
+            schedule = compiled_schedule(source)
+            if schedule is not None:
+                if next_run_at is None:
+                    next_run_at = _initial_schedule_run_at(schedule, now)
+                if now < next_run_at:
+                    stop_event.wait((next_run_at - now).total_seconds())
+                    continue
             try:
                 payload = source.poll({"engine": self.engine, "now": now})
                 alerts = self.engine.evaluate_source(source_id, payload, now=now)
@@ -169,7 +178,10 @@ class EngineRuntime:
             except Exception as exc:
                 self.engine.record_source_failure(source_id, str(exc), now=now)
                 logger.exception("source '%s' failed", source_id)
-            stop_event.wait(source.interval)
+            if schedule is not None:
+                next_run_at = schedule.next_after(now)
+                continue
+            stop_event.wait(float(source.interval))
 
     def _print_alerts(self, alerts: dict) -> None:
         rows = []
@@ -199,3 +211,10 @@ def _json_default(value: object) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _initial_schedule_run_at(schedule, now: datetime) -> datetime:
+    candidate = schedule.next_after(now - timedelta(minutes=1))
+    if candidate <= now:
+        return now
+    return candidate

@@ -599,6 +599,72 @@ class BufferedSourceTest(unittest.TestCase):
             source.terminate({})
 
 
+class SourceScheduleTest(unittest.TestCase):
+    def test_parse_cron_schedule_supports_five_fields_and_macros(self) -> None:
+        from kanary.schedule import parse_schedule
+
+        five_field = parse_schedule("*/5 * * * *")
+        macro = parse_schedule("@hourly")
+
+        self.assertTrue(five_field.matches(datetime(2026, 3, 23, 10, 15, tzinfo=timezone.utc)))
+        self.assertFalse(five_field.matches(datetime(2026, 3, 23, 10, 16, tzinfo=timezone.utc)))
+        self.assertTrue(macro.matches(datetime(2026, 3, 23, 10, 0, tzinfo=timezone.utc)))
+        self.assertFalse(macro.matches(datetime(2026, 3, 23, 10, 5, tzinfo=timezone.utc)))
+
+    def test_source_requires_exactly_one_of_interval_or_schedule(self) -> None:
+        class MissingTimingSource(kanary.Source):
+            source_id = "missing.timing"
+
+            def poll(self, ctx):
+                return kanary.SourceResult()
+
+        class ConflictingTimingSource(kanary.Source):
+            source_id = "conflicting.timing"
+            interval = 10.0
+            schedule = "*/5 * * * *"
+
+            def poll(self, ctx):
+                return kanary.SourceResult()
+
+        cls = kanary.register_source(MissingTimingSource)
+        self.assertEqual(cls.interval, 60.0)
+        with self.assertRaisesRegex(ValueError, "must not define both interval and schedule"):
+            kanary.register_source(ConflictingTimingSource)
+
+    def test_schedule_source_validation_rejects_invalid_cron(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "plugins.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source", schedule="bad cron")
+                    class ExampleSource:
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(tmp)
+            with self.assertRaisesRegex(ValueError, "source 'example.source' schedule is invalid"):
+                loader.inspect()
+
+    def test_initial_schedule_run_allows_current_matching_minute(self) -> None:
+        from kanary.runtime import _initial_schedule_run_at
+        from kanary.schedule import parse_schedule
+
+        schedule = parse_schedule("*/5 * * * *")
+        now = datetime(2026, 3, 23, 10, 15, 30, tzinfo=timezone.utc)
+        self.assertEqual(_initial_schedule_run_at(schedule, now), now)
+
+        later = datetime(2026, 3, 23, 10, 16, 30, tzinfo=timezone.utc)
+        self.assertEqual(
+            _initial_schedule_run_at(schedule, later),
+            datetime(2026, 3, 23, 10, 20, tzinfo=timezone.utc),
+        )
+
+
 class RuleDirectoryLoaderTest(unittest.TestCase):
     def test_loads_python_files_from_rule_directory(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -655,7 +721,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                     """
                     import kanary
 
-                    @kanary.source(source_id="example.source")
+                    @kanary.source(source_id="example.source", interval=60.0)
                     class ExampleSource:
                         def poll(self, ctx):
                             return kanary.SourceResult()
@@ -696,6 +762,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                     @kanary.source
                     class ExampleSource(kanary.Source):
                         source_id = "example.source"
+                        interval = 60.0
 
                         def poll(self, ctx):
                             return kanary.SourceResult()
@@ -840,7 +907,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                     """
                     import kanary
 
-                    @kanary.source(source_id="example.source")
+                    @kanary.source(source_id="example.source", interval=60.0)
                     class ExampleSource:
                         def poll(self, ctx):
                             return kanary.SourceResult()
@@ -887,7 +954,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                     """
                     import kanary
 
-                    @kanary.source(source_id="example.source")
+                    @kanary.source(source_id="example.source", interval=60.0)
                     class ExampleSource:
                         def poll(self, ctx):
                             return kanary.SourceResult()
@@ -923,7 +990,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                     """
                     import kanary
 
-                    @kanary.source(source_id="shared.plugin")
+                    @kanary.source(source_id="shared.plugin", interval=60.0)
                     class ExampleSource:
                         def poll(self, ctx):
                             return kanary.SourceResult()
@@ -956,12 +1023,12 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                     """
                     import kanary
 
-                    @kanary.source(source_id="dup.source")
+                    @kanary.source(source_id="dup.source", interval=60.0)
                     class ExampleSource1:
                         def poll(self, ctx):
                             return kanary.SourceResult()
 
-                    @kanary.source(source_id="dup.source")
+                    @kanary.source(source_id="dup.source", interval=60.0)
                     class ExampleSource2:
                         def poll(self, ctx):
                             return kanary.SourceResult()
@@ -999,12 +1066,12 @@ class RuntimeExcludeTest(unittest.TestCase):
                     """
                     import kanary
 
-                    @kanary.source(source_id="keep.source")
+                    @kanary.source(source_id="keep.source", interval=60.0)
                     class KeepSource:
                         def poll(self, ctx):
                             return kanary.SourceResult()
 
-                    @kanary.source(source_id="drop.source")
+                    @kanary.source(source_id="drop.source", interval=60.0)
                     class DropSource:
                         def poll(self, ctx):
                             return kanary.SourceResult()
@@ -1062,7 +1129,7 @@ class RuntimeExcludeTest(unittest.TestCase):
                     """
                     import kanary
 
-                    @kanary.source(source_id="example.source")
+                    @kanary.source(source_id="example.source", interval=60.0)
                     class ExampleSource:
                         def poll(self, ctx):
                             return kanary.SourceResult()

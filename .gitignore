@@ -214,3 +214,6 @@ __marimo__/
 
 # uv.lock
 uv.lock
+
+# Remove jsonl
+*.jsonl
