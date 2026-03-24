@@ -24,6 +24,7 @@
   1 つの rule に対する alert event と operator action を返します。
 - `GET /silences`
   active, scheduled, cancelled の silence を返します。
+  raw API 自体には `EXPIRED` 状態は追加しません。Web viewer と `kanaryctl` では、すでに終了した silence を表示上 `EXPIRED` と導出することがあります。
 - `GET /plugins`
   source, rule, output plugin の current status を返します。
 - `GET /viewer`

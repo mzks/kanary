@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -384,13 +385,8 @@ def print_silences(payload: dict) -> None:
     )
     print(header)
     print("-" * len(header))
-    for row in silences:
-        if row["cancelled_at"] is not None:
-            status = "cancelled"
-        elif row["active"]:
-            status = "active"
-        else:
-            status = "scheduled"
+    for row in sorted(silences, key=silence_sort_key):
+        status = silence_display_status(row).lower()
         target = ", ".join(row["rule_patterns"] or row["tags"]) or "-"
         print(
             f"{row['silence_id']:<{id_width}}  "
@@ -401,6 +397,44 @@ def print_silences(payload: dict) -> None:
             f"{target:<{target_width}}  "
             f"{row.get('reason') or ''}"
         )
+
+
+def silence_display_status(row: dict) -> str:
+    if row.get("cancelled_at") is not None:
+        return "CANCELLED"
+    if row.get("active"):
+        return "ACTIVE"
+    now = datetime.now(timezone.utc)
+    end_at = parse_iso_datetime(row.get("end_at"))
+    start_at = parse_iso_datetime(row.get("start_at"))
+    if end_at is not None and end_at <= now:
+        return "EXPIRED"
+    if start_at is not None and start_at > now:
+        return "SCHEDULED"
+    return "EXPIRED"
+
+
+def silence_sort_key(row: dict) -> tuple[int, str]:
+    rank = {
+        "ACTIVE": 0,
+        "SCHEDULED": 1,
+        "EXPIRED": 2,
+        "CANCELLED": 3,
+    }.get(silence_display_status(row), 4)
+    return (rank, str(row.get("start_at") or ""))
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = str(value).replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def print_history(payload: dict) -> None:

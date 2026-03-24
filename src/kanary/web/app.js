@@ -16,6 +16,8 @@ const state = {
   sourceFilter: "",
   ruleFilter: "",
   outputFilter: "",
+  silenceFilter: "",
+  hidePastSilences: true,
   refreshMs: DEFAULT_REFRESH_MS,
   refreshTimer: null,
   timeZone: "browser",
@@ -53,6 +55,14 @@ function bindControls() {
   document.getElementById("output-filter").addEventListener("input", (event) => {
     state.outputFilter = event.target.value.toLowerCase();
     renderOutputsPage();
+  });
+  document.getElementById("silence-filter").addEventListener("input", (event) => {
+    state.silenceFilter = event.target.value.toLowerCase();
+    renderSilencesPage();
+  });
+  document.getElementById("silence-hide-past").addEventListener("change", (event) => {
+    state.hidePastSilences = Boolean(event.target.checked);
+    renderSilencesPage();
   });
   document.getElementById("ack-button").addEventListener("click", submitAck);
   document.getElementById("unack-button").addEventListener("click", submitUnack);
@@ -481,10 +491,11 @@ function renderOutputsPage() {
 function renderSilencesPage() {
   const tbody = document.getElementById("silences-body");
   tbody.innerHTML = state.silences
-    .sort((left, right) => String(left.start_at).localeCompare(String(right.start_at)))
+    .filter(matchesSilenceFilter)
+    .sort(compareSilenceRows)
     .map((silence) => {
       const targets = [...(silence.rule_patterns || []), ...(silence.tags || []).map((tag) => `#${tag}`)].join(", ") || "-";
-      const status = silence.cancelled_at ? "CANCELLED" : silence.active ? "ACTIVE" : "SCHEDULED";
+      const status = silenceDisplayStatus(silence);
       return `
         <tr>
           <td>${escapeHtml(shortId(silence.silence_id))}</td>
@@ -493,7 +504,7 @@ function renderSilencesPage() {
           <td>${escapeHtml(targets)}</td>
           <td>${escapeHtml(silence.created_by || "-")}</td>
           <td>${escapeHtml(silence.reason || "-")}</td>
-          <td class="action-cell">${silence.cancelled_at ? "" : `<button class="button button-danger" data-cancel-silence="${escapeHtml(silence.silence_id)}">Cancel</button>`}</td>
+          <td class="action-cell">${silence.cancelled_at || status === "EXPIRED" ? "" : `<button class="button button-danger" data-cancel-silence="${escapeHtml(silence.silence_id)}">Cancel</button>`}</td>
         </tr>
       `;
     })
@@ -830,6 +841,21 @@ function matchesOutputFilter(plugin) {
   ], state.outputFilter);
 }
 
+function matchesSilenceFilter(silence) {
+  const status = silenceDisplayStatus(silence);
+  if (state.hidePastSilences && (status === "EXPIRED" || status === "CANCELLED")) {
+    return false;
+  }
+  return matchesTextFilter([
+    silence.silence_id,
+    status,
+    silence.created_by || "",
+    silence.reason || "",
+    (silence.rule_patterns || []).join(" "),
+    (silence.tags || []).join(" "),
+  ], state.silenceFilter);
+}
+
 function historyActionLabel(actionType) {
   return {
     ack: "Acknowledged",
@@ -1123,8 +1149,46 @@ function bindPluginErrorDetailToggles(container) {
 
 function statusToColor(status) {
   if (status === "ACTIVE") return "SILENCED";
+  if (status === "EXPIRED") return "SUPPRESSED";
   if (status === "CANCELLED") return "SUPPRESSED";
   return "ACKED";
+}
+
+function silenceDisplayStatus(silence) {
+  if (silence.cancelled_at) {
+    return "CANCELLED";
+  }
+  if (silence.active) {
+    return "ACTIVE";
+  }
+  const now = Date.now();
+  const start = parseIsoTime(silence.start_at);
+  const end = parseIsoTime(silence.end_at);
+  if (Number.isFinite(end) && end <= now) {
+    return "EXPIRED";
+  }
+  if (Number.isFinite(start) && start > now) {
+    return "SCHEDULED";
+  }
+  return "EXPIRED";
+}
+
+function silenceStatusRank(silence) {
+  const status = silenceDisplayStatus(silence);
+  return {
+    ACTIVE: 0,
+    SCHEDULED: 1,
+    EXPIRED: 2,
+    CANCELLED: 3,
+  }[status] ?? 4;
+}
+
+function compareSilenceRows(left, right) {
+  const rankDiff = silenceStatusRank(left) - silenceStatusRank(right);
+  if (rankDiff !== 0) {
+    return rankDiff;
+  }
+  return parseIsoTime(left.start_at) - parseIsoTime(right.start_at);
 }
 
 async function getJson(path) {

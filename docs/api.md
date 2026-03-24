@@ -24,6 +24,7 @@ Use `--api-host` and `--api-port` to change the bind address.
   Returns alert events and operator actions for one rule.
 - `GET /silences`
   Returns active, scheduled, and cancelled silences.
+  The raw API does not add a separate `EXPIRED` state. The Web viewer and `kanaryctl` may derive `EXPIRED` locally for silences whose window has already ended.
 - `GET /plugins`
   Returns current status for sources, rules, and outputs.
 - `GET /viewer`
