@@ -412,6 +412,62 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(stale_alert.state, kanary.AlertState.OK)
         self.assertEqual(range_alert.state, kanary.AlertState.OK)
 
+    def test_stale_rule_missing_measurement_message_shows_candidates(self) -> None:
+        source_state = kanary.SourceState(
+            source_id="postgres",
+            current=kanary.SourceSnapshot(
+                payload={
+                    "channels": {
+                        "det1.radon_conc": {"value": 12.3, "timestamp": self.now, "metadata": {}},
+                        "det2.radon_conc": {"value": 45.6, "timestamp": self.now, "metadata": {}},
+                    }
+                },
+                observed_at=self.now,
+            ),
+        )
+        ctx = kanary.RuleContext(now=self.now, source_id="postgres", source_state=source_state)
+
+        class MissingMeasurementStale(kanary.StaleRule):
+            rule_id = "test.missing_measurement.stale"
+            source = "postgres"
+            severity = kanary.ERROR
+            tags = ["test"]
+            measurement = "det1.radon_conc.Bq_m3"
+            timeout = 60.0
+
+        alert = MissingMeasurementStale().evaluate(source_state.current.payload, ctx)
+        self.assertEqual(alert.state, kanary.AlertState.FIRING)
+        self.assertIn("measurement 'det1.radon_conc.Bq_m3' is missing", alert.message)
+        self.assertIn("closest available measurement: det1.radon_conc", alert.message)
+        self.assertIn("available measurements: det1.radon_conc, det2.radon_conc", alert.message)
+
+    def test_threshold_rule_reports_missing_value_inside_existing_measurement(self) -> None:
+        source_state = kanary.SourceState(
+            source_id="postgres",
+            current=kanary.SourceSnapshot(
+                payload={
+                    "channels": {
+                        "temperature": {"timestamp": self.now, "metadata": {}},
+                    }
+                },
+                observed_at=self.now,
+            ),
+        )
+        ctx = kanary.RuleContext(now=self.now, source_id="postgres", source_state=source_state)
+
+        class MissingValueThreshold(kanary.ThresholdRule):
+            rule_id = "test.missing_value.threshold"
+            source = "postgres"
+            severity = kanary.WARN
+            tags = ["test"]
+            measurement = "temperature"
+            direction = "high"
+            thresholds = [(10.0, kanary.WARN)]
+
+        alert = MissingValueThreshold().evaluate(source_state.current.payload, ctx)
+        self.assertEqual(alert.state, kanary.AlertState.OK)
+        self.assertEqual(alert.message, "measurement 'temperature' is present but value is missing")
+
     def test_engine_can_exclude_rules_by_glob(self) -> None:
         engine = kanary.Engine(
             now_fn=lambda: self.now,

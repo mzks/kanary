@@ -1,3 +1,4 @@
+from difflib import get_close_matches
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -51,6 +52,18 @@ class RuleContext:
     def metadata(self, name: str, default: Any = None, *, previous: bool = False) -> Any:
         measurement = self.measurement(name, previous=previous)
         return measurement.get("metadata", default)
+
+    def has_measurement(self, name: str, *, previous: bool = False) -> bool:
+        snapshot = self.previous if previous else self.current
+        channels = snapshot.get("channels", {})
+        return isinstance(channels, Mapping) and name in channels
+
+    def available_measurements(self, *, previous: bool = False) -> list[str]:
+        snapshot = self.previous if previous else self.current
+        channels = snapshot.get("channels", {})
+        if not isinstance(channels, Mapping):
+            return []
+        return [str(name) for name in channels.keys()]
 
     @property
     def previous_state(self) -> AlertState | None:
@@ -124,7 +137,13 @@ class StaleRule(Rule):
             return Evaluation(
                 state=AlertState.FIRING,
                 payload=result_payload,
-                message=f"{timestamp_field} is missing",
+                message=_missing_field_message(
+                    ctx,
+                    measurement=self.measurement,
+                    field_label="timestamp",
+                    field_path=timestamp_field,
+                    field_is_measurement_derived=self.timestamp_field is None and self.measurement is not None,
+                ),
             )
 
         observed_at = _coerce_datetime(timestamp_value)
@@ -178,7 +197,13 @@ class RangeRule(Rule):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"{field} is missing",
+                message=_missing_field_message(
+                    ctx,
+                    measurement=self.measurement,
+                    field_label="value",
+                    field_path=field,
+                    field_is_measurement_derived=self.field is None and self.measurement is not None,
+                ),
             )
 
         previous_value = self._previous_field_value(ctx)
@@ -306,7 +331,13 @@ class ThresholdRule(Rule):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"{field} is missing",
+                message=_missing_field_message(
+                    ctx,
+                    measurement=self.measurement,
+                    field_label="value",
+                    field_path=field,
+                    field_is_measurement_derived=self.field is None and self.measurement is not None,
+                ),
             )
         if not isinstance(value, (int, float)):
             return Evaluation(
@@ -418,10 +449,31 @@ class RateRule(RangeRule):
         result_payload = dict(payload)
 
         if current_value is None or current_timestamp is None:
+            missing_parts: list[str] = []
+            if current_value is None:
+                missing_parts.append(
+                    _missing_field_message(
+                        ctx,
+                        measurement=self.measurement,
+                        field_label="value",
+                        field_path=field,
+                        field_is_measurement_derived=self.field is None and self.measurement is not None,
+                    )
+                )
+            if current_timestamp is None:
+                missing_parts.append(
+                    _missing_field_message(
+                        ctx,
+                        measurement=self.measurement,
+                        field_label="timestamp",
+                        field_path=timestamp_field,
+                        field_is_measurement_derived=self.timestamp_field is None and self.measurement is not None,
+                    )
+                )
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"{field} or {timestamp_field} is missing",
+                message="; ".join(missing_parts),
             )
         if previous_value is None or previous_timestamp is None:
             return Evaluation(
@@ -513,6 +565,33 @@ def _coerce_datetime(value: Any) -> datetime:
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value, tz=timezone.utc)
     raise TypeError("timestamp must be datetime or unix timestamp")
+
+
+def _missing_field_message(
+    ctx: RuleContext,
+    *,
+    measurement: str | None,
+    field_label: str,
+    field_path: str,
+    field_is_measurement_derived: bool,
+) -> str:
+    if not field_is_measurement_derived or not measurement:
+        return f"{field_path} is missing"
+
+    if ctx.has_measurement(measurement):
+        return f"measurement '{measurement}' is present but {field_label} is missing"
+
+    available = ctx.available_measurements()
+    message = f"measurement '{measurement}' is missing"
+    closest = get_close_matches(measurement, available, n=1)
+    if closest:
+        message += f"; closest available measurement: {closest[0]}"
+    if available:
+        shown = ", ".join(sorted(available)[:5])
+        if len(available) > 5:
+            shown += ", ..."
+        message += f"; available measurements: {shown}"
+    return message
 
 
 def get_by_path(payload: Mapping[str, Any], path: str, *, default: Any = None) -> Any:
