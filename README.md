@@ -197,6 +197,7 @@ More realistic examples:
 - [examples/discord_webhook_output.py](examples/discord_webhook_output.py)
 - [examples/latest_postgres.py](examples/latest_postgres.py)
 - [examples/peer_monitoring.py](examples/peer_monitoring.py)
+- [examples/self_plugin_monitoring.py](examples/self_plugin_monitoring.py)
 - [examples/remote_alarm_import.py](examples/remote_alarm_import.py)
 
 `demo/` is for the first working run. `examples/` is closer to real deployments and includes helper classes, remote monitoring, PostgreSQL, and webhook outputs.
