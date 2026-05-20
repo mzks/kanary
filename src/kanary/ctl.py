@@ -472,8 +472,9 @@ def print_history(payload: dict) -> None:
         return
 
     events = payload.get("alert_events", [])
+    dispatches = payload.get("output_dispatches", [])
     actions = payload.get("operator_actions", [])
-    if not events and not actions:
+    if not events and not dispatches and not actions:
         print("no history")
         return
 
@@ -485,6 +486,19 @@ def print_history(payload: dict) -> None:
                 f"{event['previous_state'] or '-'} -> {event['current_state']}  "
                 f"{severity_label(event['severity'])}  "
                 f"{event.get('message') or ''}"
+            )
+
+    if dispatches:
+        print("output dispatches")
+        for dispatch in dispatches:
+            print(
+                f"  {dispatch['occurred_at']}  "
+                f"{dispatch['previous_state'] or '-'} -> {dispatch['current_state']}  "
+                f"matched={', '.join(dispatch.get('matched_outputs', [])) or '-'}  "
+                f"delivered={', '.join(dispatch.get('delivered_outputs', [])) or '-'}  "
+                f"failed={', '.join(dispatch.get('failed_outputs', [])) or '-'}  "
+                f"uninitialized={', '.join(dispatch.get('uninitialized_outputs', [])) or '-'}  "
+                f"filtered={', '.join(dispatch.get('filtered_outputs', [])) or '-'}"
             )
 
     if actions:
@@ -502,6 +516,7 @@ def apply_history_filters(payload: dict, *, since: str | None, limit: int | None
     since_dt = parse_iso_datetime(since)
 
     events = list(payload.get("alert_events", []))
+    dispatches = list(payload.get("output_dispatches", []))
     actions = list(payload.get("operator_actions", []))
 
     if since_dt is not None:
@@ -509,19 +524,26 @@ def apply_history_filters(payload: dict, *, since: str | None, limit: int | None
             event for event in events
             if history_entry_time(event.get("occurred_at")) >= since_dt
         ]
+        dispatches = [
+            dispatch for dispatch in dispatches
+            if history_entry_time(dispatch.get("occurred_at")) >= since_dt
+        ]
         actions = [
             action for action in actions
             if history_entry_time(action.get("created_at")) >= since_dt
         ]
 
     events = sorted(events, key=lambda event: history_entry_time(event.get("occurred_at")), reverse=True)
+    dispatches = sorted(dispatches, key=lambda dispatch: history_entry_time(dispatch.get("occurred_at")), reverse=True)
     actions = sorted(actions, key=lambda action: history_entry_time(action.get("created_at")), reverse=True)
 
     if limit is not None and limit >= 0:
         events = events[:limit]
+        dispatches = dispatches[:limit]
         actions = actions[:limit]
 
     payload["alert_events"] = events
+    payload["output_dispatches"] = dispatches
     payload["operator_actions"] = actions
     return payload
 

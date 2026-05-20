@@ -48,7 +48,6 @@ class Engine:
         self.alerts: dict[str, Alert] = {}
         self.acknowledgements: dict[str, Acknowledgement] = {}
         self.silences: dict[str, Silence] = {}
-        self._suppress_next_notification_for_rules: set[str] = set()
         self.source_states: dict[str, SourceState] = {
             source_id: SourceState(source_id=source_id)
             for source_id in self.sources
@@ -131,10 +130,11 @@ class Engine:
         output_registry: dict[str, type[Output]] | None = None,
     ) -> None:
         with self._lock:
-            self._suppress_next_notification_for_rules = set(self.alerts)
             old_rule_ids = set(self.rules)
             old_sources = self.sources
             old_outputs = self.outputs
+            old_source_ids = set(self.sources)
+            old_output_ids = set(self.outputs)
 
             if source_registry is not None:
                 self._source_registry = source_registry
@@ -166,6 +166,16 @@ class Engine:
             removed_rule_ids = old_rule_ids - set(self.rules)
             now = self._now_fn()
             self.last_reload_at = now
+            logger.info(
+                "reload applied: sources=%d (%+d), rules=%d (%+d), outputs=%d (%+d), active_alerts=%d",
+                len(self.sources),
+                len(self.sources) - len(old_source_ids),
+                len(self.rules),
+                len(self.rules) - len(old_rule_ids),
+                len(self.outputs),
+                len(self.outputs) - len(old_output_ids),
+                len(self.alerts),
+            )
             for rule_id in removed_rule_ids:
                 alert = self.alerts.get(rule_id)
                 if alert is None:
@@ -512,9 +522,6 @@ class Engine:
             )
 
         if previous is not None and previous.state != state:
-            if rule.rule_id in self._suppress_next_notification_for_rules:
-                self._suppress_next_notification_for_rules.discard(rule.rule_id)
-                return
             self._emit_alert_event(
                 AlertEvent(
                     rule_id=rule.rule_id,
@@ -640,14 +647,35 @@ class Engine:
         return alert.state not in {AlertState.OK, AlertState.RESOLVED}
 
     def _emit_alert_event(self, event: AlertEvent) -> None:
+        matched_output_ids: list[str] = []
+        initialized_output_ids: list[str] = []
+        delivered_output_ids: list[str] = []
+        filtered_output_ids: list[str] = []
+        uninitialized_output_ids: list[str] = []
+        failed_output_ids: list[str] = []
         for output_id, output in self.outputs.items():
             if not output.matches(event):
+                filtered_output_ids.append(output_id)
+                logger.debug(
+                    "output '%s' skipped for rule '%s': event does not match output filters",
+                    output_id,
+                    event.rule_id,
+                )
                 continue
+            matched_output_ids.append(output_id)
             status = self._plugin_status("output", output_id)
             if not status.init_ok:
+                uninitialized_output_ids.append(output_id)
+                logger.warning(
+                    "output '%s' skipped for rule '%s': output is not initialized",
+                    output_id,
+                    event.rule_id,
+                )
                 continue
+            initialized_output_ids.append(output_id)
             try:
                 output.emit(event, {"engine": self})
+                delivered_output_ids.append(output_id)
                 status.state = "ready"
                 status.last_error = None
                 status.last_error_detail = None
@@ -656,12 +684,46 @@ class Engine:
                 status.last_success_at = event.occurred_at
                 status.last_updated_at = event.occurred_at
             except Exception as exc:
+                failed_output_ids.append(output_id)
                 status.state = "failed"
                 status.last_error = str(exc)
                 status.last_error_detail = traceback.format_exc()
                 status.last_failure_at = event.occurred_at
                 status.last_updated_at = event.occurred_at
                 logger.exception("output '%s' failed", output.output_id)
+        logger.info(
+            "alert dispatch summary: rule=%s transition=%s->%s matched=%s delivered=%s filtered=%s uninitialized=%s failed=%s",
+            event.rule_id,
+            event.previous_state.value if event.previous_state is not None else "-",
+            event.current_state.value,
+            ",".join(matched_output_ids) or "-",
+            ",".join(delivered_output_ids) or "-",
+            ",".join(filtered_output_ids) or "-",
+            ",".join(uninitialized_output_ids) or "-",
+            ",".join(failed_output_ids) or "-",
+        )
+        self.store.append_output_dispatch(
+            event=event,
+            matched_outputs=matched_output_ids,
+            delivered_outputs=delivered_output_ids,
+            filtered_outputs=filtered_output_ids,
+            uninitialized_outputs=uninitialized_output_ids,
+            failed_outputs=failed_output_ids,
+        )
+        if not matched_output_ids:
+            logger.info(
+                "alert event for rule '%s' (%s -> %s) had no matching outputs",
+                event.rule_id,
+                event.previous_state.value if event.previous_state is not None else "-",
+                event.current_state.value,
+            )
+        elif not initialized_output_ids:
+            logger.warning(
+                "alert event for rule '%s' (%s -> %s) had matching outputs but none were initialized",
+                event.rule_id,
+                event.previous_state.value if event.previous_state is not None else "-",
+                event.current_state.value,
+            )
 
     def _is_rule_excluded(self, rule_id: str) -> bool:
         return any(fnmatch(rule_id, pattern) for pattern in self._exclude_rule_patterns)

@@ -33,6 +33,18 @@ class NullStore:
     def append_alert_event(self, event: AlertEvent, *, definition_file: str | None, matched_outputs: list[str]) -> None:
         return None
 
+    def append_output_dispatch(
+        self,
+        *,
+        event: AlertEvent,
+        matched_outputs: list[str],
+        delivered_outputs: list[str],
+        filtered_outputs: list[str],
+        uninitialized_outputs: list[str],
+        failed_outputs: list[str],
+    ) -> None:
+        return None
+
     def record_acknowledgement(self, acknowledgement: Acknowledgement) -> None:
         return None
 
@@ -56,6 +68,7 @@ class NullStore:
         return {
             "enabled": False,
             "alert_events": [],
+            "output_dispatches": [],
             "operator_actions": [],
         }
 
@@ -99,6 +112,25 @@ class SQLiteStore:
 
                 CREATE INDEX IF NOT EXISTS idx_alert_events_time
                     ON alert_events (occurred_at DESC, id DESC);
+
+                CREATE TABLE IF NOT EXISTS output_dispatches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    rule_id TEXT NOT NULL,
+                    previous_state TEXT,
+                    current_state TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    matched_outputs_json TEXT NOT NULL DEFAULT '[]',
+                    delivered_outputs_json TEXT NOT NULL DEFAULT '[]',
+                    filtered_outputs_json TEXT NOT NULL DEFAULT '[]',
+                    uninitialized_outputs_json TEXT NOT NULL DEFAULT '[]',
+                    failed_outputs_json TEXT NOT NULL DEFAULT '[]'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_output_dispatches_rule_time
+                    ON output_dispatches (rule_id, occurred_at DESC, id DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_output_dispatches_time
+                    ON output_dispatches (occurred_at DESC, id DESC);
 
                 CREATE TABLE IF NOT EXISTS operator_actions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +284,46 @@ class SQLiteStore:
             )
             conn.commit()
 
+    def append_output_dispatch(
+        self,
+        *,
+        event: AlertEvent,
+        matched_outputs: list[str],
+        delivered_outputs: list[str],
+        filtered_outputs: list[str],
+        uninitialized_outputs: list[str],
+        failed_outputs: list[str],
+    ) -> None:
+        conn = self._require_conn()
+        with self._lock:
+            conn.execute(
+                """
+                INSERT INTO output_dispatches (
+                    rule_id,
+                    previous_state,
+                    current_state,
+                    occurred_at,
+                    matched_outputs_json,
+                    delivered_outputs_json,
+                    filtered_outputs_json,
+                    uninitialized_outputs_json,
+                    failed_outputs_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.rule_id,
+                    event.previous_state.value if event.previous_state is not None else None,
+                    event.current_state.value,
+                    event.occurred_at.isoformat(),
+                    json.dumps(matched_outputs, ensure_ascii=False),
+                    json.dumps(delivered_outputs, ensure_ascii=False),
+                    json.dumps(filtered_outputs, ensure_ascii=False),
+                    json.dumps(uninitialized_outputs, ensure_ascii=False),
+                    json.dumps(failed_outputs, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
     def record_acknowledgement(self, acknowledgement: Acknowledgement) -> None:
         self._record_operator_action(
             action_type="ack",
@@ -387,6 +459,28 @@ class SQLiteStore:
                     (rule_id,),
                 )
             ]
+            output_dispatches = [
+                {
+                    "rule_id": row["rule_id"],
+                    "previous_state": row["previous_state"],
+                    "current_state": row["current_state"],
+                    "occurred_at": row["occurred_at"],
+                    "matched_outputs": json.loads(row["matched_outputs_json"]),
+                    "delivered_outputs": json.loads(row["delivered_outputs_json"]),
+                    "filtered_outputs": json.loads(row["filtered_outputs_json"]),
+                    "uninitialized_outputs": json.loads(row["uninitialized_outputs_json"]),
+                    "failed_outputs": json.loads(row["failed_outputs_json"]),
+                }
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM output_dispatches
+                    WHERE rule_id = ?
+                    ORDER BY occurred_at DESC, id DESC
+                    """,
+                    (rule_id,),
+                )
+            ]
             operator_actions: list[dict[str, Any]] = []
             seen_action_ids: set[int] = set()
             for row in conn.execute(
@@ -423,6 +517,7 @@ class SQLiteStore:
             return {
                 "enabled": True,
                 "alert_events": alert_events,
+                "output_dispatches": output_dispatches,
                 "operator_actions": operator_actions,
             }
 
