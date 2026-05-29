@@ -99,6 +99,9 @@ kanaryctl health
 kanaryctl alerts
 kanaryctl alerts --json
 kanaryctl history sqlite.value1.stale
+kanaryctl test-poll sqlite
+kanaryctl test-evaluate sqlite.value1.range --payload-file payload.json
+kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl plugins
 kanaryctl silences
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
@@ -120,6 +123,7 @@ kanary ./plugins --state-db ./var/kanary.db
 Stored data:
 
 - alert state changes
+- output dispatch summaries
 - operator actions
 - silences
 

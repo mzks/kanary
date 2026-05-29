@@ -343,6 +343,101 @@ class Engine:
             rule = self.rules.get(rule_id)
             return self.store.get_rule_history(rule_id, list(getattr(rule, "tags", [])) if rule is not None else [])
 
+    def test_poll(self, source_id: str) -> dict[str, object]:
+        with self._lock:
+            source = self.sources[source_id]
+            result = source.poll({"engine": self, "now": self._now_fn()})
+            normalized = self._normalize_source_result(result) if isinstance(result, SourceResult) else dict(result)
+            return normalized
+
+    def test_evaluate(
+        self,
+        rule_id: str,
+        payload: Mapping[str, object] | SourceResult,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        with self._lock:
+            rule = self.rules[rule_id]
+            current_time = now or self._now_fn()
+            normalized_payload = self._normalize_source_result(payload) if isinstance(payload, SourceResult) else dict(payload)
+            existing_state = self.source_states.get(rule.source, SourceState(source_id=rule.source))
+            source_state = SourceState(
+                source_id=rule.source,
+                current=SourceSnapshot(payload=dict(normalized_payload), observed_at=current_time),
+                previous=existing_state.current,
+                updated_at=current_time,
+                poll_count=existing_state.poll_count,
+            )
+            alert = self._evaluate_rule_preview(rule, normalized_payload, source_state, current_time)
+            event = AlertEvent(
+                rule_id=rule.rule_id,
+                previous_state=None,
+                current_state=alert.state,
+                alert=alert,
+                occurred_at=current_time,
+            )
+            matched_outputs = list(getattr(rule, "matched_outputs", []))
+            would_emit_outputs = [output_id for output_id, output in self.outputs.items() if output.matches(event)]
+            return {
+                "rule_id": rule.rule_id,
+                "state": alert.state.value,
+                "severity": int(alert.severity),
+                "owner": alert.owner,
+                "tags": list(alert.tags),
+                "message": alert.message,
+                "payload": alert.payload,
+                "occurred_at": current_time,
+                "matched_outputs": matched_outputs,
+                "would_emit_outputs": would_emit_outputs,
+            }
+
+    def test_fire(
+        self,
+        rule_id: str,
+        *,
+        state: AlertState,
+        message: str | None = None,
+        reason: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        with self._lock:
+            rule = self.rules[rule_id]
+            current_time = now or self._now_fn()
+            previous_alert = self.alerts.get(rule_id)
+            base_message = message or f"synthetic {state.value} notification test"
+            synthetic_message = f"[TEST-FIRE] {base_message}"
+            synthetic_payload: dict[str, object] = {
+                "synthetic": True,
+                "test_fire": {
+                    "reason": reason,
+                    "created_at": current_time.isoformat(),
+                },
+            }
+            alert = Alert(
+                rule_id=rule.rule_id,
+                state=state,
+                severity=rule.severity,
+                owner=rule.owner,
+                tags=tuple(rule.tags),
+                payload=synthetic_payload,
+                message=synthetic_message,
+                last_evaluated_at=current_time,
+            )
+            event = AlertEvent(
+                rule_id=rule.rule_id,
+                previous_state=previous_alert.state if previous_alert is not None else None,
+                current_state=state,
+                alert=alert,
+                occurred_at=current_time,
+            )
+            logger.info("test fire requested: rule=%s state=%s reason=%s", rule.rule_id, state.value, reason or "-")
+            summary = self._emit_alert_event(event)
+            summary["synthetic"] = True
+            summary["message"] = synthetic_message
+            summary["reason"] = reason
+            return summary
+
     def peer_status(self) -> dict[str, object]:
         with self._lock:
             now = self._now_fn()
@@ -646,7 +741,7 @@ class Engine:
             return False
         return alert.state not in {AlertState.OK, AlertState.RESOLVED}
 
-    def _emit_alert_event(self, event: AlertEvent) -> None:
+    def _emit_alert_event(self, event: AlertEvent) -> dict[str, object]:
         matched_output_ids: list[str] = []
         initialized_output_ids: list[str] = []
         delivered_output_ids: list[str] = []
@@ -710,6 +805,17 @@ class Engine:
             uninitialized_outputs=uninitialized_output_ids,
             failed_outputs=failed_output_ids,
         )
+        summary = {
+            "rule_id": event.rule_id,
+            "previous_state": event.previous_state.value if event.previous_state is not None else None,
+            "current_state": event.current_state.value,
+            "occurred_at": event.occurred_at,
+            "matched_outputs": matched_output_ids,
+            "delivered_outputs": delivered_output_ids,
+            "filtered_outputs": filtered_output_ids,
+            "uninitialized_outputs": uninitialized_output_ids,
+            "failed_outputs": failed_output_ids,
+        }
         if not matched_output_ids:
             logger.info(
                 "alert event for rule '%s' (%s -> %s) had no matching outputs",
@@ -724,6 +830,7 @@ class Engine:
                 event.previous_state.value if event.previous_state is not None else "-",
                 event.current_state.value,
             )
+        return summary
 
     def _is_rule_excluded(self, rule_id: str) -> bool:
         return any(fnmatch(rule_id, pattern) for pattern in self._exclude_rule_patterns)
@@ -941,6 +1048,46 @@ class Engine:
             status.last_failure_at = now
             status.last_updated_at = now
             logger.exception("rule '%s' failed", rule.rule_id)
+
+    def _evaluate_rule_preview(
+        self,
+        rule: Rule,
+        source_payload: dict[str, object],
+        source_state: SourceState,
+        now: datetime,
+    ) -> Alert:
+        dependency_state = self._resolve_dependency_state(rule, source_payload)
+        if dependency_state is not None:
+            return dependency_state
+
+        evaluation = rule.normalize_evaluation(
+            rule.evaluate(
+                source_payload,
+                RuleContext(
+                    now=now,
+                    source_id=rule.source,
+                    source_state=source_state,
+                    previous_alert=self.alerts.get(rule.rule_id),
+                ),
+            ),
+            source_payload,
+        )
+        return self._resolve_operator_state(
+            rule,
+            evaluation.state,
+            evaluation.payload,
+            evaluation.message,
+            evaluation.severity or rule.severity,
+            now,
+        ) or Alert(
+            rule_id=rule.rule_id,
+            state=evaluation.state,
+            severity=evaluation.severity or rule.severity,
+            owner=rule.owner,
+            tags=tuple(rule.tags),
+            payload=evaluation.payload,
+            message=evaluation.message,
+        )
 
     def _plugin_key(self, plugin_type: str, plugin_id: str) -> str:
         return f"{plugin_type}:{plugin_id}"

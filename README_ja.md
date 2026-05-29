@@ -158,6 +158,14 @@ kanary --help
 kanaryctl help
 ```
 
+診断用のコマンド:
+
+```bash
+kanaryctl test-poll demo
+kanaryctl test-evaluate demo.temperature.high --payload-json '{"channels":{"temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
+```
+
 ## 環境変数
 
 Kanary 本体に必須の環境変数はありません。必要に応じて次を使えます。

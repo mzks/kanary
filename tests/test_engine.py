@@ -1,3 +1,4 @@
+import argparse
 from datetime import datetime, timedelta, timezone
 import importlib
 import json
@@ -2174,10 +2175,12 @@ class ControlAPITest(unittest.TestCase):
         self.api = kanary.ControlAPI(
             engine_getter=lambda: self.engine,
             reload_callback=lambda: True,
-            port=18080,
+            host="127.0.0.1",
+            port=0,
         )
         self.thread = threading.Thread(target=self.api.start, daemon=True)
         self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.api._server.server_address[1]}"
 
     def tearDown(self) -> None:
         self.api.shutdown()
@@ -2185,24 +2188,24 @@ class ControlAPITest(unittest.TestCase):
         self.engine.shutdown()
 
     def test_health_endpoint_returns_ok(self) -> None:
-        with urlopen("http://127.0.0.1:18080/health") as response:
+        with urlopen(f"{self.base_url}/health") as response:
             body = json.loads(response.read().decode())
         self.assertEqual(body["status"], "ok")
         self.assertIn("postgres", body["sources"])
 
     def test_alerts_endpoint_returns_alerts(self) -> None:
-        with urlopen("http://127.0.0.1:18080/alerts") as response:
+        with urlopen(f"{self.base_url}/alerts") as response:
             body = json.loads(response.read().decode())
         self.assertEqual(len(body["alerts"]), 8)
 
     def test_reload_endpoint_returns_reloaded(self) -> None:
-        request = Request("http://127.0.0.1:18080/reload", method="POST")
+        request = Request(f"{self.base_url}/reload", method="POST")
         with urlopen(request) as response:
             body = json.loads(response.read().decode())
         self.assertEqual(body["status"], "reloaded")
 
     def test_plugins_endpoint_returns_output_status(self) -> None:
-        with urlopen("http://127.0.0.1:18080/plugins") as response:
+        with urlopen(f"{self.base_url}/plugins") as response:
             body = json.loads(response.read().decode())
         self.assertEqual(len(body["plugins"]), len(self.engine.plugin_states))
         self.assertIn("source", {plugin["type"] for plugin in body["plugins"]})
@@ -2212,12 +2215,85 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("postgres.temperature.stale", plugin_ids)
         self.assertTrue(all("last_updated_at" in plugin for plugin in body["plugins"]))
 
+    def test_test_poll_endpoint_returns_normalized_payload(self) -> None:
+        request = Request(f"{self.base_url}/test-poll/postgres", method="POST")
+        with urlopen(request) as response:
+            body = json.loads(response.read().decode())
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("channels", body)
+        self.assertIn("temperature", body["channels"])
+
+    def test_test_evaluate_endpoint_returns_evaluation(self) -> None:
+        request = Request(
+            f"{self.base_url}/test-evaluate/postgres.temperature.range",
+            method="POST",
+            data=json.dumps(
+                {
+                    "payload": {
+                        "channels": {
+                            "temperature": {
+                                "value": 150,
+                                "timestamp": self.now.isoformat(),
+                            }
+                        },
+                        "status": "ok",
+                    },
+                    "now": self.now.isoformat(),
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request) as response:
+            body = json.loads(response.read().decode())
+        self.assertEqual(body["rule_id"], "postgres.temperature.range")
+        self.assertEqual(body["state"], "FIRING")
+        self.assertIn("would_emit_outputs", body)
+
+    def test_test_fire_endpoint_returns_dispatch_summary(self) -> None:
+        RecordingOutput.events = []
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"recording": RecordingOutput},
+        )
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            payload = fetch_json(
+                f"http://127.0.0.1:{api._server.server_address[1]}/test-fire/postgres.temperature.range",
+                method="POST",
+                body={"state": "FIRING", "reason": "delivery test"},
+            )
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+        self.assertTrue(payload["synthetic"])
+        self.assertEqual(payload["current_state"], "FIRING")
+        self.assertEqual(payload["delivered_outputs"], ["recording"])
+        self.assertTrue(RecordingOutput.events)
+
 
 class CLIHelpersTest(unittest.TestCase):
     def test_matches_row_filter_supports_substring_and_glob(self) -> None:
         self.assertTrue(kanaryctl.matches_row_filter(["postgres.temperature.stale"], "temperature"))
         self.assertTrue(kanaryctl.matches_row_filter(["expert_db"], "expert_*"))
         self.assertFalse(kanaryctl.matches_row_filter(["expert_db"], "viewer_*"))
+
+    def test_load_payload_argument_supports_inline_json(self) -> None:
+        args = argparse.Namespace(payload_json='{"status":"ok"}', payload_file=None, payload_stdin=False)
+        self.assertEqual(kanaryctl.load_payload_argument(args), {"status": "ok"})
+
+    def test_load_payload_argument_rejects_non_object_json(self) -> None:
+        args = argparse.Namespace(payload_json='["bad"]', payload_file=None, payload_stdin=False)
+        with self.assertRaises(ValueError):
+            kanaryctl.load_payload_argument(args)
 
 
 if __name__ == "__main__":

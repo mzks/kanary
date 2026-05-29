@@ -21,7 +21,7 @@ Use `--api-host` and `--api-port` to change the bind address.
 - `GET /export-alerts`
   Returns alerts in a stable format intended for remote alert import.
 - `GET /history/{rule_id}`
-  Returns alert events and operator actions for one rule.
+  Returns alert events, output dispatch summaries, and operator actions for one rule.
 - `GET /silences`
   Returns active, scheduled, and cancelled silences.
   The raw API does not add a separate `EXPIRED` state. The Web viewer and `kanaryctl` may derive `EXPIRED` locally for silences whose window has already ended.
@@ -46,6 +46,12 @@ Use `--api-host` and `--api-port` to change the bind address.
   Cancels an existing silence.
 - `POST /reload`
   Triggers a manual reload of the watched rule directories.
+- `POST /test-poll/{source_id}`
+  Polls one source and returns the normalized source payload.
+- `POST /test-evaluate/{rule_id}`
+  Dry-runs one rule against an explicit payload and returns the normalized evaluation result.
+- `POST /test-fire/{rule_id}`
+  Sends a synthetic state change through the output pipeline without changing the live alert state.
 
 ## Design Notes
 
@@ -70,6 +76,7 @@ Main subcommands:
 - `history`
   Shows stored history for one rule.
   `--since` and `--limit` are applied client-side after fetching the history payload.
+  When SQLite persistence is enabled, history includes output dispatch summaries.
 - `plugins`
   Shows source, rule, and output plugin status.
   `--filter` supports text and glob matching.
@@ -89,6 +96,12 @@ Main subcommands:
   Cancels one silence.
 - `reload`
   Triggers a manual reload.
+- `test-poll`
+  Polls one source and prints the normalized payload as JSON.
+- `test-evaluate`
+  Dry-runs one rule against a payload from `--payload-json`, `--payload-file`, or `--payload-stdin`.
+- `test-fire`
+  Sends a synthetic alert event through the output pipeline and prints the dispatch summary as JSON.
 
 Common argument:
 
@@ -99,6 +112,9 @@ Examples:
 
 ```bash
 kanaryctl alerts
+kanaryctl test-poll sqlite
+kanaryctl test-evaluate sqlite.value1.range --payload-json '{"channels":{"value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'

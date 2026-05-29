@@ -226,6 +226,14 @@ kanaryctl --base-url http://127.0.0.1:8000 alerts
 
 The Web viewer and `kanaryctl` use the same API.
 
+For quick diagnostics, the CLI also supports:
+
+```bash
+kanaryctl --base-url http://127.0.0.1:8000 test-poll local_load
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"channels":{"load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIRING --reason "mail output check"
+```
+
 ## 8. More Features
 
 ### BufferedSource

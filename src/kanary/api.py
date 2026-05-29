@@ -13,6 +13,7 @@ from typing import Callable
 from urllib.parse import unquote
 
 from .engine import Engine
+from .constants import AlertState
 
 WEB_ROOT = Path(__file__).with_name("web")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -263,6 +264,57 @@ class ControlAPI:
                     )
                     return
 
+                if self.path.startswith("/test-poll/"):
+                    source_id = unquote(self.path[len("/test-poll/") :]).strip("/")
+                    try:
+                        payload = engine.test_poll(source_id)
+                    except KeyError:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "source not found"})
+                        return
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+
+                if self.path.startswith("/test-evaluate/"):
+                    rule_id = unquote(self.path[len("/test-evaluate/") :]).strip("/")
+                    body = self._read_json_body()
+                    try:
+                        payload = engine.test_evaluate(
+                            rule_id,
+                            body["payload"],
+                            now=_parse_datetime(body["now"]) if body.get("now") else None,
+                        )
+                    except KeyError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
+                        return
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+
+                if self.path.startswith("/test-fire/"):
+                    rule_id = unquote(self.path[len("/test-fire/") :]).strip("/")
+                    body = self._read_json_body()
+                    try:
+                        payload = engine.test_fire(
+                            rule_id,
+                            state=_parse_alert_state(body["state"]),
+                            message=body.get("message"),
+                            reason=body.get("reason"),
+                            now=_parse_datetime(body["now"]) if body.get("now") else None,
+                        )
+                    except KeyError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
+                        return
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+
                 if self.path.startswith("/alerts/") and self.path.endswith("/ack"):
                     rule_id = unquote(self.path[len("/alerts/") : -len("/ack")]).strip("/")
                     body = self._read_json_body()
@@ -416,6 +468,13 @@ def _json_default(value: object) -> str:
 
 def _parse_datetime(value: str):
     return _json_datetime_fromisoformat(value)
+
+
+def _parse_alert_state(value: str) -> AlertState:
+    try:
+        return AlertState(str(value))
+    except ValueError as exc:
+        raise ValueError(f"invalid alert state: {value}") from exc
 
 
 def _json_datetime_fromisoformat(value: str):

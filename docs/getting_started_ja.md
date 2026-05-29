@@ -185,6 +185,14 @@ kanaryctl --base-url http://127.0.0.1:8000 alerts
 
 viewer と `kanaryctl` は同じ API を使っています。
 
+簡単な診断には、次のような CLI も使えます。
+
+```bash
+kanaryctl --base-url http://127.0.0.1:8000 test-poll local_load
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"channels":{"load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIRING --reason "mail output check"
+```
+
 ## 8. 進んだ機能
 
 ### BufferedSource
