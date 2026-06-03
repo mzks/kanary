@@ -198,6 +198,7 @@ Kanary 本体に必須の環境変数はありません。必要に応じて次�
 - [examples/discord_webhook_output.py](examples/discord_webhook_output.py)
 - [examples/latest_postgres.py](examples/latest_postgres.py)
 - [examples/peer_monitoring.py](examples/peer_monitoring.py)
+- [examples/self_plugin_monitoring.py](examples/self_plugin_monitoring.py)
 - [examples/remote_alarm_import.py](examples/remote_alarm_import.py)
 
 `demo/` は最初の 1 回を動かすための短い例です。`examples/` は helper class、remote monitoring、PostgreSQL、webhook output などを含む、より実運用に近い例です。

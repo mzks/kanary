@@ -258,6 +258,17 @@ That example includes:
 
 - `make_constant_source(...)`
   Generates a simple source class from a measurement dictionary.
+
+## 6. Self-Monitoring Pattern
+
+Kanary can also monitor its own runtime through the HTTP API.
+One practical pattern is:
+
+- a `Source` that reads `GET /plugins` from the local Kanary node
+- one or more `Rule` classes that turn failed source/rule/output plugins into ordinary alerts
+
+See [examples/self_plugin_monitoring.py](../examples/self_plugin_monitoring.py) for a compact example.
+That example keeps the rule IDs coarse, such as `kanary.source.failure`, and puts the concrete failure summary into the alert message and metadata.
 - `make_threshold_rule(...)`
   Generates one `ThresholdRule`-based rule class.
 
