@@ -627,7 +627,7 @@ class Engine:
         try:
             result = source.poll({"engine": self, "now": now})
             payload = self._normalize_source_result(result)
-            status.state = "READY"
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
@@ -637,7 +637,7 @@ class Engine:
             status.last_updated_at = now
             return payload
         except Exception as exc:
-            status.state = "FAILED"
+            self._set_plugin_failed(status)
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
             status.run_count += 1
@@ -673,7 +673,7 @@ class Engine:
     ) -> dict[str, object]:
         status = self._plugin_status("source", source_id)
         normalized = self._normalize_source_result(payload) if isinstance(payload, SourceResult) else dict(payload)
-        status.state = "READY"
+        self._set_plugin_ready(status)
         status.init_ok = True
         status.last_error = None
         status.last_error_detail = None
@@ -901,7 +901,7 @@ class Engine:
             try:
                 output.emit(event, {"engine": self})
                 delivered_output_ids.append(output_id)
-                status.state = "READY"
+                self._set_plugin_ready(status)
                 status.last_error = None
                 status.last_error_detail = None
                 status.run_count += 1
@@ -910,7 +910,7 @@ class Engine:
                 status.last_updated_at = event.occurred_at
             except Exception as exc:
                 failed_output_ids.append(output_id)
-                status.state = "FAILED"
+                self._set_plugin_failed(status)
                 status.last_error = str(exc)
                 status.last_error_detail = traceback.format_exc()
                 status.last_failure_at = event.occurred_at
@@ -1101,14 +1101,14 @@ class Engine:
         status = self._plugin_status("output", output_id)
         try:
             output.init({"engine": self})
-            status.state = "READY"
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
             status.last_success_at = self._now_fn()
             status.last_updated_at = status.last_success_at
         except Exception as exc:
-            status.state = "FAILED"
+            self._set_plugin_failed(status)
             status.init_ok = False
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
@@ -1121,7 +1121,7 @@ class Engine:
         try:
             output.terminate({"engine": self})
         except Exception as exc:
-            status.state = "FAILED"
+            self._set_plugin_failed(status)
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
@@ -1131,7 +1131,7 @@ class Engine:
     def record_source_failure(self, source_id: str, error: str, *, now: datetime | None = None) -> None:
         when = now or self._now_fn()
         status = self._plugin_status("source", source_id)
-        status.state = "FAILED"
+        self._set_plugin_failed(status)
         status.last_error = error
         status.last_error_detail = None
         status.run_count += 1
@@ -1143,14 +1143,14 @@ class Engine:
         status = self._plugin_status("source", source.source_id)
         try:
             source.init({"engine": self})
-            status.state = "READY"
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
             status.last_success_at = self._now_fn()
             status.last_updated_at = status.last_success_at
         except Exception as exc:
-            status.state = "FAILED"
+            self._set_plugin_failed(status)
             status.init_ok = False
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
@@ -1163,7 +1163,7 @@ class Engine:
         try:
             source.terminate({"engine": self})
         except Exception as exc:
-            status.state = "FAILED"
+            self._set_plugin_failed(status)
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
@@ -1219,7 +1219,7 @@ class Engine:
                         operator_state.severity,
                         now,
                     )
-                    status.state = "READY"
+                    self._set_plugin_ready(status)
                     status.init_ok = True
                     status.last_error = None
                     status.last_error_detail = None
@@ -1236,7 +1236,7 @@ class Engine:
                     evaluation.severity or rule.severity,
                     now,
                 )
-            status.state = "READY"
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
@@ -1245,7 +1245,7 @@ class Engine:
             status.last_success_at = now
             status.last_updated_at = now
         except Exception as exc:
-            status.state = "FAILED"
+            self._set_plugin_failed(status)
             status.init_ok = True
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
@@ -1301,6 +1301,16 @@ class Engine:
     def _plugin_status(self, plugin_type: str, plugin_id: str) -> PluginStatus:
         key = self._plugin_key(plugin_type, plugin_id)
         return self.plugin_states.setdefault(key, PluginStatus(plugin_type, plugin_id))
+
+    def _set_plugin_ready(self, status: PluginStatus) -> None:
+        if status.state in {"DISCOVERED", "DIRTY", "PENDING_REMOVE"}:
+            return
+        status.state = "READY"
+
+    def _set_plugin_failed(self, status: PluginStatus) -> None:
+        if status.state in {"DISCOVERED", "DIRTY", "PENDING_REMOVE"}:
+            return
+        status.state = "FAILED"
 
     def _rebuild_plugin_states(self) -> None:
         next_states: dict[str, PluginStatus] = {}

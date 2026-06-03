@@ -1402,6 +1402,32 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
                 runtime.api._server.server_close()
                 runtime.engine.shutdown()
 
+    def test_dirty_source_state_survives_normal_evaluation_until_reload(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plugins(root, output_label="v1")
+            runtime = self._bootstrap_runtime(root)
+            try:
+                self._write_plugins(root, output_label="changed")
+                plugin_text = (root / "plugins.py").read_text()
+                (root / "plugins.py").write_text(plugin_text.replace('version = "changed"', 'version = "dirty"'))
+                next_tick = getattr(self, "_write_tick", 1_700_000_010)
+                self._write_tick = next_tick + 2
+                os.utime(root / "plugins.py", (self._write_tick, self._write_tick))
+                runtime.reload_now_if_changed()
+
+                status = runtime.engine._plugin_status("source", "example.source")
+                self.assertEqual(status.state, "DIRTY")
+
+                source = runtime.engine.sources["example.source"]
+                now = datetime(2026, 6, 4, 12, 2, tzinfo=timezone.utc)
+                runtime.engine.evaluate_source("example.source", source.poll({"now": now}), now=now)
+
+                self.assertEqual(runtime.engine._plugin_status("source", "example.source").state, "DIRTY")
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
     def test_reload_output_replaces_only_matching_output(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
