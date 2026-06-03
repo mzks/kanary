@@ -122,7 +122,7 @@ kanary ./plugins --state-db ./var/kanary.db
 
 Stored data:
 
-- alert state changes
+- alert events, including state changes and severity transitions
 - output dispatch summaries
 - operator actions
 - silences

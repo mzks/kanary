@@ -2,7 +2,7 @@
 
 This guide walks through a small monitoring setup by hand so you can understand the `Source -> Rule -> Output` flow.
 
-The example reads the local machine's load average, fires an alert when it becomes too high, and records state changes to a file.
+The example reads the local machine's load average, fires an alert when it becomes too high, and records alert events to a file.
 
 All code used in this guide is collected in [examples/getting_started.py](../examples/getting_started.py). The easiest way to start is to place that file in a watched directory, run it, and then edit it step by step.
 
@@ -172,7 +172,7 @@ If your environment is safe, you can test the alarm with the such command `opens
 
 ## 6. Write An Output
 
-Outputs define where state changes go.
+Outputs define where alert events go.
 For a first example, a JSONL file is easy to understand.
 
 ```python
@@ -195,7 +195,12 @@ class FileOutput:
             "rule_id": event.rule_id,
             "previous_state": event.previous_state.value if event.previous_state else None,
             "current_state": event.current_state.value,
-            "severity": kanary.severity_label(int(event.alert.severity)),
+            "previous_severity": (
+                kanary.severity_label(event.previous_severity)
+                if event.previous_severity is not None else None
+            ),
+            "current_severity": kanary.severity_label(event.current_severity),
+            "transition": event.transition.value if event.transition else None,
             "message": event.alert.message,
             "occurred_at": event.occurred_at.isoformat(),
         }
@@ -214,7 +219,7 @@ In the viewer, you should see:
 - `local_load.busy` and `local_load.busy_threshold` on the Alerts page
 - a `file` output on the Outputs page
 
-Each state change appends one line to `getting_started_alerts.jsonl`.
+Each alert event appends one line to `getting_started_alerts.jsonl`.
 
 Changes to plugin files reload automatically. Changes to `src/kanary` require a process restart.
 

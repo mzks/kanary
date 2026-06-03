@@ -8,7 +8,7 @@ You define three kinds of plugins in Python:
 - `Rule`
   Evaluates those values and decides whether an alert should fire.
 - `Output`
-  Sends state changes to humans or other systems.
+  Sends alert events to humans or other systems.
 
 This separation keeps collection, evaluation, and notification independent, so monitoring definitions stay manageable as the system grows.
 
@@ -118,7 +118,7 @@ In this example, you only implement the minimum interface:
 
 - a source that returns values
 - a rule that evaluates them
-- an output that reacts to state changes
+- an output that reacts to alert events
 
 Internally, Kanary handles plugin loading, periodic source polling, rule evaluation, alert state tracking, the HTTP API, and the Web viewer.
 

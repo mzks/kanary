@@ -27,7 +27,6 @@ ANSI_COLORS = {
     "ACKED": "\033[34m",
     "SILENCED": "\033[36m",
     "SUPPRESSED": "\033[90m",
-    "RESOLVED": "\033[32m",
 }
 
 
@@ -560,10 +559,20 @@ def print_history(payload: dict) -> None:
     if events:
         print("alert events")
         for event in events:
+            transition = f"  {event['transition']}" if event.get("transition") else ""
+            previous_severity = event.get("previous_severity")
+            current_severity = event.get("current_severity", event.get("severity"))
+            if previous_severity is None or previous_severity == current_severity:
+                severity_part = severity_label(current_severity)
+            else:
+                severity_part = (
+                    f"{severity_label(previous_severity)} -> "
+                    f"{severity_label(current_severity)}"
+                )
             print(
                 f"  {event['occurred_at']}  "
                 f"{event['previous_state'] or '-'} -> {event['current_state']}  "
-                f"{severity_label(event['severity'])}  "
+                f"{severity_part}{transition}  "
                 f"{event.get('message') or ''}"
             )
 

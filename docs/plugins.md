@@ -109,16 +109,57 @@ Optional:
 - `terminate(ctx)`
 - `include_tags`
 - `exclude_tags`
-- `include_states`
 - `exclude_states`
+- `exclude_transitions`
+- `minimum_severity`
 
 `include_tags` and `exclude_tags` support glob patterns.  
 For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.
 
+`exclude_states` starts from "allow all states" and removes the listed ones.  
+`exclude_transitions` also starts empty. 
+
+Common values for `exclude_states`:
+
+- `OK`
+  Recovery events.
+- `FIRING`
+  Active alert events.
+- `ACKED`
+  Operator acknowledgement events (`FIRING -> ACKED`).
+- `SILENCED`
+  A firing alert that is currently covered by an active silence.
+- `SUPPRESSED`
+  A firing alert suppressed by another rule via `suppressed_by`.
+
+Common values for `exclude_transitions`:
+
+- `UNACK`
+  Derived transition for `ACKED -> FIRING`.
+- `ESCALATED`
+  Same-state severity increase, such as `FIRING(WARN) -> FIRING(ERROR)`.
+- `DEESCALATED`
+  Same-state severity decrease, such as `FIRING(CRITICAL) -> FIRING(ERROR)`.
+
+Each output `event` includes:
+
+- `previous_state`
+- `current_state`
+- `previous_severity`
+- `current_severity`
+- `transition`
+
+`transition` is `None` for ordinary state changes, and one of `UNACK`, `ESCALATED`, `DEESCALATED` for derived transitions.
+
 Example:
 
 ```python
-@kanary.output(output_id="discord", include_tags=["sqlite"])
+@kanary.output(
+    output_id="discord",
+    include_tags=["sqlite"],
+    exclude_states=["SUPPRESSED"],
+    minimum_severity="ERROR",
+)
 class DiscordOutput:
     def emit(self, event, ctx):
         ...
@@ -288,8 +329,26 @@ Rule relationships:
 Alert states:
 
 - `OK`
+  The rule currently evaluates as healthy.
 - `FIRING`
+  The rule currently evaluates as abnormal.
 - `ACKED`
+  The alert is still abnormal, but an operator acknowledged it.
 - `SILENCED`
+  The alert would be firing, but an active silence currently masks it.
 - `SUPPRESSED`
-- `RESOLVED`
+  The alert would be firing, but another rule listed in `suppressed_by` is active.
+
+Derived transitions:
+
+- `UNACK`
+  Emitted when an acknowledged alert is reopened (`ACKED -> FIRING`).
+- `ESCALATED`
+  Emitted when severity rises while the state stays the same.
+- `DEESCALATED`
+  Emitted when severity drops while the state stays the same.
+
+In practice:
+
+- `SILENCED` is useful if you want outputs or viewers to show that an alert is muted on purpose.
+- Rule removals during reload are not represented as an alert state. They are recorded in history as an operator action with `action_type = "rule_removed"`.

@@ -881,7 +881,6 @@ function historyStateClass(stateName) {
     SILENCED: "silenced",
     SUPPRESSED: "suppressed",
     OK: "ok",
-    RESOLVED: "resolved",
   }[stateName] || "neutral";
 }
 
@@ -910,7 +909,6 @@ function alertPriority(alert) {
     SILENCED: 2,
     SUPPRESSED: 3,
     OK: 4,
-    RESOLVED: 5,
   }[alert.state] ?? 10;
 }
 

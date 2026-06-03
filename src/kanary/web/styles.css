@@ -588,7 +588,6 @@ select {
 .state-ACKED { background: var(--acked); }
 .state-SILENCED { background: var(--silenced); }
 .state-SUPPRESSED { background: var(--suppressed); }
-.state-RESOLVED { background: var(--resolved); }
 
 .severity-badge {
   font-weight: 700;

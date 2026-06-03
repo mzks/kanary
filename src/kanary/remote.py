@@ -6,7 +6,7 @@ import re
 from typing import Any
 from urllib.request import Request, urlopen
 
-from .constants import ACKED, OK, RESOLVED, AlertState, Severity
+from .constants import ACKED, OK, AlertState, Severity
 from .models import Evaluation, Measurement, SourceResult
 from .patterns import matches_any_tag, matches_excluded_tag
 from .registry import get_source_registry, register_rule
@@ -37,7 +37,7 @@ class RemoteKanarySource(Source):
             measurements.append(
                 Measurement(
                     name=str(alert["rule_id"]),
-                    value=0 if state in {OK.value, RESOLVED.value} else 1,
+                    value=0 if state == OK.value else 1,
                     timestamp=timestamp,
                     metadata=dict(alert),
                 )

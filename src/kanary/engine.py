@@ -8,7 +8,7 @@ from uuid import uuid4
 import threading
 from typing import Callable
 
-from .constants import AlertState
+from .constants import AlertState, DEESCALATED, ESCALATED, TransitionKind, UNACK
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
 from .output import Output
 from .registry import get_output_registry, get_rule_registry, get_source_registry
@@ -91,14 +91,6 @@ class Engine:
                 self._terminate_output(output_id, output)
             self.store.close()
 
-    def evaluate_once(self) -> dict[str, Alert]:
-        now = self._now_fn()
-        with self._lock:
-            payloads = self._poll_sources(now)
-            for source_id, payload in payloads.items():
-                self.evaluate_source(source_id, payload, now=now)
-            return dict(self.alerts)
-
     def evaluate_source(
         self,
         source_id: str,
@@ -131,6 +123,7 @@ class Engine:
     ) -> None:
         with self._lock:
             old_rule_ids = set(self.rules)
+            old_rules = self.rules
             old_sources = self.sources
             old_outputs = self.outputs
             old_source_ids = set(self.sources)
@@ -180,9 +173,20 @@ class Engine:
                 alert = self.alerts.get(rule_id)
                 if alert is None:
                     continue
-                alert.state = AlertState.RESOLVED
-                alert.resolved_at = now
-                alert.last_evaluated_at = now
+                self.store.record_rule_removed(
+                    rule_id=rule_id,
+                    definition_file=getattr(old_rules.get(rule_id, None).__class__, "__kanary_definition_file__", None)
+                    if old_rules.get(rule_id, None) is not None else None,
+                    previous_state=alert.state.value,
+                    previous_severity=int(alert.severity),
+                    operator="system",
+                    reason="rule removed during reload",
+                    created_at=now,
+                    had_ack=rule_id in self.acknowledgements,
+                    active_silence_ids=list(alert.active_silence_ids),
+                )
+                self.alerts.pop(rule_id, None)
+                self.acknowledgements.pop(rule_id, None)
 
     def acknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
         with self._lock:
@@ -205,15 +209,28 @@ class Engine:
             alert.ack_reason = reason
             alert.last_evaluated_at = now
             self.store.append_alert_event(
-                AlertEvent(
-                    rule_id=rule_id,
-                    previous_state=previous_state,
-                    current_state=AlertState.ACKED,
+                self._make_alert_event(
                     alert=alert,
                     occurred_at=now,
+                    previous_state=previous_state,
+                    previous_severity=alert.severity,
+                    current_state=AlertState.ACKED,
+                    current_severity=alert.severity,
+                    transition=None,
                 ),
                 definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
                 matched_outputs=list(getattr(rule, "matched_outputs", [])),
+            )
+            self._emit_alert_event(
+                self._make_alert_event(
+                    alert=alert,
+                    occurred_at=now,
+                    previous_state=previous_state,
+                    previous_severity=alert.severity,
+                    current_state=AlertState.ACKED,
+                    current_severity=alert.severity,
+                    transition=None,
+                )
             )
             return alert
 
@@ -241,15 +258,28 @@ class Engine:
                 alert.ack_reason = None
                 alert.last_evaluated_at = now
                 self.store.append_alert_event(
-                    AlertEvent(
-                        rule_id=rule_id,
-                        previous_state=previous_state,
-                        current_state=AlertState.FIRING,
+                    self._make_alert_event(
                         alert=alert,
                         occurred_at=now,
+                        previous_state=previous_state,
+                        previous_severity=alert.severity,
+                        current_state=AlertState.FIRING,
+                        current_severity=alert.severity,
+                        transition=UNACK,
                     ),
                     definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
                     matched_outputs=list(getattr(rule, "matched_outputs", [])),
+                )
+                self._emit_alert_event(
+                    self._make_alert_event(
+                        alert=alert,
+                        occurred_at=now,
+                        previous_state=previous_state,
+                        previous_severity=alert.severity,
+                        current_state=AlertState.FIRING,
+                        current_severity=alert.severity,
+                        transition=UNACK,
+                    )
                 )
             return alert
 
@@ -374,6 +404,9 @@ class Engine:
                 rule_id=rule.rule_id,
                 previous_state=None,
                 current_state=alert.state,
+                previous_severity=None,
+                current_severity=alert.severity,
+                transition=None,
                 alert=alert,
                 occurred_at=current_time,
             )
@@ -428,6 +461,9 @@ class Engine:
                 rule_id=rule.rule_id,
                 previous_state=previous_alert.state if previous_alert is not None else None,
                 current_state=state,
+                previous_severity=previous_alert.severity if previous_alert is not None else None,
+                current_severity=alert.severity,
+                transition=None,
                 alert=alert,
                 occurred_at=current_time,
             )
@@ -571,14 +607,12 @@ class Engine:
         acked_at = acknowledgement.created_at if acknowledgement and state == AlertState.ACKED else None
         acked_by = acknowledgement.operator if acknowledgement and state == AlertState.ACKED else None
         ack_reason = acknowledgement.reason if acknowledgement and state == AlertState.ACKED else None
-        resolved_at = now if state == AlertState.RESOLVED else None
         previous_state = previous.state if previous else None
         active_silence_ids = tuple(silence.silence_id for silence in self._matching_active_silences(rule, now))
 
         if state == AlertState.FIRING and active_since is None:
             active_since = now
         if state == AlertState.OK:
-            resolved_at = None
             active_since = None
             acked_at = None
             acked_by = None
@@ -595,7 +629,6 @@ class Engine:
             message=message,
             active_since=active_since,
             last_evaluated_at=now,
-            resolved_at=resolved_at,
             acked_at=acked_at,
             acked_by=acked_by,
             ack_reason=ack_reason,
@@ -603,29 +636,21 @@ class Engine:
         )
         self.alerts[rule.rule_id] = alert
 
-        if previous is None or previous.state != state:
+        event = self._derive_alert_event(
+            previous=previous,
+            alert=alert,
+            occurred_at=now,
+        )
+
+        if event is not None:
             self.store.append_alert_event(
-                AlertEvent(
-                    rule_id=rule.rule_id,
-                    previous_state=previous_state,
-                    current_state=state,
-                    alert=alert,
-                    occurred_at=now,
-                ),
+                event,
                 definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
                 matched_outputs=list(getattr(rule, "matched_outputs", [])),
             )
 
-        if previous is not None and previous.state != state:
-            self._emit_alert_event(
-                AlertEvent(
-                    rule_id=rule.rule_id,
-                    previous_state=previous_state,
-                    current_state=state,
-                    alert=alert,
-                    occurred_at=now,
-                )
-            )
+        if event is not None and previous is not None:
+            self._emit_alert_event(event)
 
     def _resolve_dependency_state(
         self,
@@ -739,7 +764,7 @@ class Engine:
         alert = self.alerts.get(dependency_rule_id)
         if alert is None:
             return False
-        return alert.state not in {AlertState.OK, AlertState.RESOLVED}
+        return alert.state != AlertState.OK
 
     def _emit_alert_event(self, event: AlertEvent) -> dict[str, object]:
         matched_output_ids: list[str] = []
@@ -831,6 +856,82 @@ class Engine:
                 event.current_state.value,
             )
         return summary
+
+    def _derive_alert_event(
+        self,
+        *,
+        previous: Alert | None,
+        alert: Alert,
+        occurred_at: datetime,
+    ) -> AlertEvent | None:
+        previous_state = previous.state if previous is not None else None
+        previous_severity = previous.severity if previous is not None else None
+        current_state = alert.state
+        current_severity = alert.severity
+
+        if previous is None:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=None,
+                previous_severity=None,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=None,
+            )
+        if previous_state != current_state:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=previous_state,
+                previous_severity=previous_severity,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=None,
+            )
+        if previous_severity is not None and previous_severity < current_severity:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=previous_state,
+                previous_severity=previous_severity,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=ESCALATED,
+            )
+        if previous_severity is not None and previous_severity > current_severity:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=previous_state,
+                previous_severity=previous_severity,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=DEESCALATED,
+            )
+        return None
+
+    def _make_alert_event(
+        self,
+        *,
+        alert: Alert,
+        occurred_at: datetime,
+        previous_state: AlertState | None,
+        previous_severity,
+        current_state: AlertState,
+        current_severity,
+        transition: TransitionKind | None,
+    ) -> AlertEvent:
+        return AlertEvent(
+            rule_id=alert.rule_id,
+            previous_state=previous_state,
+            current_state=current_state,
+            previous_severity=previous_severity,
+            current_severity=current_severity,
+            transition=transition,
+            alert=alert,
+            occurred_at=occurred_at,
+        )
 
     def _is_rule_excluded(self, rule_id: str) -> bool:
         return any(fnmatch(rule_id, pattern) for pattern in self._exclude_rule_patterns)

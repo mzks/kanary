@@ -271,14 +271,11 @@ class EngineTest(unittest.TestCase):
         alerts = self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         self.assertEqual(alerts["postgres.temperature.stale"].state, kanary.AlertState.OK)
 
-    def test_removed_rule_is_resolved_on_reload(self) -> None:
+    def test_removed_rule_is_recorded_and_removed_on_reload(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         self.engine.reload(rule_registry={})
-        self.assertEqual(
-            self.engine.alerts["postgres.temperature.stale"].state,
-            kanary.AlertState.RESOLVED,
-        )
+        self.assertNotIn("postgres.temperature.stale", self.engine.alerts)
 
     def test_range_rule_fires_when_value_is_high(self) -> None:
         source = self.engine.sources["postgres"]
@@ -836,8 +833,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.output(
                         output_id="example.output",
-                        include_states=["ACKED"],
-                        exclude_states=["OK", "FIRING", "ACKED", "SUPPRESSED", "RESOLVED"],
+                        exclude_states=["OK", "FIRING", "ACKED", "SUPPRESSED", "SILENCED"],
                     )
                     class ExampleOutput:
                         def emit(self, event, ctx):
@@ -985,8 +981,8 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         def emit(self, event, ctx):
                             return None
 
-                    @kanary.output(output_id="match-by-state", include_states=["ACKED"])
-                    class MatchByState:
+                    @kanary.output(output_id="match-by-exclusion", exclude_states=["SUPPRESSED"])
+                    class MatchByExclusion:
                         def emit(self, event, ctx):
                             return None
 
@@ -1001,7 +997,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
             snapshot, report = loader.inspect()
         self.assertEqual(report.errors, [])
         self.assertEqual(report.warnings, [])
-        self.assertEqual(snapshot.rules["example.rule"].matched_outputs, ["match-by-tag", "match-by-state", "match-all"])
+        self.assertEqual(snapshot.rules["example.rule"].matched_outputs, ["match-by-tag", "match-by-exclusion", "match-all"])
 
     def test_inspect_matches_outputs_with_glob_tag_patterns(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1879,10 +1875,13 @@ class SQLiteStoreTest(unittest.TestCase):
                 payload = fetch_json(f"http://127.0.0.1:{port}/history/postgres.temperature.stale")
                 self.assertTrue(payload["enabled"])
                 self.assertGreaterEqual(len(payload["alert_events"]), 2)
-                self.assertEqual(len(payload["output_dispatches"]), 1)
-                self.assertEqual(payload["output_dispatches"][0]["delivered_outputs"], ["recording"])
+                self.assertGreaterEqual(len(payload["output_dispatches"]), 3)
+                self.assertTrue(all(row["delivered_outputs"] == ["recording"] for row in payload["output_dispatches"]))
                 self.assertEqual(payload["operator_actions"][0]["action_type"], "unack")
                 self.assertEqual(payload["operator_actions"][0]["operator"], "alice")
+                self.assertEqual(payload["alert_events"][0]["transition"], "UNACK")
+                self.assertEqual(payload["alert_events"][0]["previous_severity"], int(kanary.ERROR))
+                self.assertEqual(payload["alert_events"][0]["current_severity"], int(kanary.ERROR))
             finally:
                 api.shutdown()
                 thread.join(timeout=2.0)
@@ -1907,6 +1906,30 @@ class SQLiteStoreTest(unittest.TestCase):
 
         self.assertEqual(len(filtered["output_dispatches"]), 1)
         self.assertEqual(filtered["output_dispatches"][0]["occurred_at"], "2026-03-17T00:20:00+00:00")
+
+    def test_rule_removed_is_persisted_in_history(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanary.db"
+            now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+
+            engine = kanary.Engine(
+                now_fn=lambda: now,
+                source_registry={"postgres": SlowPostgresSource},
+                rule_registry={"postgres.temperature.stale": SlowPostgresStale},
+                output_registry={},
+                store=kanary.SQLiteStore(db_path),
+            )
+            engine.start()
+            try:
+                source = engine.sources["postgres"]
+                engine.evaluate_source(source.source_id, source.poll({}), now=now)
+                engine.reload(rule_registry={})
+                history = engine.get_rule_history("postgres.temperature.stale")
+                self.assertEqual(history["operator_actions"][0]["action_type"], "rule_removed")
+                self.assertEqual(history["operator_actions"][0]["details"]["previous_state"], "FIRING")
+                self.assertEqual(history["operator_actions"][0]["details"]["previous_severity"], int(kanary.ERROR))
+            finally:
+                engine.shutdown()
 
 
 class RecordingOutput(kanary.Output):
@@ -2004,6 +2027,61 @@ class OutputTest(unittest.TestCase):
                 for line in captured.output
             )
         )
+
+    def test_output_plugin_receives_escalation_event(self) -> None:
+        source = self.engine.sources["postgres"]
+        source.temperature = 21
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        threshold_events = [event for event in RecordingOutput.events if event.rule_id == "postgres.temperature.threshold"]
+        self.assertEqual(len(threshold_events), 0)
+
+        self.now = self.now + timedelta(seconds=5)
+        source.temperature = 25
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+        threshold_events = [event for event in RecordingOutput.events if event.rule_id == "postgres.temperature.threshold"]
+        self.assertEqual(len(threshold_events), 1)
+        self.assertEqual(threshold_events[0].transition, kanary.ESCALATED)
+        self.assertEqual(threshold_events[0].previous_severity, kanary.WARN)
+        self.assertEqual(threshold_events[0].current_severity, kanary.ERROR)
+
+    def test_output_plugin_receives_deescalation_by_default(self) -> None:
+        source = self.engine.sources["postgres"]
+        source.temperature = 29
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+        self.now = self.now + timedelta(seconds=5)
+        source.temperature = 26.5
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+        threshold_events = [event for event in RecordingOutput.events if event.rule_id == "postgres.temperature.threshold"]
+        self.assertEqual(len(threshold_events), 1)
+        self.assertEqual(threshold_events[0].transition, kanary.DEESCALATED)
+
+    def test_ack_and_unack_emit_events(self) -> None:
+        source = self.engine.sources["postgres"]
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        self.assertEqual(len(RecordingOutput.events), 0)
+
+        self.now = self.now + timedelta(seconds=1)
+        self.engine.acknowledge(
+            "postgres.temperature.stale",
+            operator="alice",
+            reason="investigating",
+        )
+        self.assertEqual(len(RecordingOutput.events), 1)
+        self.assertEqual(RecordingOutput.events[-1].current_state, kanary.ACKED)
+        self.assertIsNone(RecordingOutput.events[-1].transition)
+
+        self.now = self.now + timedelta(seconds=1)
+        self.engine.unacknowledge(
+            "postgres.temperature.stale",
+            operator="alice",
+            reason="re-open",
+        )
+        self.assertEqual(len(RecordingOutput.events), 2)
+        self.assertEqual(RecordingOutput.events[-1].current_state, kanary.FIRING)
+        self.assertEqual(RecordingOutput.events[-1].transition, kanary.UNACK)
 
     def test_reload_keeps_first_notification_after_reload(self) -> None:
         source = self.engine.sources["postgres"]
@@ -2162,6 +2240,99 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(message["To"], "operator@example.invalid")
         self.assertIn("postgres.temperature.stale", message["Subject"])
         self.assertTrue(FakeSMTP.started_tls)
+
+    def test_output_can_exclude_unack_transition(self) -> None:
+        class NoUnackOutput(kanary.Output):
+            output_id = "no-unack"
+            events = []
+            exclude_transitions = ["UNACK"]
+
+            def emit(self, event, ctx):
+                self.events.append(event)
+
+        NoUnackOutput.events = []
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"no-unack": NoUnackOutput},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            engine.acknowledge("postgres.temperature.stale", operator="alice", reason="checking")
+            engine.unacknowledge("postgres.temperature.stale", operator="alice", reason="re-open")
+        finally:
+            engine.shutdown()
+
+        self.assertEqual([event.current_state for event in NoUnackOutput.events], [kanary.ACKED])
+
+    def test_output_can_exclude_deescalation_transition(self) -> None:
+        class NoDeescalationOutput(kanary.Output):
+            output_id = "no-deescalation"
+            events = []
+            include_tags = ["threshold"]
+            exclude_transitions = ["DEESCALATED"]
+
+            def emit(self, event, ctx):
+                self.events.append(event)
+
+        NoDeescalationOutput.events = []
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"no-deescalation": NoDeescalationOutput},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            source.temperature = 29
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+            self.now = self.now + timedelta(seconds=5)
+            source.temperature = 26.5
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        finally:
+            engine.shutdown()
+
+        self.assertEqual(NoDeescalationOutput.events, [])
+
+    def test_output_minimum_severity_keeps_error_recovery_notification(self) -> None:
+        class ErrorOnlyOutput(kanary.Output):
+            output_id = "error-only"
+            events = []
+            include_tags = ["threshold"]
+            minimum_severity = "ERROR"
+
+            def emit(self, event, ctx):
+                self.events.append(event)
+
+        ErrorOnlyOutput.events = []
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"error-only": ErrorOnlyOutput},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            source.temperature = 21
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+            self.now = self.now + timedelta(seconds=5)
+            source.temperature = 25
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+            self.now = self.now + timedelta(seconds=5)
+            source.temperature = 10
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        finally:
+            engine.shutdown()
+
+        self.assertEqual(
+            [(event.transition, event.current_state) for event in ErrorOnlyOutput.events],
+            [
+                (kanary.ESCALATED, kanary.FIRING),
+                (None, kanary.OK),
+            ],
+        )
 
 
 class RemoteAlarmFactoryTest(unittest.TestCase):

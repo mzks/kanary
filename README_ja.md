@@ -1,7 +1,7 @@
 # Kanary
 
 Kanary は、アラーム、通知、信頼性監視のための Python ベースの実行環境です。  
-監視対象から値を読む `Source`、その値を評価する `Rule`、状態変化を外部へ送る `Output` を Python で定義します。
+監視対象から値を読む `Source`、その値を評価する `Rule`、alert event を外部へ送る `Output` を Python で定義します。
 
 `Source`, `Rule`, `Output` を分けることで、値の取得、異常判定、通知の責務が混ざりにくくなります。監視対象や通知先が増えても、監視定義を整理しやすいのが Kanary の基本的な考え方です。
 
@@ -112,7 +112,7 @@ class ConsoleOutput:
 
 - 値を返す source
 - 値を評価する rule
-- 状態変化を受け取る output
+- alert event を受け取る output
 
 内部では Kanary が plugin の読み込み、source の定期実行、rule の評価、alert state の管理、HTTP API と Web viewer の提供を行います。
 

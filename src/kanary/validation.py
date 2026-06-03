@@ -118,7 +118,6 @@ def _matching_outputs(rule_cls: type[Any], outputs: dict[str, type[Output]]) -> 
     for output_id, output_cls in outputs.items():
         include_tags = list(getattr(output_cls, "include_tags", []))
         exclude_tags = list(getattr(output_cls, "exclude_tags", []))
-        include_states = set(getattr(output_cls, "include_states", []))
         exclude_states = set(getattr(output_cls, "exclude_states", []))
 
         if include_tags and not matches_any_tag(rule_tags, include_tags):
@@ -127,8 +126,6 @@ def _matching_outputs(rule_cls: type[Any], outputs: dict[str, type[Output]]) -> 
             continue
 
         allowed_states = set(possible_states)
-        if include_states:
-            allowed_states &= include_states
         if exclude_states:
             allowed_states -= exclude_states
         if not allowed_states:

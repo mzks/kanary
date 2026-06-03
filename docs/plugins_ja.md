@@ -108,16 +108,57 @@ kanary.SourceResult(
 - `terminate(ctx)`
 - `include_tags`
 - `exclude_tags`
-- `include_states`
 - `exclude_states`
+- `exclude_transitions`
+- `minimum_severity`
 
 `include_tags` と `exclude_tags` は glob pattern を使えます。  
 たとえば `include_tags=["expert_*"]` とすると、`expert_db` や `expert_shift` のような tag に一致します。
 
+`exclude_states` は「全 state を許可してから除外する」設定です。  
+`exclude_transitions` も default は空です。severity 低下を通知したくないなら `DEESCALATED` を明示的に追加します。
+
+`exclude_states` によく入る値:
+
+- `OK`
+  復旧通知。
+- `FIRING`
+  異常発火中の通知。
+- `ACKED`
+  operator が確認したことを示す通知 (`FIRING -> ACKED`)。
+- `SILENCED`
+  active な silence に覆われている `FIRING`。
+- `SUPPRESSED`
+  `suppressed_by` により別 rule に抑制されている `FIRING`。
+
+`exclude_transitions` に入る値:
+
+- `UNACK`
+  `ACKED -> FIRING` を表す派生 transition。
+- `ESCALATED`
+  `FIRING(WARN) -> FIRING(ERROR)` のような、同じ state の severity 上昇。
+- `DEESCALATED`
+  `FIRING(CRITICAL) -> FIRING(ERROR)` のような、同じ state の severity 低下。
+
+`emit()` に渡される `event` には次が入ります。
+
+- `previous_state`
+- `current_state`
+- `previous_severity`
+- `current_severity`
+- `transition`
+
+通常の state change では `transition` は `None` です。派生 transition の場合は `UNACK`, `ESCALATED`, `DEESCALATED` のいずれかになります。
+
 例:
 
 ```python
-@kanary.output(output_id="discord", include_tags=["sqlite"])
+@kanary.output(
+    output_id="discord",
+    include_tags=["sqlite"],
+    exclude_states=["SUPPRESSED"],
+    minimum_severity="ERROR",
+)
 class DiscordOutput:
     def emit(self, event, ctx):
         ...
@@ -262,8 +303,26 @@ rule 間関係:
 alert state:
 
 - `OK`
+  現在の評価結果が正常。
 - `FIRING`
+  現在の評価結果が異常。
 - `ACKED`
+  異常は継続しているが、operator が確認済み。
 - `SILENCED`
+  本来は `FIRING` だが、active な silence により一時的に mute されている。
 - `SUPPRESSED`
-- `RESOLVED`
+  本来は `FIRING` だが、`suppressed_by` にある別 rule が active なため抑制されている。
+
+派生 transition:
+
+- `UNACK`
+  acknowledged された alert を再オープンした時 (`ACKED -> FIRING`)。
+- `ESCALATED`
+  state を変えずに severity が上がった時。
+- `DEESCALATED`
+  state を変えずに severity が下がった時。
+
+実運用では:
+
+- `SILENCED` は「意図的に止めている」ことを viewer や output で示したい時に役立ちます。
+- reload 中の rule removal は alert state では表しません。履歴上は `action_type = "rule_removed"` の operator action として残ります。

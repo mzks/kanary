@@ -78,7 +78,7 @@ class RuleContext:
         return self.previous_alert.severity
 
     def was_alerting(self) -> bool:
-        return self.previous_state not in {None, AlertState.OK, AlertState.RESOLVED}
+        return self.previous_state not in {None, AlertState.OK}
 
 
 class Rule:
