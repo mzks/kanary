@@ -10,6 +10,7 @@ import kanary
     output_id="discord",
     include_tags=["sqlite"],
     exclude_states=["SUPPRESSED"],
+    minimum_severity="ERROR",
 )
 class DiscordOutput:
 
@@ -19,18 +20,31 @@ class DiscordOutput:
             raise RuntimeError("KANARY_DISCORD_WEBHOOK_URL is not set")
 
     def emit(self, event, ctx):
-        color = alert_color(event.current_state.value, int(event.alert.severity))
+        color = alert_color(event.current_state.value, int(event.effective_severity))
+        transition = event.transition.value if event.transition else None
+        title = event.rule_id if transition is None else f"{event.rule_id}: {transition}"
+        severity = (
+            kanary.severity_label(event.current_severity)
+            if event.previous_severity is None or event.previous_severity == event.current_severity
+            else f"{kanary.severity_label(event.previous_severity)} -> "
+            f"{kanary.severity_label(event.current_severity)}"
+        )
         payload = {
-            "content": f"{event.rule_id}: {event.current_state.value}",
+            "content": f"{title}: {event.current_state.value}",
             "embeds": [
                 {
-                    "title": f"{event.rule_id}: {event.current_state.value}",
+                    "title": f"{title}: {event.current_state.value}",
                     "description": event.alert.message or "",
                     "color": color,
                     "fields": [
                         {
+                            "name": "Transition",
+                            "value": transition or "-",
+                            "inline": True,
+                        },
+                        {
                             "name": "Severity",
-                            "value": kanary.severity_label(int(event.alert.severity)),
+                            "value": severity,
                             "inline": True,
                         },
                         {

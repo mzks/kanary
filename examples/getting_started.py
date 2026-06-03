@@ -86,7 +86,7 @@ class FileOutput:
             "rule_id": event.rule_id,
             "previous_state": event.previous_state.value if event.previous_state else None,
             "current_state": event.current_state.value,
-            "severity": kanary.severity_label(int(event.alert.severity)),
+            "severity": kanary.severity_label(event.alert.severity),
             "message": event.alert.message,
             "occurred_at": event.occurred_at.isoformat(),
         }

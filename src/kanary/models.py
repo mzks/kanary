@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .constants import AlertState, Severity
+from .constants import AlertState, Severity, TransitionKind
 
 
 @dataclass(slots=True)
@@ -24,7 +24,6 @@ class Alert:
     message: str | None = None
     active_since: datetime | None = None
     last_evaluated_at: datetime | None = None
-    resolved_at: datetime | None = None
     acked_at: datetime | None = None
     acked_by: str | None = None
     ack_reason: str | None = None
@@ -91,8 +90,17 @@ class AlertEvent:
     rule_id: str
     previous_state: AlertState | None
     current_state: AlertState
+    previous_severity: Severity | None
+    current_severity: Severity
+    transition: TransitionKind | None
     alert: Alert
     occurred_at: datetime
+
+    @property
+    def effective_severity(self) -> Severity:
+        if self.current_state == AlertState.OK and self.previous_severity is not None:
+            return self.previous_severity
+        return self.current_severity
 
 
 @dataclass(slots=True)

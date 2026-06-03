@@ -144,7 +144,7 @@ helper class を使うときは通常 `evaluate()` を書かず、class 変数�
 
 ## 6. Output を作る
 
-state change を file に追記する output の例です。
+alert event を file に追記する output の例です。
 
 ```python
 from pathlib import Path
@@ -166,7 +166,12 @@ class FileOutput:
             "rule_id": event.rule_id,
             "previous_state": event.previous_state.value if event.previous_state else None,
             "current_state": event.current_state.value,
-            "severity": kanary.severity_label(int(event.alert.severity)),
+            "previous_severity": (
+                kanary.severity_label(event.previous_severity)
+                if event.previous_severity is not None else None
+            ),
+            "current_severity": kanary.severity_label(event.current_severity),
+            "transition": event.transition.value if event.transition else None,
             "message": event.alert.message,
             "occurred_at": event.occurred_at.isoformat(),
         }
@@ -177,7 +182,7 @@ class FileOutput:
 ## 7. 何が起きるか
 
 ここまで保存すると、Kanary は plugin 定義を自動 reload します。  
-viewer では source, rules, output が見えるようになります。state change が起きると `getting_started_alerts.jsonl` に 1 行ずつ追記されます。
+viewer では source, rules, output が見えるようになります。alert event が起きると `getting_started_alerts.jsonl` に 1 行ずつ追記されます。
 
 ```bash
 kanaryctl --base-url http://127.0.0.1:8000 alerts

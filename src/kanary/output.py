@@ -4,7 +4,7 @@ import smtplib
 from typing import Any
 
 from .models import AlertEvent
-from .constants import severity_label
+from .constants import Severity, severity_label
 from .patterns import matches_any_tag, matches_excluded_tag
 
 
@@ -12,8 +12,9 @@ class Output:
     output_id: str
     include_tags: list[str] = []
     exclude_tags: list[str] = []
-    include_states: list[str] = []
     exclude_states: list[str] = []
+    exclude_transitions: list[str] = []
+    minimum_severity: str | Severity | None = None
 
     def init(self, ctx: dict[str, Any]) -> None:
         return None
@@ -31,9 +32,13 @@ class Output:
         if self.exclude_tags and matches_excluded_tag(alert_tags, self.exclude_tags):
             return False
         state = event.current_state.value
-        if self.include_states and state not in self.include_states:
-            return False
         if self.exclude_states and state in self.exclude_states:
+            return False
+        transition = event.transition.value if event.transition is not None else None
+        if transition is not None and self.exclude_transitions and transition in self.exclude_transitions:
+            return False
+        minimum_severity = _coerce_minimum_severity(self.minimum_severity)
+        if minimum_severity is not None and event.effective_severity < minimum_severity:
             return False
         return True
 
@@ -80,18 +85,23 @@ class MailOutput(Output):
             smtp.send_message(message)
 
     def _subject(self, event: AlertEvent) -> str:
+        marker = event.transition.value if event.transition is not None else event.current_state.value
         return (
             f"{self.subject_prefix} "
-            f"{event.current_state.value} {severity_label(event.alert.severity)} {event.rule_id}"
+            f"{marker} {severity_label(event.effective_severity)} {event.rule_id}"
         )
 
     def _body(self, event: AlertEvent) -> str:
         lines = [
             f"Rule: {event.rule_id}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
             f"State: {event.current_state.value}",
-            f"Severity: {severity_label(event.alert.severity)}",
+            f"Previous Severity: {severity_label(event.previous_severity) if event.previous_severity is not None else '-'}",
+            f"Severity: {severity_label(event.current_severity)}",
             f"Message: {event.alert.message or '-'}",
         ]
+        if event.transition is not None:
+            lines.append(f"Transition: {event.transition.value}")
         if event.alert.tags:
             lines.append(f"Tags: {', '.join(event.alert.tags)}")
         if event.alert.owner:
@@ -102,8 +112,9 @@ class MailOutput(Output):
 def prepare_output_class(cls: type[Any]) -> type[Any]:
     _setdefault(cls, "include_tags", [])
     _setdefault(cls, "exclude_tags", [])
-    _setdefault(cls, "include_states", [])
     _setdefault(cls, "exclude_states", [])
+    _setdefault(cls, "exclude_transitions", [])
+    _setdefault(cls, "minimum_severity", None)
     if "init" not in cls.__dict__ and getattr(cls, "init", None) in {None, Output.init}:
         cls.init = Output.init
     if "terminate" not in cls.__dict__ and getattr(cls, "terminate", None) in {None, Output.terminate}:
@@ -114,6 +125,10 @@ def prepare_output_class(cls: type[Any]) -> type[Any]:
     output_id = getattr(cls, "output_id", None)
     if not isinstance(output_id, str) or not output_id:
         raise ValueError(f"output '{cls.__name__}' must define non-empty string output_id")
+    try:
+        _coerce_minimum_severity(getattr(cls, "minimum_severity", None))
+    except Exception as exc:
+        raise ValueError(f"output '{output_id}' has invalid minimum_severity: {exc}") from exc
     if not callable(getattr(cls, "emit", None)):
         raise ValueError(f"output '{output_id}' must implement emit(event, ctx)")
     return cls
@@ -123,3 +138,12 @@ def _setdefault(cls: type[Any], attr_name: str, value: Any) -> None:
     if hasattr(cls, attr_name):
         return
     setattr(cls, attr_name, value)
+
+
+def _coerce_minimum_severity(value: str | Severity | None) -> Severity | None:
+    if value is None:
+        return None
+    if isinstance(value, Severity):
+        return value
+    normalized = str(value).strip().upper()
+    return Severity[normalized]

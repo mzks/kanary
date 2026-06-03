@@ -100,7 +100,7 @@ kanary ./plugins --state-db ./var/kanary.db
 
 保存されるもの:
 
-- alert state change
+- alert event。state change と severity transition を含みます
 - operator action
 - silence
 

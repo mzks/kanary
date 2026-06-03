@@ -46,6 +46,21 @@ class NullStore:
     ) -> None:
         return None
 
+    def record_rule_removed(
+        self,
+        *,
+        rule_id: str,
+        definition_file: str | None,
+        previous_state: str,
+        previous_severity: int,
+        operator: str,
+        reason: str,
+        created_at: datetime,
+        had_ack: bool,
+        active_silence_ids: list[str],
+    ) -> None:
+        return None
+
     def create_silence(self, silence: Silence) -> None:
         return None
 
@@ -84,6 +99,9 @@ class SQLiteStore:
                     rule_id TEXT NOT NULL,
                     previous_state TEXT,
                     current_state TEXT NOT NULL,
+                    previous_severity INTEGER,
+                    current_severity INTEGER,
+                    transition TEXT,
                     severity INTEGER NOT NULL,
                     owner TEXT,
                     message TEXT,
@@ -148,6 +166,15 @@ class SQLiteStore:
                 )
             except sqlite3.OperationalError:
                 pass
+            for statement in (
+                "ALTER TABLE alert_events ADD COLUMN previous_severity INTEGER",
+                "ALTER TABLE alert_events ADD COLUMN current_severity INTEGER",
+                "ALTER TABLE alert_events ADD COLUMN transition TEXT",
+            ):
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
             conn.commit()
             self._conn = conn
 
@@ -226,6 +253,9 @@ class SQLiteStore:
                     rule_id,
                     previous_state,
                     current_state,
+                    previous_severity,
+                    current_severity,
+                    transition,
                     severity,
                     owner,
                     message,
@@ -234,12 +264,15 @@ class SQLiteStore:
                     occurred_at,
                     definition_file,
                     matched_outputs_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.rule_id,
                     event.previous_state.value if event.previous_state is not None else None,
                     event.current_state.value,
+                    int(event.previous_severity) if event.previous_severity is not None else None,
+                    int(event.current_severity),
+                    event.transition.value if event.transition is not None else None,
                     int(event.alert.severity),
                     event.alert.owner,
                     event.alert.message,
@@ -278,6 +311,35 @@ class SQLiteStore:
             operator=operator,
             reason=reason,
             details={},
+            created_at=created_at,
+        )
+
+    def record_rule_removed(
+        self,
+        *,
+        rule_id: str,
+        definition_file: str | None,
+        previous_state: str,
+        previous_severity: int,
+        operator: str,
+        reason: str,
+        created_at: datetime,
+        had_ack: bool,
+        active_silence_ids: list[str],
+    ) -> None:
+        self._record_operator_action(
+            action_type="rule_removed",
+            rule_id=rule_id,
+            silence_id=None,
+            operator=operator,
+            reason=reason,
+            details={
+                "definition_file": definition_file,
+                "previous_state": previous_state,
+                "previous_severity": previous_severity,
+                "had_ack": had_ack,
+                "active_silence_ids": list(active_silence_ids),
+            },
             created_at=created_at,
         )
 
@@ -368,6 +430,9 @@ class SQLiteStore:
                     "rule_id": row["rule_id"],
                     "previous_state": row["previous_state"],
                     "current_state": row["current_state"],
+                    "previous_severity": row["previous_severity"],
+                    "current_severity": row["current_severity"] if row["current_severity"] is not None else row["severity"],
+                    "transition": row["transition"],
                     "severity": row["severity"],
                     "owner": row["owner"],
                     "message": row["message"],

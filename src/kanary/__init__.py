@@ -1,6 +1,6 @@
 from .api import ControlAPI
-from .constants import ACKED, CRITICAL, ERROR, FIRING, INFO, OK, RESOLVED, SILENCED, SUPPRESSED, WARN, severity_label
-from .constants import AlertState, Severity
+from .constants import ACKED, CRITICAL, DEESCALATED, ERROR, ESCALATED, FIRING, INFO, OK, SILENCED, SUPPRESSED, UNACK, WARN, severity_label
+from .constants import AlertState, Severity, TransitionKind
 from .engine import Engine
 from .loader import RuleDirectoryLoader
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
@@ -32,9 +32,11 @@ __all__ = [
     "AlertState",
     "ControlAPI",
     "CRITICAL",
+    "DEESCALATED",
     "ERROR",
     "Engine",
     "EngineRuntime",
+    "ESCALATED",
     "Evaluation",
     "FIRING",
     "INFO",
@@ -62,7 +64,6 @@ __all__ = [
     "RateRule",
     "RemoteAlarm",
     "RemoteKanarySource",
-    "RESOLVED",
     "RuleDirectoryLoader",
     "Rule",
     "RuleContext",
@@ -79,6 +80,8 @@ __all__ = [
     "SUPPRESSED",
     "StaleRule",
     "ThresholdRule",
+    "TransitionKind",
+    "UNACK",
     "WARN",
     "clear_registries",
     "get_output_registry",
