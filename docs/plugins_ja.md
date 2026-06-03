@@ -17,6 +17,8 @@
 - `schedule`
 - `init(ctx)`
 - `terminate(ctx)`
+- `max_retry`
+- `max_reinit`
 
 `interval` と `schedule` を両方省略した場合は、Kanary は
 `interval = 60.0` を使います。  
@@ -41,6 +43,19 @@ class SqliteSource:
     def poll(self, ctx):
         ...
 ```
+
+実行失敗からの復帰の default:
+
+- `max_retry = 1`
+- `max_reinit = 1`
+
+`poll()` が例外を送出した場合、Kanary は即 failed に固定せず、その場で再試行します。  
+N 回目の復帰試行の前には `N**2` 秒待ちます。default では次の順です。
+
+1. 1 秒待って `poll()` を再試行
+2. 4 秒待って `terminate() -> init()` を行い、その後 `poll()` を再試行
+
+それでも失敗した場合は source は `FAILED` のままになり、次の定期 poll または明示 reload まで復帰しません。
 
 ### SourceResult
 
@@ -111,6 +126,8 @@ kanary.SourceResult(
 - `exclude_states`
 - `exclude_transitions`
 - `minimum_severity`
+- `max_retry`
+- `max_reinit`
 
 `include_tags` と `exclude_tags` は glob pattern を使えます。  
 たとえば `include_tags=["expert_*"]` とすると、`expert_db` や `expert_shift` のような tag に一致します。
@@ -163,6 +180,19 @@ class DiscordOutput:
     def emit(self, event, ctx):
         ...
 ```
+
+実行失敗からの復帰の default:
+
+- `max_retry = 1`
+- `max_reinit = 1`
+
+`emit()` が例外を送出した場合、Kanary は即 failed に固定せず、その場で再試行します。  
+N 回目の復帰試行の前には `N**2` 秒待ちます。default では次の順です。
+
+1. 1 秒待って `emit()` を再試行
+2. 4 秒待って `terminate() -> init()` を行い、その後 `emit()` を再試行
+
+それでも失敗した場合は output は `FAILED` のままになり、次の alert event または明示 reload まで復帰しません。
 
 ## 4. 組み込み helper class
 

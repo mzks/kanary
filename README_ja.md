@@ -127,6 +127,15 @@ class ConsoleOutput:
 kanary ./demo
 ```
 
+`run` は省略可能です。次は同じ意味です。
+
+```bash
+kanary ./demo
+kanary run ./demo
+python -m kanary ./demo
+python -m kanary run ./demo
+```
+
 API / Web viewer の port を明示する場合:
 
 ```bash

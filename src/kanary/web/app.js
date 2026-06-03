@@ -401,13 +401,15 @@ function renderSourcesPage() {
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
+          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
           <td>${formatPluginError(plugin)}</td>
           <td class="action-cell">
-            <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button>
-            <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button>
+            <div class="plugin-action-group">
+              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button>
+              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button>
+            </div>
           </td>
         </tr>
       `
@@ -433,13 +435,15 @@ function renderRulesPage() {
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
+          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
           <td>${formatPluginError(plugin)}</td>
           <td class="action-cell">
-            <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button>
-            <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button>
+            <div class="plugin-action-group">
+              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button>
+              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button>
+            </div>
           </td>
         </tr>
       `
@@ -483,15 +487,17 @@ function renderOutputsPage() {
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
+          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
           <td>${escapeHtml(String(plugin.run_count))}</td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td title="${escapeHtml(plugin.last_failure_at || "-")}">${escapeHtml(formatDateTime(plugin.last_failure_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
           <td>${formatPluginError(plugin)}</td>
           <td class="action-cell">
-            <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button>
-            <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button>
+            <div class="plugin-action-group">
+              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button>
+              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button>
+            </div>
           </td>
         </tr>
       `
@@ -1130,16 +1136,6 @@ function localDateTimeToIso(value) {
 
 function severityLabel(value) {
   return { 10: "INFO", 20: "WARN", 30: "ERROR", 40: "CRITICAL" }[value] || String(value);
-}
-
-function pluginStateToAlertState(stateName) {
-  if (stateName === "FAILED") return "FIRING";
-  if (stateName === "READY") return "OK";
-  if (stateName === "DISCOVERED") return "ACKED";
-  if (stateName === "DIRTY") return "SILENCED";
-  if (stateName === "RELOADING") return "SUPPRESSED";
-  if (stateName === "PENDING_REMOVE") return "SUPPRESSED";
-  return "SUPPRESSED";
 }
 
 function pluginTableRowClass(plugin) {

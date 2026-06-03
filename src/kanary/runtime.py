@@ -341,17 +341,63 @@ class EngineRuntime:
                     stop_event.wait((next_run_at - now).total_seconds())
                     continue
             try:
-                payload = source.poll({"engine": self.engine, "now": now})
+                payload = self._poll_source_with_recovery(source_id, source, now, stop_event)
                 alerts = self.engine.evaluate_source(source_id, payload, now=now)
                 if self.config.print_alerts:
                     self._print_alerts(alerts)
             except Exception as exc:
-                self.engine.record_source_failure(source_id, str(exc), now=now)
                 logger.exception("source '%s' failed", source_id)
             if schedule is not None:
                 next_run_at = schedule.next_after(now)
                 continue
             stop_event.wait(float(source.interval))
+
+    def _poll_source_with_recovery(
+        self,
+        source_id: str,
+        source,
+        now: datetime,
+        stop_event: threading.Event,
+    ):
+        assert self.engine is not None
+        last_exc: Exception | None = None
+        attempt = 0
+
+        try:
+            return source.poll({"engine": self.engine, "now": now})
+        except Exception as exc:
+            last_exc = exc
+
+        for _ in range(getattr(source, "max_retry", 1)):
+            attempt += 1
+            if stop_event.wait(attempt ** 2) or self._stop_event.is_set():
+                raise RuntimeError("source polling interrupted during recovery")
+            try:
+                return source.poll({"engine": self.engine, "now": now})
+            except Exception as exc:
+                last_exc = exc
+
+        for _ in range(getattr(source, "max_reinit", 1)):
+            attempt += 1
+            if stop_event.wait(attempt ** 2) or self._stop_event.is_set():
+                raise RuntimeError("source polling interrupted during recovery")
+            try:
+                self.engine._terminate_source(source)
+            except Exception:
+                pass
+            try:
+                self.engine._initialize_source(source)
+            except Exception as exc:
+                last_exc = exc
+                continue
+            try:
+                return source.poll({"engine": self.engine, "now": now})
+            except Exception as exc:
+                last_exc = exc
+
+        assert last_exc is not None
+        self.engine.record_source_failure(source_id, str(last_exc), now=now)
+        raise last_exc
 
     def _print_alerts(self, alerts: dict) -> None:
         rows = []

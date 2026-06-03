@@ -520,7 +520,14 @@ select {
 }
 
 .action-cell {
-  width: 110px;
+  width: 180px;
+}
+
+.plugin-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
 }
 
 .plugin-error-block {
@@ -588,6 +595,30 @@ select {
 .state-ACKED { background: var(--acked); }
 .state-SILENCED { background: var(--silenced); }
 .state-SUPPRESSED { background: var(--suppressed); }
+
+.plugin-state-READY {
+  background: var(--ok);
+}
+
+.plugin-state-DISCOVERED {
+  background: linear-gradient(180deg, #7896b7, var(--faded-blue));
+}
+
+.plugin-state-DIRTY {
+  background: linear-gradient(180deg, #c88c3f, var(--warn));
+}
+
+.plugin-state-RELOADING {
+  background: linear-gradient(180deg, #8e8475, var(--suppressed));
+}
+
+.plugin-state-PENDING_REMOVE {
+  background: linear-gradient(180deg, #9c6b45, #7f4c2a);
+}
+
+.plugin-state-FAILED {
+  background: linear-gradient(180deg, #b34c28, var(--danger));
+}
 
 .severity-badge {
   font-weight: 700;

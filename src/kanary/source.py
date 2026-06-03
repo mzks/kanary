@@ -10,6 +10,8 @@ class Source:
     source_id: str
     interval: float | None = None
     schedule: str | None = None
+    max_retry: int = 1
+    max_reinit: int = 1
 
     def init(self, ctx: dict[str, Any]) -> None:
         return None
@@ -106,6 +108,8 @@ class BufferedSource(Source):
 
 
 def prepare_source_class(cls: type[Any]) -> type[Any]:
+    _setdefault(cls, "max_retry", 1)
+    _setdefault(cls, "max_reinit", 1)
     if "init" not in cls.__dict__ and getattr(cls, "init", None) in {None, Source.init}:
         cls.init = Source.init
     if "terminate" not in cls.__dict__ and getattr(cls, "terminate", None) in {None, Source.terminate}:
@@ -135,6 +139,10 @@ def prepare_source_class(cls: type[Any]) -> type[Any]:
             cls._kanary_compiled_schedule = parse_schedule(schedule)
         except ValueError as exc:
             raise ValueError(f"source '{source_id}' schedule is invalid: {exc}") from exc
+    for attr_name in ("max_retry", "max_reinit"):
+        value = getattr(cls, attr_name, None)
+        if not isinstance(value, int) or value < 0:
+            raise ValueError(f"source '{source_id}' {attr_name} must be a non-negative integer")
     return cls
 
 

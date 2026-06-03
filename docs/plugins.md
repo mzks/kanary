@@ -17,6 +17,8 @@ Optional:
 - `schedule`
 - `init(ctx)`
 - `terminate(ctx)`
+- `max_retry`
+- `max_reinit`
 
 If you omit both `interval` and `schedule`, Kanary uses `interval = 60.0`.
 If you use `schedule`, do not set `interval` at the same time.
@@ -40,6 +42,19 @@ class SqliteSource:
     def poll(self, ctx):
         ...
 ```
+
+Failure recovery defaults:
+
+- `max_retry = 1`
+- `max_reinit = 1`
+
+If `poll()` raises, Kanary retries in-process before marking the source as failed.
+Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
+
+1. waits 1 second and retries `poll()`
+2. waits 4 seconds, runs `terminate() -> init()`, and retries `poll()`
+
+If all attempts fail, the source stays `FAILED` until the next scheduled poll or an explicit reload.
 
 ### SourceResult
 
@@ -112,6 +127,8 @@ Optional:
 - `exclude_states`
 - `exclude_transitions`
 - `minimum_severity`
+- `max_retry`
+- `max_reinit`
 
 `include_tags` and `exclude_tags` support glob patterns.  
 For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.
@@ -164,6 +181,19 @@ class DiscordOutput:
     def emit(self, event, ctx):
         ...
 ```
+
+Failure recovery defaults:
+
+- `max_retry = 1`
+- `max_reinit = 1`
+
+If `emit()` raises, Kanary retries delivery in-process before leaving the output in `FAILED`.
+Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
+
+1. waits 1 second and retries `emit()`
+2. waits 4 seconds, runs `terminate() -> init()`, and retries `emit()`
+
+If all attempts fail, the output remains `FAILED` until the next alert event or an explicit reload.
 
 ## 4. Built-In Helper Classes
 

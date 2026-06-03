@@ -75,6 +75,8 @@ Use `--api-host` and `--api-port` to change the bind address.
 
 `kanaryctl` is a thin client for the HTTP API.
 
+In the main `kanary` CLI, `run` is optional. For example, `kanary ./plugins` means the same thing as `kanary run ./plugins`. `lint` must still be written explicitly.
+
 Main subcommands:
 
 - `health`

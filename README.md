@@ -133,6 +133,15 @@ Basic run:
 kanary ./demo
 ```
 
+`run` is optional. These are equivalent:
+
+```bash
+kanary ./demo
+kanary run ./demo
+python -m kanary ./demo
+python -m kanary run ./demo
+```
+
 Change the API and Web viewer port:
 
 ```bash

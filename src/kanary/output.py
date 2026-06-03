@@ -15,6 +15,8 @@ class Output:
     exclude_states: list[str] = []
     exclude_transitions: list[str] = []
     minimum_severity: str | Severity | None = None
+    max_retry: int = 1
+    max_reinit: int = 1
 
     def init(self, ctx: dict[str, Any]) -> None:
         return None
@@ -115,6 +117,8 @@ def prepare_output_class(cls: type[Any]) -> type[Any]:
     _setdefault(cls, "exclude_states", [])
     _setdefault(cls, "exclude_transitions", [])
     _setdefault(cls, "minimum_severity", None)
+    _setdefault(cls, "max_retry", 1)
+    _setdefault(cls, "max_reinit", 1)
     if "init" not in cls.__dict__ and getattr(cls, "init", None) in {None, Output.init}:
         cls.init = Output.init
     if "terminate" not in cls.__dict__ and getattr(cls, "terminate", None) in {None, Output.terminate}:
@@ -129,6 +133,10 @@ def prepare_output_class(cls: type[Any]) -> type[Any]:
         _coerce_minimum_severity(getattr(cls, "minimum_severity", None))
     except Exception as exc:
         raise ValueError(f"output '{output_id}' has invalid minimum_severity: {exc}") from exc
+    for attr_name in ("max_retry", "max_reinit"):
+        value = getattr(cls, attr_name, None)
+        if not isinstance(value, int) or value < 0:
+            raise ValueError(f"output '{output_id}' {attr_name} must be a non-negative integer")
     if not callable(getattr(cls, "emit", None)):
         raise ValueError(f"output '{output_id}' must implement emit(event, ctx)")
     return cls

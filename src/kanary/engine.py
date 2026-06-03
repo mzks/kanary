@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 import logging
 import socket
+import time
 import traceback
 from uuid import uuid4
 import threading
@@ -909,12 +910,10 @@ class Engine:
                 status.last_success_at = event.occurred_at
                 status.last_updated_at = event.occurred_at
             except Exception as exc:
+                if self._recover_output_emit(output_id, output, event, status, exc):
+                    delivered_output_ids.append(output_id)
+                    continue
                 failed_output_ids.append(output_id)
-                self._set_plugin_failed(status)
-                status.last_error = str(exc)
-                status.last_error_detail = traceback.format_exc()
-                status.last_failure_at = event.occurred_at
-                status.last_updated_at = event.occurred_at
                 logger.exception("output '%s' failed", output.output_id)
         logger.info(
             "alert dispatch summary: rule=%s transition=%s->%s matched=%s delivered=%s filtered=%s uninitialized=%s failed=%s",
@@ -1127,6 +1126,70 @@ class Engine:
             status.last_failure_at = self._now_fn()
             status.last_updated_at = status.last_failure_at
             logger.exception("output '%s' terminate failed", output_id)
+
+    def _recover_output_emit(
+        self,
+        output_id: str,
+        output: Output,
+        event: AlertEvent,
+        status: PluginStatus,
+        initial_exc: Exception,
+    ) -> bool:
+        last_exc: Exception = initial_exc
+        last_detail = traceback.format_exc()
+        attempt = 0
+
+        for _ in range(getattr(output, "max_retry", 1)):
+            attempt += 1
+            time.sleep(attempt ** 2)
+            try:
+                output.emit(event, {"engine": self})
+                self._set_plugin_ready(status)
+                status.last_error = None
+                status.last_error_detail = None
+                status.run_count += 1
+                status.last_run_at = event.occurred_at
+                status.last_success_at = event.occurred_at
+                status.last_updated_at = event.occurred_at
+                return True
+            except Exception as exc:
+                last_exc = exc
+                last_detail = traceback.format_exc()
+
+        for _ in range(getattr(output, "max_reinit", 1)):
+            attempt += 1
+            time.sleep(attempt ** 2)
+            try:
+                output.terminate({"engine": self})
+            except Exception:
+                last_detail = traceback.format_exc()
+            try:
+                output.init({"engine": self})
+                status.init_ok = True
+            except Exception as exc:
+                last_exc = exc
+                last_detail = traceback.format_exc()
+                continue
+            try:
+                output.emit(event, {"engine": self})
+                self._set_plugin_ready(status)
+                status.last_error = None
+                status.last_error_detail = None
+                status.run_count += 1
+                status.last_run_at = event.occurred_at
+                status.last_success_at = event.occurred_at
+                status.last_updated_at = event.occurred_at
+                return True
+            except Exception as exc:
+                last_exc = exc
+                last_detail = traceback.format_exc()
+
+        self._set_plugin_failed(status)
+        status.last_error = str(last_exc)
+        status.last_error_detail = last_detail
+        status.last_failure_at = event.occurred_at
+        status.last_updated_at = event.occurred_at
+        return False
 
     def record_source_failure(self, source_id: str, error: str, *, now: datetime | None = None) -> None:
         when = now or self._now_fn()

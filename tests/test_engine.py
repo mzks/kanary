@@ -13,6 +13,8 @@ from urllib.request import Request, urlopen
 
 import kanary
 from kanary import ctl as kanaryctl
+from kanary import __main__ as kanary_main
+import kanaryctl as kanaryctl_module
 from kanary.runtime import EngineRuntime, RuntimeConfig
 
 
@@ -1503,6 +1505,66 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
                 runtime.engine.shutdown()
 
 
+class RuntimeRecoveryTest(unittest.TestCase):
+    def test_source_poll_failure_recovers_with_retry_then_reinit(self) -> None:
+        attempts: list[str] = []
+
+        @kanary.source(source_id="recover.source", interval=60.0, max_retry=1, max_reinit=1)
+        class RecoverSource:
+            def __init__(self) -> None:
+                self.poll_calls = 0
+                self.init_calls = 0
+
+            def init(self, ctx):
+                self.init_calls += 1
+                attempts.append("init")
+                self.poll_calls = 0
+
+            def poll(self, ctx):
+                self.poll_calls += 1
+                attempts.append(f"poll-{self.init_calls}-{self.poll_calls}")
+                if self.init_calls == 1:
+                    raise RuntimeError(f"boom-{self.init_calls}-{self.poll_calls}")
+                return kanary.SourceResult()
+
+            def terminate(self, ctx):
+                attempts.append("terminate")
+
+        class DummyStopEvent:
+            def wait(self, seconds):
+                attempts.append(f"wait-{seconds}")
+                return False
+
+            def is_set(self):
+                return False
+
+        runtime = EngineRuntime(RuntimeConfig(rule_directories=[], api_port=0))
+        engine = kanary.Engine(
+            source_registry={"recover.source": RecoverSource},
+            rule_registry={},
+            output_registry={},
+        )
+        engine.start()
+        runtime.engine = engine
+        source = engine.sources["recover.source"]
+        try:
+            attempts.clear()
+            source.init_calls = 1
+            source.poll_calls = 0
+            result = runtime._poll_source_with_recovery(
+                "recover.source",
+                source,
+                datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc),
+                DummyStopEvent(),
+            )
+        finally:
+            runtime.api._server.server_close()
+            engine.shutdown()
+
+        self.assertIsInstance(result, kanary.SourceResult)
+        self.assertEqual(attempts, ["poll-1-1", "wait-1", "poll-1-2", "wait-4", "terminate", "init", "poll-2-1", "terminate"])
+
+
 class ControlAPITest(unittest.TestCase):
     def test_alerts_and_plugins_include_definition_file(self) -> None:
         engine = kanary.Engine(output_registry={})
@@ -2235,6 +2297,31 @@ class BrokenEmitOutput(kanary.Output):
         raise RuntimeError("send failed")
 
 
+class RecoveringEmitOutput(kanary.Output):
+    output_id = "recovering-emit"
+    max_retry = 1
+    max_reinit = 1
+    attempts = []
+
+    def __init__(self) -> None:
+        self.emit_calls = 0
+        self.init_calls = 0
+
+    def init(self, ctx):
+        self.init_calls += 1
+        type(self).attempts.append("init")
+        self.emit_calls = 0
+
+    def terminate(self, ctx):
+        type(self).attempts.append("terminate")
+
+    def emit(self, event, ctx):
+        self.emit_calls += 1
+        type(self).attempts.append(f"emit-{self.init_calls}-{self.emit_calls}")
+        if self.init_calls == 1:
+            raise RuntimeError(f"send failed #{self.init_calls}-{self.emit_calls}")
+
+
 class FakeSMTP:
     sent_messages = []
     started_tls = False
@@ -2272,6 +2359,7 @@ class TestMailOutput(kanary.MailOutput):
 class OutputTest(unittest.TestCase):
     def setUp(self) -> None:
         RecordingOutput.events = []
+        RecoveringEmitOutput.attempts = []
         FakeSMTP.sent_messages = []
         FakeSMTP.started_tls = False
         FakeSMTP.login_args = None
@@ -2284,9 +2372,13 @@ class OutputTest(unittest.TestCase):
         self.output_module = importlib.import_module("kanary.output")
         self.original_smtp = self.output_module.smtplib.SMTP
         self.output_module.smtplib.SMTP = FakeSMTP
+        self.engine_module = importlib.import_module("kanary.engine")
+        self.original_sleep = self.engine_module.time.sleep
+        self.engine_module.time.sleep = lambda _seconds: None
 
     def tearDown(self) -> None:
         self.output_module.smtplib.SMTP = self.original_smtp
+        self.engine_module.time.sleep = self.original_sleep
         self.engine.shutdown()
 
     def test_output_plugin_receives_alert_event_on_state_change(self) -> None:
@@ -2500,6 +2592,25 @@ class OutputTest(unittest.TestCase):
             self.assertIsNotNone(status.last_updated_at)
         finally:
             engine.shutdown()
+
+    def test_output_emit_can_recover_with_reinit(self) -> None:
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"recovering-emit": RecoveringEmitOutput},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            source.now = self.now - timedelta(seconds=10)
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            status = engine.plugin_states["output:recovering-emit"]
+            self.assertEqual(status.state, "READY")
+            self.assertIsNone(status.last_error)
+        finally:
+            engine.shutdown()
+
+        self.assertEqual(RecoveringEmitOutput.attempts[:6], ["init", "emit-1-1", "emit-1-2", "terminate", "init", "emit-2-1"])
 
     def test_mail_output_sends_message(self) -> None:
         engine = kanary.Engine(
@@ -2851,6 +2962,18 @@ class CLIHelpersTest(unittest.TestCase):
         args = argparse.Namespace(payload_json='["bad"]', payload_file=None, payload_stdin=False)
         with self.assertRaises(ValueError):
             kanaryctl.load_payload_argument(args)
+
+    def test_main_help_mentions_run_is_optional(self) -> None:
+        parser = kanary_main.build_parser()
+        help_text = parser.format_help()
+        self.assertIn("Run is the default command, so you can omit it", help_text)
+        self.assertIn("kanary ./plugins", help_text)
+        self.assertIn("--api-port PORT", help_text)
+        self.assertIn("kanary run --help", help_text)
+        self.assertIn("kanary lint ./plugins", help_text)
+
+    def test_python_dash_m_kanaryctl_module_exposes_main(self) -> None:
+        self.assertIs(kanaryctl_module.main, kanaryctl.main)
 
 
 if __name__ == "__main__":

@@ -74,6 +74,8 @@
 
 `kanaryctl` は API の thin client です。
 
+`kanary` 本体の CLI では `run` は省略可能です。たとえば `kanary ./plugins` は `kanary run ./plugins` と同じ意味です。`lint` は subcommand を明示してください。
+
 主な subcommand:
 
 - `health`

@@ -9,7 +9,26 @@ from .runtime import AUTO_RELOAD_CHOICES, DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, 
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run or lint the KANARY engine")
+    parser = argparse.ArgumentParser(
+        description="Run or lint the KANARY engine",
+        epilog=(
+            "Run is the default command, so you can omit it:\n"
+            "  kanary ./plugins\n"
+            "  python -m kanary ./plugins\n"
+            "\n"
+            "Common run options:\n"
+            "  --api-host HOST        Bind the local API and Web viewer host\n"
+            "  --api-port PORT        Bind the local API and Web viewer port\n"
+            "  --state-db PATH        Persist history and actions in SQLite\n"
+            "  --auto-reload MODE     Apply discovered changes automatically (off, dirty, all)\n"
+            "  --exclude GLOB         Exclude matching plugin ids from the runtime\n"
+            "  For the full run option list, use:\n"
+            "  kanary run --help\n"
+            "Lint must be explicit:\n"
+            "  kanary lint ./plugins"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run the KANARY engine")
