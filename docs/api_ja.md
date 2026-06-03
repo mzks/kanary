@@ -21,7 +21,7 @@
 - `GET /export-alerts`
   remote alert import 用の安定した形式で alert を返します。
 - `GET /history/{rule_id}`
-  1 つの rule に対する alert event と operator action を返します。
+  1 つの rule に対する alert event、output dispatch summary、operator action を返します。
 - `GET /silences`
   active, scheduled, cancelled の silence を返します。
   raw API 自体には `EXPIRED` 状態は追加しません。Web viewer と `kanaryctl` では、すでに終了した silence を表示上 `EXPIRED` と導出することがあります。
@@ -46,6 +46,12 @@
   既存の silence を cancel します。
 - `POST /reload`
   watch 対象 directory の manual reload を実行します。
+- `POST /test-poll/{source_id}`
+  1 つの source を poll し、normalized source payload を返します。
+- `POST /test-evaluate/{rule_id}`
+  明示した payload に対して 1 つの rule を dry-run し、normalized evaluation result を返します。
+- `POST /test-fire/{rule_id}`
+  live alert state を変更せず、synthetic な state change を output pipeline に流します。
 
 ## API の考え方
 
@@ -69,6 +75,7 @@
 - `history`
   1 つの rule の保存済み history を表示します。
   `--since` と `--limit` は history payload を取得した後に client-side で適用します。
+  SQLite 永続化が有効な場合、output dispatch summary も含まれます。
 - `plugins`
   source, rule, output plugin の状態を表示します。
   `--filter` で text または glob matching が使えます。
@@ -88,6 +95,12 @@
   1 つの silence を cancel します。
 - `reload`
   manual reload を実行します。
+- `test-poll`
+  1 つの source を poll し、normalized payload を JSON で表示します。
+- `test-evaluate`
+  `--payload-json`, `--payload-file`, `--payload-stdin` のいずれかで与えた payload に対して 1 つの rule を dry-run します。
+- `test-fire`
+  synthetic な alert event を output pipeline に流し、dispatch summary を JSON で表示します。
 
 共通引数:
 
@@ -98,6 +111,9 @@
 
 ```bash
 kanaryctl alerts
+kanaryctl test-poll sqlite
+kanaryctl test-evaluate sqlite.value1.range --payload-json '{"channels":{"value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'

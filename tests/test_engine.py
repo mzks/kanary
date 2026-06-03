@@ -1,3 +1,4 @@
+import argparse
 from datetime import datetime, timedelta, timezone
 import importlib
 import json
@@ -1785,6 +1786,7 @@ class SQLiteStoreTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanary.db"
             now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+            RecordingOutput.events = []
 
             engine = kanary.Engine(
                 now_fn=lambda: now,
@@ -1797,7 +1799,7 @@ class SQLiteStoreTest(unittest.TestCase):
                     "postgres.temperature.rate": TemperatureRate,
                     "postgres.temperature_humidity.balance": TemperatureHumidityBalance,
                 },
-                output_registry={},
+                output_registry={"recording": RecordingOutput},
                 store=kanary.SQLiteStore(db_path),
             )
             engine.start()
@@ -1811,6 +1813,9 @@ class SQLiteStoreTest(unittest.TestCase):
             thread.start()
             try:
                 source = engine.sources["postgres"]
+                source.now = now
+                engine.evaluate_source(source.source_id, source.poll({}), now=now)
+                source.now = now - timedelta(minutes=20)
                 engine.evaluate_source(source.source_id, source.poll({}), now=now)
                 engine.acknowledge("postgres.temperature.stale", operator="alice", reason="checking")
                 engine.unacknowledge("postgres.temperature.stale", operator="alice", reason="re-open")
@@ -1818,12 +1823,34 @@ class SQLiteStoreTest(unittest.TestCase):
                 payload = fetch_json(f"http://127.0.0.1:{port}/history/postgres.temperature.stale")
                 self.assertTrue(payload["enabled"])
                 self.assertGreaterEqual(len(payload["alert_events"]), 2)
+                self.assertEqual(len(payload["output_dispatches"]), 1)
+                self.assertEqual(payload["output_dispatches"][0]["delivered_outputs"], ["recording"])
                 self.assertEqual(payload["operator_actions"][0]["action_type"], "unack")
                 self.assertEqual(payload["operator_actions"][0]["operator"], "alice")
             finally:
                 api.shutdown()
                 thread.join(timeout=2.0)
                 engine.shutdown()
+
+    def test_history_filters_include_output_dispatches(self) -> None:
+        payload = {
+            "enabled": True,
+            "alert_events": [],
+            "output_dispatches": [
+                {"occurred_at": "2026-03-17T00:20:00+00:00"},
+                {"occurred_at": "2026-03-16T00:20:00+00:00"},
+            ],
+            "operator_actions": [],
+        }
+
+        filtered = kanaryctl.apply_history_filters(
+            payload,
+            since="2026-03-17T00:00:00+00:00",
+            limit=1,
+        )
+
+        self.assertEqual(len(filtered["output_dispatches"]), 1)
+        self.assertEqual(filtered["output_dispatches"][0]["occurred_at"], "2026-03-17T00:20:00+00:00")
 
 
 class RecordingOutput(kanary.Output):
@@ -1908,12 +1935,21 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(len(RecordingOutput.events), 0)
 
         source.now = self.now - timedelta(seconds=10)
-        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        with self.assertLogs("kanary.engine", level="INFO") as captured:
+            self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
 
         self.assertGreaterEqual(len(RecordingOutput.events), 1)
         self.assertEqual(RecordingOutput.events[0].rule_id, "postgres.temperature.stale")
+        self.assertTrue(
+            any(
+                "alert dispatch summary:" in line
+                and "rule=postgres.temperature.stale" in line
+                and "delivered=recording" in line
+                for line in captured.output
+            )
+        )
 
-    def test_reload_suppresses_first_notification_after_reload(self) -> None:
+    def test_reload_keeps_first_notification_after_reload(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         self.assertEqual(len(RecordingOutput.events), 0)
@@ -1927,7 +1963,39 @@ class OutputTest(unittest.TestCase):
         source.now = self.now - timedelta(seconds=10)
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
 
+        self.assertEqual(len(RecordingOutput.events), 1)
+        self.assertEqual(RecordingOutput.events[0].rule_id, "postgres.temperature.stale")
+
+    def test_reload_does_not_drop_delayed_first_state_change(self) -> None:
+        source = self.engine.sources["postgres"]
+        source.now = self.now
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        self.assertEqual(self.engine.alerts["postgres.temperature.stale"].state, kanary.AlertState.OK)
+
+        self.engine.reload(
+            source_registry=kanary.get_source_registry(),
+            rule_registry=kanary.get_rule_registry(),
+            output_registry={"recording": RecordingOutput},
+        )
         self.assertEqual(len(RecordingOutput.events), 0)
+
+        self.now = self.now + timedelta(days=30)
+        source = self.engine.sources["postgres"]
+        source.now = self.now - timedelta(minutes=20)
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+        self.assertEqual(len(RecordingOutput.events), 1)
+        self.assertEqual(RecordingOutput.events[0].previous_state, kanary.AlertState.OK)
+        self.assertEqual(RecordingOutput.events[0].current_state, kanary.AlertState.FIRING)
+
+    def test_reload_logs_summary(self) -> None:
+        with self.assertLogs("kanary.engine", level="INFO") as captured:
+            self.engine.reload(
+                source_registry=kanary.get_source_registry(),
+                rule_registry=kanary.get_rule_registry(),
+                output_registry={"recording": RecordingOutput},
+            )
+        self.assertTrue(any("reload applied:" in line for line in captured.output))
 
     def test_output_plugin_does_not_emit_on_message_only_change(self) -> None:
         source = self.engine.sources["postgres"]
@@ -1952,6 +2020,48 @@ class OutputTest(unittest.TestCase):
             self.assertEqual(status.last_error, "webhook is not set")
             self.assertIn("RuntimeError: webhook is not set", status.last_error_detail or "")
             self.assertIsNotNone(status.last_updated_at)
+        finally:
+            engine.shutdown()
+
+    def test_output_skip_due_to_init_failure_is_logged(self) -> None:
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"broken-init": BrokenInitOutput},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            with self.assertLogs("kanary.engine", level="WARNING") as captured:
+                engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+                source.now = self.now - timedelta(seconds=10)
+                engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            self.assertTrue(
+                any("had matching outputs but none were initialized" in line for line in captured.output)
+            )
+        finally:
+            engine.shutdown()
+
+    def test_output_dispatch_summary_logs_uninitialized_outputs(self) -> None:
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"broken-init": BrokenInitOutput},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            source.now = self.now - timedelta(seconds=10)
+            with self.assertLogs("kanary.engine", level="INFO") as captured:
+                engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            self.assertTrue(
+                any(
+                    "alert dispatch summary:" in line
+                    and "rule=postgres.temperature.stale" in line
+                    and "matched=broken-init" in line
+                    and "uninitialized=broken-init" in line
+                    for line in captured.output
+                )
+            )
         finally:
             engine.shutdown()
 
@@ -2065,10 +2175,12 @@ class ControlAPITest(unittest.TestCase):
         self.api = kanary.ControlAPI(
             engine_getter=lambda: self.engine,
             reload_callback=lambda: True,
-            port=18080,
+            host="127.0.0.1",
+            port=0,
         )
         self.thread = threading.Thread(target=self.api.start, daemon=True)
         self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.api._server.server_address[1]}"
 
     def tearDown(self) -> None:
         self.api.shutdown()
@@ -2076,24 +2188,24 @@ class ControlAPITest(unittest.TestCase):
         self.engine.shutdown()
 
     def test_health_endpoint_returns_ok(self) -> None:
-        with urlopen("http://127.0.0.1:18080/health") as response:
+        with urlopen(f"{self.base_url}/health") as response:
             body = json.loads(response.read().decode())
         self.assertEqual(body["status"], "ok")
         self.assertIn("postgres", body["sources"])
 
     def test_alerts_endpoint_returns_alerts(self) -> None:
-        with urlopen("http://127.0.0.1:18080/alerts") as response:
+        with urlopen(f"{self.base_url}/alerts") as response:
             body = json.loads(response.read().decode())
         self.assertEqual(len(body["alerts"]), 8)
 
     def test_reload_endpoint_returns_reloaded(self) -> None:
-        request = Request("http://127.0.0.1:18080/reload", method="POST")
+        request = Request(f"{self.base_url}/reload", method="POST")
         with urlopen(request) as response:
             body = json.loads(response.read().decode())
         self.assertEqual(body["status"], "reloaded")
 
     def test_plugins_endpoint_returns_output_status(self) -> None:
-        with urlopen("http://127.0.0.1:18080/plugins") as response:
+        with urlopen(f"{self.base_url}/plugins") as response:
             body = json.loads(response.read().decode())
         self.assertEqual(len(body["plugins"]), len(self.engine.plugin_states))
         self.assertIn("source", {plugin["type"] for plugin in body["plugins"]})
@@ -2103,12 +2215,85 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("postgres.temperature.stale", plugin_ids)
         self.assertTrue(all("last_updated_at" in plugin for plugin in body["plugins"]))
 
+    def test_test_poll_endpoint_returns_normalized_payload(self) -> None:
+        request = Request(f"{self.base_url}/test-poll/postgres", method="POST")
+        with urlopen(request) as response:
+            body = json.loads(response.read().decode())
+        self.assertEqual(body["status"], "ok")
+        self.assertIn("channels", body)
+        self.assertIn("temperature", body["channels"])
+
+    def test_test_evaluate_endpoint_returns_evaluation(self) -> None:
+        request = Request(
+            f"{self.base_url}/test-evaluate/postgres.temperature.range",
+            method="POST",
+            data=json.dumps(
+                {
+                    "payload": {
+                        "channels": {
+                            "temperature": {
+                                "value": 150,
+                                "timestamp": self.now.isoformat(),
+                            }
+                        },
+                        "status": "ok",
+                    },
+                    "now": self.now.isoformat(),
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request) as response:
+            body = json.loads(response.read().decode())
+        self.assertEqual(body["rule_id"], "postgres.temperature.range")
+        self.assertEqual(body["state"], "FIRING")
+        self.assertIn("would_emit_outputs", body)
+
+    def test_test_fire_endpoint_returns_dispatch_summary(self) -> None:
+        RecordingOutput.events = []
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"recording": RecordingOutput},
+        )
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            payload = fetch_json(
+                f"http://127.0.0.1:{api._server.server_address[1]}/test-fire/postgres.temperature.range",
+                method="POST",
+                body={"state": "FIRING", "reason": "delivery test"},
+            )
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+        self.assertTrue(payload["synthetic"])
+        self.assertEqual(payload["current_state"], "FIRING")
+        self.assertEqual(payload["delivered_outputs"], ["recording"])
+        self.assertTrue(RecordingOutput.events)
+
 
 class CLIHelpersTest(unittest.TestCase):
     def test_matches_row_filter_supports_substring_and_glob(self) -> None:
         self.assertTrue(kanaryctl.matches_row_filter(["postgres.temperature.stale"], "temperature"))
         self.assertTrue(kanaryctl.matches_row_filter(["expert_db"], "expert_*"))
         self.assertFalse(kanaryctl.matches_row_filter(["expert_db"], "viewer_*"))
+
+    def test_load_payload_argument_supports_inline_json(self) -> None:
+        args = argparse.Namespace(payload_json='{"status":"ok"}', payload_file=None, payload_stdin=False)
+        self.assertEqual(kanaryctl.load_payload_argument(args), {"status": "ok"})
+
+    def test_load_payload_argument_rejects_non_object_json(self) -> None:
+        args = argparse.Namespace(payload_json='["bad"]', payload_file=None, payload_stdin=False)
+        with self.assertRaises(ValueError):
+            kanaryctl.load_payload_argument(args)
 
 
 if __name__ == "__main__":

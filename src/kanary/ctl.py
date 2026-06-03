@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
@@ -94,6 +95,27 @@ def main() -> int:
     unsilence_parser.add_argument("--reason")
 
     subparsers.add_parser("reload", help="Trigger a manual reload")
+
+    test_poll_parser = subparsers.add_parser("test-poll", help="Poll one source and print the normalized payload")
+    test_poll_parser.add_argument("source_id")
+    test_poll_parser.add_argument("--json", action="store_true", help="Print raw JSON")
+
+    test_evaluate_parser = subparsers.add_parser("test-evaluate", help="Dry-run one rule against a payload")
+    test_evaluate_parser.add_argument("rule_id")
+    payload_group = test_evaluate_parser.add_mutually_exclusive_group(required=True)
+    payload_group.add_argument("--payload-file")
+    payload_group.add_argument("--payload-json")
+    payload_group.add_argument("--payload-stdin", action="store_true")
+    test_evaluate_parser.add_argument("--now")
+    test_evaluate_parser.add_argument("--json", action="store_true", help="Print raw JSON")
+
+    test_fire_parser = subparsers.add_parser("test-fire", help="Send a synthetic event through the output pipeline")
+    test_fire_parser.add_argument("rule_id")
+    test_fire_parser.add_argument("--state", required=True)
+    test_fire_parser.add_argument("--message")
+    test_fire_parser.add_argument("--reason")
+    test_fire_parser.add_argument("--now")
+    test_fire_parser.add_argument("--json", action="store_true", help="Print raw JSON")
 
     args = parser.parse_args()
 
@@ -243,7 +265,44 @@ def main() -> int:
             payload = fetch_json(f"{args.base_url}/reload", method="POST")
             print(payload.get("status", "unknown"))
             return 0
+
+        if args.command == "test-poll":
+            payload = fetch_json(
+                f"{args.base_url}/test-poll/{args.source_id}",
+                method="POST",
+            )
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "test-evaluate":
+            payload = fetch_json(
+                f"{args.base_url}/test-evaluate/{args.rule_id}",
+                method="POST",
+                body={
+                    "payload": load_payload_argument(args),
+                    "now": args.now,
+                },
+            )
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.command == "test-fire":
+            payload = fetch_json(
+                f"{args.base_url}/test-fire/{args.rule_id}",
+                method="POST",
+                body={
+                    "state": args.state,
+                    "message": args.message,
+                    "reason": args.reason,
+                    "now": args.now,
+                },
+            )
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
     except (HTTPError, URLError) as exc:
+        print(f"kanaryctl: {exc}")
+        return 1
+    except ValueError as exc:
         print(f"kanaryctl: {exc}")
         return 1
 
@@ -257,6 +316,26 @@ def fetch_json(url: str, method: str = "GET", body: dict | None = None) -> dict:
         request.add_header("Content-Type", "application/json")
     with urlopen(request) as response:
         return json.loads(response.read().decode())
+
+
+def load_payload_argument(args: argparse.Namespace) -> dict:
+    if getattr(args, "payload_json", None):
+        return _parse_json_object(args.payload_json, source="--payload-json")
+    if getattr(args, "payload_file", None):
+        return _parse_json_object(Path(args.payload_file).read_text(encoding="utf-8"), source=args.payload_file)
+    if getattr(args, "payload_stdin", False):
+        return _parse_json_object(sys.stdin.read(), source="stdin")
+    raise ValueError("one payload input is required")
+
+
+def _parse_json_object(raw: str, *, source: str) -> dict:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON from {source}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"payload from {source} must be a JSON object")
+    return parsed
 
 
 def matches_row_filter(values: list[object], pattern: str) -> bool:
@@ -472,8 +551,9 @@ def print_history(payload: dict) -> None:
         return
 
     events = payload.get("alert_events", [])
+    dispatches = payload.get("output_dispatches", [])
     actions = payload.get("operator_actions", [])
-    if not events and not actions:
+    if not events and not dispatches and not actions:
         print("no history")
         return
 
@@ -485,6 +565,19 @@ def print_history(payload: dict) -> None:
                 f"{event['previous_state'] or '-'} -> {event['current_state']}  "
                 f"{severity_label(event['severity'])}  "
                 f"{event.get('message') or ''}"
+            )
+
+    if dispatches:
+        print("output dispatches")
+        for dispatch in dispatches:
+            print(
+                f"  {dispatch['occurred_at']}  "
+                f"{dispatch['previous_state'] or '-'} -> {dispatch['current_state']}  "
+                f"matched={', '.join(dispatch.get('matched_outputs', [])) or '-'}  "
+                f"delivered={', '.join(dispatch.get('delivered_outputs', [])) or '-'}  "
+                f"failed={', '.join(dispatch.get('failed_outputs', [])) or '-'}  "
+                f"uninitialized={', '.join(dispatch.get('uninitialized_outputs', [])) or '-'}  "
+                f"filtered={', '.join(dispatch.get('filtered_outputs', [])) or '-'}"
             )
 
     if actions:
@@ -502,6 +595,7 @@ def apply_history_filters(payload: dict, *, since: str | None, limit: int | None
     since_dt = parse_iso_datetime(since)
 
     events = list(payload.get("alert_events", []))
+    dispatches = list(payload.get("output_dispatches", []))
     actions = list(payload.get("operator_actions", []))
 
     if since_dt is not None:
@@ -509,19 +603,26 @@ def apply_history_filters(payload: dict, *, since: str | None, limit: int | None
             event for event in events
             if history_entry_time(event.get("occurred_at")) >= since_dt
         ]
+        dispatches = [
+            dispatch for dispatch in dispatches
+            if history_entry_time(dispatch.get("occurred_at")) >= since_dt
+        ]
         actions = [
             action for action in actions
             if history_entry_time(action.get("created_at")) >= since_dt
         ]
 
     events = sorted(events, key=lambda event: history_entry_time(event.get("occurred_at")), reverse=True)
+    dispatches = sorted(dispatches, key=lambda dispatch: history_entry_time(dispatch.get("occurred_at")), reverse=True)
     actions = sorted(actions, key=lambda action: history_entry_time(action.get("created_at")), reverse=True)
 
     if limit is not None and limit >= 0:
         events = events[:limit]
+        dispatches = dispatches[:limit]
         actions = actions[:limit]
 
     payload["alert_events"] = events
+    payload["output_dispatches"] = dispatches
     payload["operator_actions"] = actions
     return payload
 

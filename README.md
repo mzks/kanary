@@ -164,6 +164,14 @@ kanary --help
 kanaryctl help
 ```
 
+Quick diagnostic commands:
+
+```bash
+kanaryctl test-poll demo
+kanaryctl test-evaluate demo.temperature.high --payload-json '{"channels":{"temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
+```
+
 ## Environment Variables
 
 Kanary does not require any environment variables by default.
