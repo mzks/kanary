@@ -394,7 +394,10 @@
                   </div>
                 </div>
                 <div class="admin-actions">
-                  <button id="admin-reload-button" class="button">Reload Engine</button>
+                  <div class="inline-actions">
+                    <button id="admin-reload-dirty-button" class="button">Apply Dirty</button>
+                    <button id="admin-reload-all-button" class="button button-secondary">Reload All</button>
+                  </div>
                   <div class="note-block">
                     <strong>Operational note</strong>
                     <p>All write operations in this viewer also exist in <code>kanaryctl</code>. Use the CLI for automation, the viewer for fast triage and dashboard monitoring.</p>

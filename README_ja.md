@@ -166,6 +166,18 @@ kanaryctl test-evaluate demo.temperature.high --payload-json '{"channels":{"temp
 kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
 ```
 
+plugin 単位の reload:
+
+```bash
+kanaryctl reload --rule 'demo.*'
+kanaryctl reload --source 'demo*'
+kanaryctl reload --output 'mail*'
+kanaryctl reload --dirty
+kanaryctl reload --all
+```
+
+`dirty` は完全な依存解析ではなく、実用上のヒントです。Kanary は plugin 定義本体の変更と watched root 内の静的 import を見ますが、same-file helper の全変更や動的依存を完全には追いません。意図してコードを変えた場合は、該当する reload を明示的に実行してください。
+
 ## 環境変数
 
 Kanary 本体に必須の環境変数はありません。必要に応じて次を使えます。

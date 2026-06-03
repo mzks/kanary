@@ -27,10 +27,11 @@
   raw API 自体には `EXPIRED` 状態は追加しません。Web viewer と `kanaryctl` では、すでに終了した silence を表示上 `EXPIRED` と導出することがあります。
 - `GET /plugins`
   source, rule, output plugin の current status を返します。
+  plugin の state には `DISCOVERED`, `DIRTY`, `PENDING_REMOVE`, `READY`, `RELOADING`, `FAILED` が出ます。
 - `GET /viewer`
   組み込み Web viewer を返します。
 - `GET /plugins/{type}/{plugin_id}/source`
-  読み込まれている 1 つの plugin の read-only source code を返します。
+  読み込まれている、または DISCOVERED な 1 つの plugin の read-only source code を返します。
 
 ### Write endpoints
 
@@ -45,7 +46,14 @@
 - `POST /silences/{silence_id}/cancel`
   既存の silence を cancel します。
 - `POST /reload`
-  watch 対象 directory の manual reload を実行します。
+  発見済み plugin の変更を適用します。
+  JSON body には次のいずれか 1 つだけを入れます。
+  - `{"rule":"postgres.*"}`
+  - `{"source":"postgres*"}`
+  - `{"output":"discord*"}`
+  - `{"dirty":true}`
+  - `{"all":true}`
+  legacy compatibility のため、空 body も受け付けます。この場合は `{"all":true}` と同じ意味です。
 - `POST /test-poll/{source_id}`
   1 つの source を poll し、normalized source payload を返します。
 - `POST /test-evaluate/{rule_id}`
@@ -57,7 +65,8 @@
 
 - Web viewer と `kanaryctl` は同じ API を使います
 - history は SQLite 永続化が有効なときだけ残ります
-- `/plugins/{type}/{plugin_id}/source` は loaded plugin に紐づく source code だけを返します
+- `/plugins/{type}/{plugin_id}/source` は loaded plugin と DISCOVERED plugin の source code を返します
+- `dirty` は完全な依存解析ではなく、実用上の reload ヒントです。Kanary は plugin 定義本体の変更と watched root 内の静的 import を見ますが、same-file helper の全変更や動的依存を完全には追いません。
 - raw file path は受け取りません
 - `/export-alerts` は remote import 用の endpoint です
 
@@ -94,7 +103,9 @@
 - `unsilence`
   1 つの silence を cancel します。
 - `reload`
-  manual reload を実行します。
+  発見済み plugin の変更を適用します。
+  `--rule`, `--source`, `--output`, `--dirty`, `--all` のいずれか 1 つを指定します。
+  legacy compatibility のため、HTTP の `POST /reload` に空 body を送った場合は `--all` 相当で動きます。
 - `test-poll`
   1 つの source を poll し、normalized payload を JSON で表示します。
 - `test-evaluate`
@@ -117,5 +128,6 @@ kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
-kanaryctl reload
+kanaryctl reload --rule 'sqlite.*'
+kanaryctl reload --dirty
 ```

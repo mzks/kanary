@@ -108,6 +108,9 @@ class PluginStatus:
     plugin_type: str
     plugin_id: str
     state: str = "created"
+    loaded: bool = True
+    dirty_reason: str | None = None
+    definition_file: str | None = None
     init_ok: bool = False
     last_error: str | None = None
     last_error_detail: str | None = None

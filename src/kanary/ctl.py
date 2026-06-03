@@ -93,7 +93,13 @@ def main() -> int:
     unsilence_parser.add_argument("--operator", required=True)
     unsilence_parser.add_argument("--reason")
 
-    subparsers.add_parser("reload", help="Trigger a manual reload")
+    reload_parser = subparsers.add_parser("reload", help="Apply discovered plugin changes")
+    reload_group = reload_parser.add_mutually_exclusive_group(required=True)
+    reload_group.add_argument("--rule")
+    reload_group.add_argument("--source")
+    reload_group.add_argument("--output")
+    reload_group.add_argument("--dirty", action="store_true")
+    reload_group.add_argument("--all", action="store_true")
 
     test_poll_parser = subparsers.add_parser("test-poll", help="Poll one source and print the normalized payload")
     test_poll_parser.add_argument("source_id")
@@ -261,7 +267,17 @@ def main() -> int:
             return 0
 
         if args.command == "reload":
-            payload = fetch_json(f"{args.base_url}/reload", method="POST")
+            payload = fetch_json(
+                f"{args.base_url}/reload",
+                method="POST",
+                body={
+                    "rule": args.rule,
+                    "source": args.source,
+                    "output": args.output,
+                    "dirty": args.dirty,
+                    "all": args.all,
+                },
+            )
             print(payload.get("status", "unknown"))
             return 0
 

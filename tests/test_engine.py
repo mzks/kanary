@@ -2,6 +2,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import importlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import textwrap
@@ -1222,6 +1223,260 @@ class RuntimeExcludeTest(unittest.TestCase):
         self.assertEqual(snapshot.rules["example.rule"].matched_outputs, ["discord"])
 
 
+class RuntimeTargetedReloadTest(unittest.TestCase):
+    def _write_plugins(self, directory: Path, *, rule_threshold: int = 10, output_label: str = "v1") -> None:
+        path = directory / "plugins.py"
+        path.write_text(
+            textwrap.dedent(
+                f"""
+                import kanary
+
+                @kanary.source(source_id="example.source", interval=60.0)
+                class ExampleSource:
+                    version = "{output_label}"
+
+                    def poll(self, ctx):
+                        return kanary.SourceResult(
+                            measurements=[
+                                kanary.Measurement(
+                                    name="value",
+                                    value=15,
+                                    timestamp=ctx["now"],
+                                )
+                            ]
+                        )
+
+                @kanary.rule(
+                    rule_id="example.rule",
+                    source="example.source",
+                    severity=kanary.ERROR,
+                    tags=["example"],
+                    owner="expert",
+                )
+                class ExampleRule(kanary.RangeRule):
+                    measurement = "value"
+                    high = {rule_threshold}
+
+                @kanary.output(output_id="example.output")
+                class ExampleOutput:
+                    label = "{output_label}"
+
+                    def emit(self, event, ctx):
+                        return None
+                """
+            )
+        )
+        next_tick = getattr(self, "_write_tick", 1_700_000_000)
+        self._write_tick = next_tick + 2
+        os.utime(path, (self._write_tick, self._write_tick))
+
+    def _bootstrap_runtime(self, directory: Path) -> EngineRuntime:
+        runtime = EngineRuntime(
+            RuntimeConfig(
+                rule_directories=[directory],
+                api_port=0,
+            )
+        )
+        snapshot = runtime.loader.load(exclude_patterns=runtime.config.exclude_plugins)
+        runtime._signature = runtime.loader.snapshot_signature()
+        runtime._discovered_snapshot = snapshot
+        runtime._discovered_metadata = runtime._collect_plugin_metadata(snapshot)
+        runtime._loaded_metadata = dict(runtime._discovered_metadata)
+        runtime.engine = kanary.Engine(
+            source_registry=snapshot.sources,
+            rule_registry=snapshot.rules,
+            output_registry=snapshot.outputs,
+        )
+        runtime.engine.start()
+        now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
+        for source_id, source in runtime.engine.sources.items():
+            runtime.engine.evaluate_source(source_id, source.poll({"now": now}), now=now)
+        runtime._publish_runtime_plugin_overlay()
+        return runtime
+
+    def test_reload_dirty_loads_discovered_rule(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plugins(root)
+            runtime = self._bootstrap_runtime(root)
+            try:
+                (root / "new_rule.py").write_text(
+                    textwrap.dedent(
+                        """
+                        import kanary
+
+                        @kanary.rule(
+                            rule_id="example.extra",
+                            source="example.source",
+                            severity=kanary.ERROR,
+                            tags=["example"],
+                            owner="expert",
+                        )
+                        class ExtraRule(kanary.RangeRule):
+                            measurement = "value"
+                            high = 20
+                        """
+                    )
+                )
+
+                runtime.reload_now_if_changed()
+
+                discovered = runtime.engine._plugin_status("rule", "example.extra")
+                self.assertEqual(discovered.state, "DISCOVERED")
+                self.assertFalse(discovered.loaded)
+                self.assertNotIn("example.extra", runtime.engine.rules)
+
+                summary = runtime.reload_now({"dirty": True})
+
+                loaded = runtime.engine._plugin_status("rule", "example.extra")
+                self.assertEqual(summary["rules"]["reloaded"], ["example.extra"])
+                self.assertIn("example.extra", runtime.engine.rules)
+                self.assertTrue(loaded.loaded)
+                self.assertIsNone(loaded.dirty_reason)
+                source = runtime.engine.sources["example.source"]
+                now = datetime(2026, 6, 4, 12, 1, tzinfo=timezone.utc)
+                runtime.engine.evaluate_source("example.source", source.poll({"now": now}), now=now)
+                self.assertEqual(runtime.engine._plugin_status("rule", "example.extra").state, "READY")
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+    def test_reload_rule_replaces_only_matching_rule(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plugins(root, rule_threshold=10)
+            runtime = self._bootstrap_runtime(root)
+            try:
+                old_rule = runtime.engine.rules["example.rule"]
+                old_source = runtime.engine.sources["example.source"]
+                old_output = runtime.engine.outputs["example.output"]
+
+                self._write_plugins(root, rule_threshold=30)
+                runtime.reload_now_if_changed()
+
+                dirty = runtime.engine._plugin_status("rule", "example.rule")
+                self.assertEqual(dirty.state, "DIRTY")
+                self.assertEqual(dirty.dirty_reason, "definition_changed")
+
+                summary = runtime.reload_now({"rule": "example.*"})
+
+                new_rule = runtime.engine.rules["example.rule"]
+                self.assertEqual(summary["rules"]["reloaded"], ["example.rule"])
+                self.assertIsNot(new_rule, old_rule)
+                self.assertIs(runtime.engine.sources["example.source"], old_source)
+                self.assertIs(runtime.engine.outputs["example.output"], old_output)
+                self.assertEqual(new_rule.high, 30)
+                self.assertEqual(runtime.engine._plugin_status("rule", "example.rule").state, "READY")
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+    def test_reload_source_preserves_source_state(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plugins(root, output_label="v1")
+            runtime = self._bootstrap_runtime(root)
+            try:
+                now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
+                source = runtime.engine.sources["example.source"]
+                runtime.engine.evaluate_source("example.source", source.poll({"now": now}), now=now)
+                before = runtime.engine.source_states["example.source"]
+                old_source = source
+
+                self._write_plugins(root, output_label="v2")
+                plugin_text = (root / "plugins.py").read_text()
+                (root / "plugins.py").write_text(plugin_text.replace('version = "v2"', 'version = "reloaded"'))
+                runtime.reload_now_if_changed()
+
+                summary = runtime.reload_now({"source": "example.*"})
+
+                after = runtime.engine.source_states["example.source"]
+                new_source = runtime.engine.sources["example.source"]
+                self.assertEqual(summary["sources"]["reloaded"], ["example.source"])
+                self.assertIsNot(new_source, old_source)
+                self.assertEqual(getattr(new_source, "version"), "reloaded")
+                self.assertEqual(after.current.payload, before.current.payload)
+                self.assertEqual(after.previous.payload, before.previous.payload)
+                self.assertEqual(after.poll_count, before.poll_count)
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+    def test_reload_output_replaces_only_matching_output(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plugins(root, output_label="v1")
+            runtime = self._bootstrap_runtime(root)
+            try:
+                old_output = runtime.engine.outputs["example.output"]
+                old_rule = runtime.engine.rules["example.rule"]
+                old_source = runtime.engine.sources["example.source"]
+
+                self._write_plugins(root, output_label="v2")
+                runtime.reload_now_if_changed()
+
+                dirty = runtime.engine._plugin_status("output", "example.output")
+                self.assertEqual(dirty.state, "DIRTY")
+
+                summary = runtime.reload_now({"output": "example.*"})
+
+                new_output = runtime.engine.outputs["example.output"]
+                self.assertEqual(summary["outputs"]["reloaded"], ["example.output"])
+                self.assertIsNot(new_output, old_output)
+                self.assertEqual(getattr(new_output, "label"), "v2")
+                self.assertIs(runtime.engine.rules["example.rule"], old_rule)
+                self.assertIs(runtime.engine.sources["example.source"], old_source)
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+    def test_reload_dirty_unloads_pending_removed_rule(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plugins(root)
+            runtime = self._bootstrap_runtime(root)
+            try:
+                (root / "plugins.py").write_text(
+                    textwrap.dedent(
+                        """
+                        import kanary
+
+                        @kanary.source(source_id="example.source", interval=60.0)
+                        class ExampleSource:
+                            def poll(self, ctx):
+                                return kanary.SourceResult(
+                                    measurements=[
+                                        kanary.Measurement(
+                                            name="value",
+                                            value=15,
+                                            timestamp=ctx["now"],
+                                        )
+                                    ]
+                                )
+
+                        @kanary.output(output_id="example.output")
+                        class ExampleOutput:
+                            def emit(self, event, ctx):
+                                return None
+                        """
+                    )
+                )
+                runtime.reload_now_if_changed()
+
+                pending = runtime.engine._plugin_status("rule", "example.rule")
+                self.assertEqual(pending.state, "PENDING_REMOVE")
+                self.assertTrue(pending.loaded)
+
+                summary = runtime.reload_now({"dirty": True})
+
+                self.assertEqual(summary["rules"]["removed"], ["example.rule"])
+                self.assertNotIn("example.rule", runtime.engine.rules)
+                self.assertNotIn(runtime.engine._plugin_key("rule", "example.rule"), runtime.engine.plugin_states)
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+
 class ControlAPITest(unittest.TestCase):
     def test_alerts_and_plugins_include_definition_file(self) -> None:
         engine = kanary.Engine(output_registry={})
@@ -2149,7 +2404,7 @@ class OutputTest(unittest.TestCase):
         engine.start()
         try:
             status = engine.plugin_states["output:broken-init"]
-            self.assertEqual(status.state, "failed")
+            self.assertEqual(status.state, "FAILED")
             self.assertFalse(status.init_ok)
             self.assertEqual(status.last_error, "webhook is not set")
             self.assertIn("RuntimeError: webhook is not set", status.last_error_detail or "")
@@ -2211,7 +2466,7 @@ class OutputTest(unittest.TestCase):
             source.now = self.now - timedelta(seconds=10)
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
             status = engine.plugin_states["output:broken-emit"]
-            self.assertEqual(status.state, "failed")
+            self.assertEqual(status.state, "FAILED")
             self.assertTrue(status.init_ok)
             self.assertEqual(status.last_error, "send failed")
             self.assertIn("RuntimeError: send failed", status.last_error_detail or "")
@@ -2431,6 +2686,54 @@ class ControlAPITest(unittest.TestCase):
             body = json.loads(response.read().decode())
         self.assertEqual(body["status"], "reloaded")
 
+    def test_reload_endpoint_empty_body_keeps_legacy_all_behavior(self) -> None:
+        captured: dict[str, object] = {}
+        api = kanary.ControlAPI(
+            engine_getter=lambda: self.engine,
+            reload_callback=lambda payload: captured.update(payload) or {"status": "reloaded"},
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            request = Request(
+                f"http://127.0.0.1:{api._server.server_address[1]}/reload",
+                method="POST",
+            )
+            with urlopen(request) as response:
+                body = json.loads(response.read().decode())
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+        self.assertEqual(body["status"], "reloaded")
+        self.assertEqual(captured, {})
+
+    def test_reload_endpoint_forwards_target_payload(self) -> None:
+        captured: dict[str, object] = {}
+        api = kanary.ControlAPI(
+            engine_getter=lambda: self.engine,
+            reload_callback=lambda payload: captured.update(payload) or {"status": "reloaded"},
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            request = Request(
+                f"http://127.0.0.1:{api._server.server_address[1]}/reload",
+                method="POST",
+                data=json.dumps({"rule": "postgres.*"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request) as response:
+                body = json.loads(response.read().decode())
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+        self.assertEqual(body["status"], "reloaded")
+        self.assertEqual(captured, {"rule": "postgres.*"})
+
     def test_plugins_endpoint_returns_output_status(self) -> None:
         with urlopen(f"{self.base_url}/plugins") as response:
             body = json.loads(response.read().decode())
@@ -2441,6 +2744,7 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("postgres", plugin_ids)
         self.assertIn("postgres.temperature.stale", plugin_ids)
         self.assertTrue(all("last_updated_at" in plugin for plugin in body["plugins"]))
+        self.assertTrue(all("loaded" in plugin for plugin in body["plugins"]))
 
     def test_test_poll_endpoint_returns_normalized_payload(self) -> None:
         request = Request(f"{self.base_url}/test-poll/postgres", method="POST")

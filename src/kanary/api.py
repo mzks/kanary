@@ -230,7 +230,9 @@ class ControlAPI:
                                 "type": status.plugin_type,
                                 "plugin_id": status.plugin_id,
                                 "state": status.state,
+                                "loaded": status.loaded,
                                 "init_ok": status.init_ok,
+                                "dirty_reason": status.dirty_reason,
                                 "last_error": status.last_error,
                                 "last_error_detail": status.last_error_detail,
                                 "run_count": status.run_count,
@@ -238,7 +240,7 @@ class ControlAPI:
                                 "last_success_at": status.last_success_at,
                                 "last_failure_at": status.last_failure_at,
                                 "last_updated_at": status.last_updated_at,
-                                "definition_file": getattr(plugin.__class__, "__kanary_definition_file__", None) if plugin is not None else None,
+                                "definition_file": status.definition_file or (getattr(plugin.__class__, "__kanary_definition_file__", None) if plugin is not None and not isinstance(plugin, type) else getattr(plugin, "__kanary_definition_file__", None) if plugin is not None else None),
                             }
                         )
                     plugins.sort(key=lambda row: (row["type"], row["plugin_id"]))
@@ -251,9 +253,21 @@ class ControlAPI:
                 engine = engine_getter()
 
                 if self.path == "/reload":
-                    reloaded = reload_callback()
-                    status = HTTPStatus.OK if reloaded else HTTPStatus.INTERNAL_SERVER_ERROR
-                    payload = {"status": "reloaded" if reloaded else "reload_failed"}
+                    payload = self._read_json_body(allow_empty=True)
+                    try:
+                        try:
+                            result = reload_callback(payload)
+                        except TypeError:
+                            result = reload_callback()
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    if isinstance(result, bool):
+                        status = HTTPStatus.OK if result else HTTPStatus.INTERNAL_SERVER_ERROR
+                        payload = {"status": "reloaded" if result else "reload_failed"}
+                    else:
+                        payload = result
+                        status = HTTPStatus.OK if payload.get("status") == "reloaded" else HTTPStatus.INTERNAL_SERVER_ERROR
                     self._write_json(status, payload)
                     return
 
@@ -450,7 +464,7 @@ class ControlAPI:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _read_json_body(self) -> dict:
+            def _read_json_body(self, allow_empty: bool = False) -> dict:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0:
                     return {}
@@ -491,12 +505,16 @@ def _duration_to_timedelta_minutes(duration_minutes: float):
 
 def _resolve_plugin(engine: Engine, plugin_type: str, plugin_id: str) -> object | None:
     if plugin_type == "source":
-        return engine.sources.get(plugin_id)
-    if plugin_type == "rule":
-        return engine.rules.get(plugin_id)
-    if plugin_type == "output":
-        return engine.outputs.get(plugin_id)
-    return None
+        plugin = engine.sources.get(plugin_id)
+    elif plugin_type == "rule":
+        plugin = engine.rules.get(plugin_id)
+    elif plugin_type == "output":
+        plugin = engine.outputs.get(plugin_id)
+    else:
+        plugin = None
+    if plugin is not None:
+        return plugin
+    return getattr(engine, "runtime_discovered_plugin_classes", {}).get((plugin_type, plugin_id))
 
 
 def _installation_metadata() -> dict[str, object]:
@@ -629,7 +647,7 @@ def _plugin_source_payload(engine: Engine, plugin_type: str, plugin_id: str) -> 
     if plugin is None:
         raise KeyError(plugin_id)
 
-    plugin_class = plugin.__class__
+    plugin_class = plugin if isinstance(plugin, type) else plugin.__class__
     definition_file = getattr(plugin_class, "__kanary_definition_file__", None)
     if not definition_file:
         raise FileNotFoundError(plugin_id)

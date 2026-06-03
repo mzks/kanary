@@ -172,6 +172,18 @@ kanaryctl test-evaluate demo.temperature.high --payload-json '{"channels":{"temp
 kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
 ```
 
+Targeted plugin reload:
+
+```bash
+kanaryctl reload --rule 'demo.*'
+kanaryctl reload --source 'demo*'
+kanaryctl reload --output 'mail*'
+kanaryctl reload --dirty
+kanaryctl reload --all
+```
+
+`dirty` is a practical hint, not a complete dependency tracker. Kanary detects plugin definition changes and watched-root static imports, but it does not try to prove every same-file helper change or dynamic dependency. If you changed code intentionally, apply the relevant reload explicitly.
+
 ## Environment Variables
 
 Kanary does not require any environment variables by default.

@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 from .loader import RuleDirectoryLoader
-from .runtime import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
+from .runtime import AUTO_RELOAD_CHOICES, DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LOG_LEVEL,
         choices=LOG_LEVEL_CHOICES,
         help="Logging level for engine/runtime logs.",
+    )
+    run_parser.add_argument(
+        "--auto-reload",
+        default="off",
+        choices=AUTO_RELOAD_CHOICES,
+        help="Automatically apply discovered changes: off, dirty, or all. Defaults to off.",
     )
     run_parser.add_argument(
         "--api-host",
@@ -111,6 +117,7 @@ def main() -> int:
     runtime = EngineRuntime(
         RuntimeConfig(
             rule_directories=[Path(path) for path in args.plugin_directories],
+            auto_reload=args.auto_reload,
             exclude_plugins=args.exclude,
             log_level=args.log_level,
             api_host=args.api_host,
