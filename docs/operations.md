@@ -65,7 +65,8 @@ Kanary itself does not require any environment variables. Source-specific connec
 - `@kanary.source`, `@kanary.rule`, and `@kanary.output` are the registration points.
 - Each source is polled in its own thread according to `interval`.
 - Rules are evaluated against the latest result from their source.
-- Plugin directories are watched continuously and reloaded automatically.
+- Plugin directories are watched continuously and file changes are detected automatically.
+- With the default `--auto-reload off`, discovered changes are applied explicitly with `kanaryctl reload ...`.
 
 ## Web Viewer
 
@@ -102,6 +103,7 @@ kanaryctl history sqlite.value1.stale
 kanaryctl test-poll sqlite
 kanaryctl test-evaluate sqlite.value1.range --payload-file payload.json
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
+kanaryctl reload --dirty
 kanaryctl plugins
 kanaryctl silences
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
@@ -109,7 +111,7 @@ kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
 kanaryctl silence-until --operator operator_name --start-at 2026-03-19T10:00:00+09:00 --end-at 2026-03-19T12:00:00+09:00 --tag sqlite
 kanaryctl unsilence <silence_id> --operator operator_name
-kanaryctl reload
+kanaryctl reload --all
 ```
 
 ## Log history Persistence

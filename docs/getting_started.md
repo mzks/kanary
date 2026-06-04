@@ -85,7 +85,7 @@ Add a rule that fires when the load becomes high.
 ```python
 @kanary.rule(
     rule_id="local_load.busy",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
     owner="demo_owner",
@@ -95,7 +95,7 @@ class LocalLoadBusy:
     runbook = "Run `uptime` or `top` on the monitored host."
 
     def evaluate(self, payload, ctx):
-        load = ctx.value("load1_per_cpu")
+        load = ctx.value()
         threshold = 0.50
         if load is None:
             return kanary.Evaluation(
@@ -118,13 +118,13 @@ class LocalLoadBusy:
 
 The minimum rule interface is:
 
-- `@kanary.rule(rule_id="...", source="...")`
+- `@kanary.rule(rule_id="...", inputs="source_id:input_name")`
 - `severity`
 - `tags`
 - `evaluate(self, payload, ctx)`
 - return `kanary.Evaluation(...)`
 
-High-level accessors such as `ctx.value("load1_per_cpu")` are usually enough.
+High-level accessors such as `ctx.value()` for a single input or `ctx.inputs()` for multiple inputs are usually enough.
 
 ## 5. Use Rule Helper Classes
 
@@ -134,13 +134,12 @@ For example, here is a `ThresholdRule`:
 ```python
 @kanary.rule(
     rule_id="local_load.busy_threshold",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
     owner="demo_owner",
 )
 class LocalLoadBusyThreshold(kanary.ThresholdRule):
-    measurement = "load1_per_cpu"
     direction = "high"
     thresholds = [
         (0.50, kanary.WARN),
@@ -152,7 +151,7 @@ With helper classes, you usually do not write `evaluate()`. Instead, you configu
 
 For `ThresholdRule`, you typically edit:
 
-- `measurement`
+- `inputs`
 - `direction`
 - `thresholds`
 - `hysteresis` when you want to reduce chattering near a boundary
@@ -160,11 +159,11 @@ For `ThresholdRule`, you typically edit:
 Other common helper-class settings:
 
 - `StaleRule`
-  - `measurement`, `timeout`
+  - `inputs`, `timeout`
 - `RangeRule`
-  - `measurement`, `low`, `high`, `hysteresis`
+  - `inputs`, `low`, `high`, `hysteresis`
 - `RateRule`
-  - `measurement`, `per_seconds`, `high`, `low`
+  - `inputs`, `per_seconds`, `high`, `low`
 
 Use a custom rule only when a helper class no longer matches the monitoring logic cleanly.
 
@@ -212,7 +211,14 @@ This output only records alerts tagged with `getting-started`.
 
 ## 7. What Happens Next
 
-Once you save the file, Kanary reloads the plugin definitions automatically.
+Once you save the file, Kanary detects the file change and marks the plugin as dirty.
+With the default `--auto-reload off`, apply the change explicitly:
+
+```bash
+kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
+```
+
+If you start Kanary with `--auto-reload dirty` or `--auto-reload all`, the runtime applies changes automatically.
 In the viewer, you should see:
 
 - a `local_load` source on the Plugins page
@@ -221,7 +227,7 @@ In the viewer, you should see:
 
 Each alert event appends one line to `getting_started_alerts.jsonl`.
 
-Changes to plugin files reload automatically. Changes to `src/kanary` require a process restart.
+Changes to plugin files are detected automatically. Applying them is controlled by `--auto-reload` or by explicit `kanaryctl reload ...` commands. Changes to `src/kanary` still require a process restart.
 
 You can also inspect alerts with the CLI:
 
@@ -235,9 +241,12 @@ For quick diagnostics, the CLI also supports:
 
 ```bash
 kanaryctl --base-url http://127.0.0.1:8000 test-poll local_load
-kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"channels":{"load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"inputs":{"local_load:load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIRING --reason "mail output check"
+kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 ```
+
+`test-evaluate` accepts an `inputs` map keyed by fully-qualified input names. Normal rule code should continue to use `ctx.value()`, `ctx.inputs()`, and related accessors.
 
 ## 8. More Features
 

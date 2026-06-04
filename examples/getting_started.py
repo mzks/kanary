@@ -26,7 +26,7 @@ class LocalLoadSource:
 
 @kanary.rule(
     rule_id="local_load.busy",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
     owner="demo_owner",
@@ -36,7 +36,7 @@ class LocalLoadBusy:
     runbook = "Run `uptime` or `top` on the monitored host."
 
     def evaluate(self, payload, ctx):
-        load = ctx.value("load1_per_cpu")
+        load = ctx.value()
         threshold = 0.70
         if load is None:
             return kanary.Evaluation(
@@ -59,13 +59,12 @@ class LocalLoadBusy:
 
 @kanary.rule(
     rule_id="local_load.busy_threshold",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
     owner="demo_owner",
 )
 class LocalLoadBusyThreshold(kanary.ThresholdRule):
-    measurement = "load1_per_cpu"
     direction = "high"
     thresholds = [
         (0.70, kanary.WARN),

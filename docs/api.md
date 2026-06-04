@@ -58,6 +58,7 @@ Use `--api-host` and `--api-port` to change the bind address.
   Polls one source and returns the normalized source payload.
 - `POST /test-evaluate/{rule_id}`
   Dry-runs one rule against an explicit payload and returns the normalized evaluation result.
+  This payload uses an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`. Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
 - `POST /test-fire/{rule_id}`
   Sends a synthetic state change through the output pipeline without changing the live alert state.
 
@@ -126,7 +127,7 @@ Examples:
 ```bash
 kanaryctl alerts
 kanaryctl test-poll sqlite
-kanaryctl test-evaluate sqlite.value1.range --payload-json '{"channels":{"value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-evaluate sqlite.value1.range --payload-json '{"inputs":{"sqlite:value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"

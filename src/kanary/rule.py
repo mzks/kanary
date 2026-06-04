@@ -1,7 +1,8 @@
 from difflib import get_close_matches
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from typing import Any
 
 from .constants import AlertState, Severity, ERROR
@@ -10,60 +11,203 @@ from .units import format_rate, format_time, second
 
 
 @dataclass(slots=True)
+class InputView:
+    name: str
+    source_id: str
+    input_name: str
+    raw: dict[str, Any]
+
+    @property
+    def value(self) -> Any:
+        return self.raw.get("value")
+
+    @property
+    def timestamp(self) -> Any:
+        return self.raw.get("timestamp")
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        metadata = self.raw.get("metadata", {})
+        if isinstance(metadata, Mapping):
+            return dict(metadata)
+        return {}
+
+
+@dataclass(slots=True)
 class RuleContext:
     now: datetime
-    source_id: str
-    source_state: SourceState
+    source_id: str | None = None
+    source_state: SourceState | None = None
+    source_states: Mapping[str, SourceState] | None = None
+    declared_inputs: tuple[str, ...] = ()
+    resolved_sources: tuple[str, ...] = ()
     previous_alert: Alert | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_states is None:
+            if self.source_id is not None and self.source_state is not None:
+                self.source_states = {self.source_id: self.source_state}
+            else:
+                self.source_states = {}
+        if self.source_id is not None and self.source_state is None:
+            self.source_state = self.source_states.get(self.source_id)
+        if not self.resolved_sources:
+            if self.source_id is not None:
+                self.resolved_sources = (self.source_id,)
+            else:
+                self.resolved_sources = tuple(sorted(self.source_states.keys()))
+        if not self.declared_inputs and self.source_id is not None:
+            self.declared_inputs = (f"{self.source_id}:*",)
 
     @property
     def current(self) -> dict[str, Any]:
-        return self.source_state.current.payload
+        if self.source_state is not None:
+            return self.source_state.current.payload
+        if len(self.resolved_sources) == 1:
+            state = self.source_states.get(self.resolved_sources[0]) if self.source_states else None
+            if state is not None:
+                return state.current.payload
+        return {}
 
     @property
     def previous(self) -> dict[str, Any]:
-        return self.source_state.previous.payload
-
-    def get_current(self, path: str, default: Any = None) -> Any:
-        return get_by_path(self.current, path, default=default)
-
-    def get_previous(self, path: str, default: Any = None) -> Any:
-        return get_by_path(self.previous, path, default=default)
-
-    def measurement(self, name: str, *, previous: bool = False) -> dict[str, Any]:
-        snapshot = self.previous if previous else self.current
-        channels = snapshot.get("channels", {})
-        if isinstance(channels, Mapping) and name in channels:
-            measurement = channels[name]
-        else:
-            measurement = get_by_path(snapshot, f"channels.{name}", default={})
-        if isinstance(measurement, Mapping):
-            return dict(measurement)
+        if self.source_state is not None:
+            return self.source_state.previous.payload
+        if len(self.resolved_sources) == 1:
+            state = self.source_states.get(self.resolved_sources[0]) if self.source_states else None
+            if state is not None:
+                return state.previous.payload
         return {}
 
-    def value(self, name: str, default: Any = None, *, previous: bool = False) -> Any:
-        measurement = self.measurement(name, previous=previous)
-        return measurement.get("value", default)
+    def inputs(
+        self,
+        selector: str | Iterable[str] | None = None,
+        *,
+        previous: bool = False,
+    ) -> list[InputView]:
+        selectors = _normalize_runtime_selectors(selector, self.declared_inputs)
+        states = self.source_states or {}
+        matched: dict[str, InputView] = {}
+        for source_id in sorted(self.resolved_sources or tuple(states.keys())):
+            state = states.get(source_id)
+            if state is None:
+                continue
+            snapshot = state.previous.payload if previous else state.current.payload
+            channels = snapshot.get("channels", {})
+            if not isinstance(channels, Mapping):
+                continue
+            for input_name, raw in channels.items():
+                full_name = _qualify_input_name(source_id, str(input_name))
+                if not _matches_any_input_selector(full_name, selectors):
+                    continue
+                if isinstance(raw, Mapping):
+                    matched[full_name] = InputView(
+                        name=full_name,
+                        source_id=source_id,
+                        input_name=str(input_name),
+                        raw=dict(raw),
+                    )
+        return [matched[name] for name in sorted(matched)]
 
-    def timestamp(self, name: str, default: Any = None, *, previous: bool = False) -> Any:
-        measurement = self.measurement(name, previous=previous)
-        return measurement.get("timestamp", default)
+    def measurement(self, name: str | None = None, *, previous: bool = False) -> dict[str, Any]:
+        match = self._single_input_match(name, previous=previous)
+        if match is None:
+            return {}
+        return dict(match.raw)
 
-    def metadata(self, name: str, default: Any = None, *, previous: bool = False) -> Any:
-        measurement = self.measurement(name, previous=previous)
-        return measurement.get("metadata", default)
+    def names(
+        self,
+        selector: str | Iterable[str] | None = None,
+        *,
+        previous: bool = False,
+    ) -> list[str]:
+        return [item.name for item in self.inputs(selector, previous=previous)]
+
+    def values(
+        self,
+        selector: str | Iterable[str] | None = None,
+        *,
+        previous: bool = False,
+    ) -> list[Any]:
+        return [item.value for item in self.inputs(selector, previous=previous)]
+
+    def timestamps(
+        self,
+        selector: str | Iterable[str] | None = None,
+        *,
+        previous: bool = False,
+    ) -> list[Any]:
+        return [item.timestamp for item in self.inputs(selector, previous=previous)]
+
+    def metadatas(
+        self,
+        selector: str | Iterable[str] | None = None,
+        *,
+        previous: bool = False,
+    ) -> list[dict[str, Any]]:
+        return [item.metadata for item in self.inputs(selector, previous=previous)]
+
+    def value(self, name: str | None = None, default: Any = None, *, previous: bool = False) -> Any:
+        match = self._single_input_match(name, previous=previous)
+        if match is None:
+            return default
+        value = match.value
+        if value is None:
+            return default
+        return value
+
+    def timestamp(self, name: str | None = None, default: Any = None, *, previous: bool = False) -> Any:
+        match = self._single_input_match(name, previous=previous)
+        if match is None:
+            return default
+        value = match.timestamp
+        if value is None:
+            return default
+        return value
+
+    def metadata(self, name: str | None = None, default: Any = None, *, previous: bool = False) -> Any:
+        match = self._single_input_match(name, previous=previous)
+        if match is None:
+            return default
+        metadata = match.metadata
+        if metadata == {} and default is not None and "metadata" not in match.raw:
+            return default
+        return metadata
+
+    def prev_value(self, name: str | None = None, default: Any = None) -> Any:
+        return self.value(name, default, previous=True)
+
+    def prev_timestamp(self, name: str | None = None, default: Any = None) -> Any:
+        return self.timestamp(name, default, previous=True)
+
+    def prev_metadata(self, name: str | None = None, default: Any = None) -> Any:
+        return self.metadata(name, default, previous=True)
 
     def has_measurement(self, name: str, *, previous: bool = False) -> bool:
-        snapshot = self.previous if previous else self.current
-        channels = snapshot.get("channels", {})
-        return isinstance(channels, Mapping) and name in channels
+        return bool(self.inputs(name, previous=previous))
 
     def available_measurements(self, *, previous: bool = False) -> list[str]:
-        snapshot = self.previous if previous else self.current
-        channels = snapshot.get("channels", {})
-        if not isinstance(channels, Mapping):
-            return []
-        return [str(name) for name in channels.keys()]
+        names = self.names(previous=previous)
+        if len(self.resolved_sources) == 1:
+            prefix = f"{self.resolved_sources[0]}:"
+            stripped: list[str] = []
+            for name in names:
+                if name.startswith(prefix):
+                    stripped.append(name[len(prefix) :])
+                else:
+                    stripped.append(name)
+            return stripped
+        return names
+
+    def _single_input_match(self, selector: str | None, *, previous: bool = False) -> InputView | None:
+        matches = self.inputs(selector, previous=previous)
+        if not matches:
+            return None
+        if len(matches) > 1:
+            requested = selector or "<default>"
+            resolved = ", ".join(item.name for item in matches)
+            raise ValueError(f"input selector '{requested}' is ambiguous: {resolved}")
+        return matches[0]
 
     @property
     def previous_state(self) -> AlertState | None:
@@ -84,6 +228,8 @@ class RuleContext:
 class Rule:
     rule_id: str
     source: str
+    inputs: list[str] = []
+    resolved_sources: list[str] = []
     measurement: str | None = None
     severity: Severity = ERROR
     tags: list[str] = []
@@ -123,15 +269,82 @@ class Rule:
             return None
         return f"channels.{measurement}.timestamp"
 
+    @classmethod
+    def normalized_inputs(cls) -> list[str]:
+        return normalize_rule_inputs(
+            getattr(cls, "inputs", None),
+            source=getattr(cls, "source", None),
+        )
+
+    def primary_input_selector(self) -> str | None:
+        inputs = normalize_rule_inputs(
+            getattr(self, "inputs", None),
+            source=getattr(self, "source", None),
+        )
+        if len(inputs) == 1 and ":" in inputs[0] and "*" not in inputs[0]:
+            return inputs[0]
+        return None
+
 
 class StaleRule(Rule):
     timeout: float
     timestamp_field: str | None = None
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+        selector = self.measurement or self.primary_input_selector()
+        matches = ctx.inputs(selector) if self.timestamp_field is None else []
+        if self.timestamp_field is None and selector is None:
+            matches = ctx.inputs()
+        if self.timestamp_field is None and selector is None:
+            if not matches:
+                return Evaluation(
+                    state=AlertState.FIRING,
+                    payload=dict(payload),
+                    message=_missing_field_message(
+                        ctx,
+                        measurement=_selector_label(selector),
+                        field_label="timestamp",
+                        field_path=_selector_label(selector) or "timestamp",
+                        field_is_measurement_derived=selector is not None,
+                    ),
+                )
+            stale_inputs: list[dict[str, Any]] = []
+            missing_inputs: list[str] = []
+            for item in matches:
+                if item.timestamp is None:
+                    missing_inputs.append(item.name)
+                    continue
+                observed_at = _coerce_datetime(item.timestamp)
+                age_seconds = (ctx.now - observed_at).total_seconds()
+                if age_seconds > self.timeout:
+                    stale_inputs.append({"name": item.name, "age_seconds": age_seconds})
+            result_payload = dict(payload)
+            result_payload["stale_inputs"] = stale_inputs
+            result_payload["missing_inputs"] = missing_inputs
+            if stale_inputs or missing_inputs:
+                stale_parts = [f"{row['name']} ({format_time(row['age_seconds'])})" for row in stale_inputs]
+                if missing_inputs:
+                    stale_parts.extend(f"{name} (timestamp missing)" for name in missing_inputs)
+                return Evaluation(
+                    state=AlertState.FIRING,
+                    payload=result_payload,
+                    message=f"stale inputs: {', '.join(stale_parts)}",
+                )
+            result_payload["age_seconds"] = {
+                item.name: (ctx.now - _coerce_datetime(item.timestamp)).total_seconds()
+                for item in matches
+                if item.timestamp is not None
+            }
+            return Evaluation(
+                state=AlertState.OK,
+                payload=result_payload,
+                message=f"all inputs are fresh (<= {format_time(self.timeout)})",
+            )
+
         result_payload = dict(payload)
         timestamp_field = self._timestamp_field()
         timestamp_value = self._current_timestamp_value(payload, ctx)
+        selector_label = _selector_label(self.measurement or self.primary_input_selector())
 
         if timestamp_value is None:
             return Evaluation(
@@ -139,10 +352,10 @@ class StaleRule(Rule):
                 payload=result_payload,
                 message=_missing_field_message(
                     ctx,
-                    measurement=self.measurement,
+                    measurement=selector_label,
                     field_label="timestamp",
                     field_path=timestamp_field,
-                    field_is_measurement_derived=self.timestamp_field is None and self.measurement is not None,
+                    field_is_measurement_derived=self.timestamp_field is None and selector_label is not None,
                 ),
             )
 
@@ -165,8 +378,10 @@ class StaleRule(Rule):
 
     @classmethod
     def default_rule_id(cls) -> str | None:
-        source_id = getattr(cls, "source", None)
-        variable = getattr(cls, "measurement", None) or _field_variable_name(getattr(cls, "timestamp_field", None))
+        source_id, variable = _default_rule_source_and_variable(
+            cls,
+            fallback_variable=_field_variable_name(getattr(cls, "timestamp_field", None)),
+        )
         if not source_id or not variable:
             return None
         return f"{source_id}.{variable}.stale"
@@ -175,8 +390,9 @@ class StaleRule(Rule):
         return self.timestamp_field or self.measurement_timestamp_path() or "timestamp"
 
     def _current_timestamp_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
-        if self.timestamp_field is None and self.measurement is not None:
-            return ctx.timestamp(self.measurement)
+        if self.timestamp_field is None:
+            selector = self.measurement or self.primary_input_selector()
+            return ctx.timestamp(selector)
         return get_by_path(payload, self._timestamp_field())
 
 
@@ -189,9 +405,64 @@ class RangeRule(Rule):
     upper_inclusive: bool = True
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+        selector = self.measurement or self.primary_input_selector()
+        matches = ctx.inputs(selector) if self.field is None else []
+        if self.field is None and selector is None:
+            matches = ctx.inputs()
+        if self.field is None and selector is None:
+            if not matches:
+                return Evaluation(
+                    state=AlertState.OK,
+                    payload=dict(payload),
+                    message=_missing_field_message(
+                        ctx,
+                        measurement=_selector_label(selector),
+                        field_label="value",
+                        field_path=_selector_label(selector) or "value",
+                        field_is_measurement_derived=selector is not None,
+                    ),
+                )
+            matched_inputs: list[dict[str, Any]] = []
+            missing_inputs: list[str] = []
+            for item in matches:
+                if item.value is None:
+                    missing_inputs.append(item.name)
+                    continue
+                if self._is_out_of_range(item.value):
+                    matched_inputs.append({"name": item.name, "value": item.value})
+            result_payload = dict(payload)
+            result_payload["matched_inputs"] = matched_inputs
+            result_payload["missing_inputs"] = missing_inputs
+            if matched_inputs:
+                parts = [f"{row['name']}={row['value']}" for row in matched_inputs]
+                return Evaluation(
+                    state=AlertState.FIRING,
+                    payload=result_payload,
+                    message=f"{', '.join(parts)} out of range {self._format_range()}",
+                )
+            if missing_inputs:
+                return Evaluation(
+                    state=AlertState.OK,
+                    payload=result_payload,
+                    message=f"missing values: {', '.join(missing_inputs)}",
+                )
+            if len(matches) == 1:
+                return Evaluation(
+                    state=AlertState.OK,
+                    payload=result_payload,
+                    message=self._build_in_range_message(matches[0].value, matches[0].name),
+                )
+            return Evaluation(
+                state=AlertState.OK,
+                payload=result_payload,
+                message=f"all inputs within range {self._format_range()}",
+            )
+
         field = self._field()
+        field_label = self._field_label()
         value = self._current_field_value(payload, ctx)
         result_payload = dict(payload)
+        selector_label = _selector_label(self.measurement or self.primary_input_selector())
 
         if value is None:
             return Evaluation(
@@ -199,10 +470,10 @@ class RangeRule(Rule):
                 payload=result_payload,
                 message=_missing_field_message(
                     ctx,
-                    measurement=self.measurement,
+                    measurement=selector_label,
                     field_label="value",
-                    field_path=field,
-                    field_is_measurement_derived=self.field is None and self.measurement is not None,
+                    field_path=field_label,
+                    field_is_measurement_derived=self.field is None and selector_label is not None,
                 ),
             )
 
@@ -211,13 +482,13 @@ class RangeRule(Rule):
             return Evaluation(
                 state=AlertState.FIRING,
                 payload=result_payload,
-                message=self._build_out_of_range_message(value, field),
+                message=self._build_out_of_range_message(value, field_label),
             )
 
         return Evaluation(
             state=AlertState.OK,
             payload=result_payload,
-            message=self._build_in_range_message(value, field),
+            message=self._build_in_range_message(value, field_label),
         )
 
     def _should_fire(self, value: Any, previous_value: Any, ctx: RuleContext) -> bool:
@@ -294,8 +565,10 @@ class RangeRule(Rule):
 
     @classmethod
     def default_rule_id(cls) -> str | None:
-        source_id = getattr(cls, "source", None)
-        variable = getattr(cls, "measurement", None) or _field_variable_name(getattr(cls, "field", None))
+        source_id, variable = _default_rule_source_and_variable(
+            cls,
+            fallback_variable=_field_variable_name(getattr(cls, "field", None)),
+        )
         if not source_id or not variable:
             return None
         return f"{source_id}.{variable}.range"
@@ -303,16 +576,21 @@ class RangeRule(Rule):
     def _field(self) -> str:
         return self.field or self.measurement_value_path() or "value"
 
+    def _field_label(self) -> str:
+        return _selector_label(self.measurement or self.primary_input_selector()) or self._field()
+
     def _previous_field_value(self, ctx: RuleContext) -> Any:
-        if self.field is None and self.measurement is not None:
-            return ctx.value(self.measurement, previous=True)
+        if self.field is None:
+            selector = self.measurement or self.primary_input_selector()
+            return ctx.value(selector, previous=True)
         if ctx.previous_alert is None:
             return None
         return get_by_path(ctx.previous_alert.payload, self._field())
 
     def _current_field_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
-        if self.field is None and self.measurement is not None:
-            return ctx.value(self.measurement)
+        if self.field is None:
+            selector = self.measurement or self.primary_input_selector()
+            return ctx.value(selector)
         return get_by_path(payload, self._field())
 
 
@@ -323,9 +601,70 @@ class ThresholdRule(Rule):
     hysteresis: float = 0.0
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+        selector = self.measurement or self.primary_input_selector()
+        matches = ctx.inputs(selector) if self.field is None else []
+        if self.field is None and selector is None:
+            matches = ctx.inputs()
+        if self.field is None and selector is None:
+            if not matches:
+                return Evaluation(
+                    state=AlertState.OK,
+                    payload=dict(payload),
+                    message=_missing_field_message(
+                        ctx,
+                        measurement=_selector_label(selector),
+                        field_label="value",
+                        field_path=_selector_label(selector) or "value",
+                        field_is_measurement_derived=selector is not None,
+                    ),
+                )
+            matched_inputs: list[dict[str, Any]] = []
+            missing_inputs: list[str] = []
+            highest: Severity | None = None
+            for item in matches:
+                if item.value is None:
+                    missing_inputs.append(item.name)
+                    continue
+                if not isinstance(item.value, (int, float)):
+                    missing_inputs.append(item.name)
+                    continue
+                matched_severity = self._match_threshold(item.value)
+                if matched_severity is None:
+                    continue
+                matched_inputs.append(
+                    {"name": item.name, "value": item.value, "severity": matched_severity.name}
+                )
+                if highest is None or matched_severity > highest:
+                    highest = matched_severity
+            result_payload = dict(payload)
+            result_payload["matched_inputs"] = matched_inputs
+            result_payload["missing_inputs"] = missing_inputs
+            result_payload["matched_severity"] = highest.name if highest is not None else None
+            if highest is not None:
+                parts = [f"{row['name']}={row['value']}({row['severity']})" for row in matched_inputs]
+                return Evaluation(
+                    state=AlertState.FIRING,
+                    payload=result_payload,
+                    message=f"threshold exceeded: {', '.join(parts)}",
+                    severity=highest,
+                )
+            if missing_inputs:
+                return Evaluation(
+                    state=AlertState.OK,
+                    payload=result_payload,
+                    message=f"missing or non-numeric values: {', '.join(missing_inputs)}",
+                )
+            return Evaluation(
+                state=AlertState.OK,
+                payload=result_payload,
+                message=f"all inputs within thresholds {self._format_thresholds()}",
+            )
+
         field = self._field()
+        field_label = self._field_label()
         value = self._current_field_value(payload, ctx)
         result_payload = dict(payload)
+        selector_label = _selector_label(self.measurement or self.primary_input_selector())
 
         if value is None:
             return Evaluation(
@@ -333,17 +672,17 @@ class ThresholdRule(Rule):
                 payload=result_payload,
                 message=_missing_field_message(
                     ctx,
-                    measurement=self.measurement,
+                    measurement=selector_label,
                     field_label="value",
-                    field_path=field,
-                    field_is_measurement_derived=self.field is None and self.measurement is not None,
+                    field_path=field_label,
+                    field_is_measurement_derived=self.field is None and selector_label is not None,
                 ),
             )
         if not isinstance(value, (int, float)):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"{field} must be numeric",
+                message=f"{field_label} must be numeric",
             )
 
         matched_severity = self._match_threshold(value)
@@ -354,20 +693,22 @@ class ThresholdRule(Rule):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"{field}={value} within thresholds {self._format_thresholds()}",
+                message=f"{field_label}={value} within thresholds {self._format_thresholds()}",
             )
 
         return Evaluation(
             state=AlertState.FIRING,
             payload=result_payload,
-            message=f"{field}={value} reached {matched_severity.name} threshold {self._format_thresholds()}",
+            message=f"{field_label}={value} reached {matched_severity.name} threshold {self._format_thresholds()}",
             severity=matched_severity,
         )
 
     @classmethod
     def default_rule_id(cls) -> str | None:
-        source_id = getattr(cls, "source", None)
-        variable = getattr(cls, "measurement", None) or _field_variable_name(getattr(cls, "field", None))
+        source_id, variable = _default_rule_source_and_variable(
+            cls,
+            fallback_variable=_field_variable_name(getattr(cls, "field", None)),
+        )
         if not source_id or not variable:
             return None
         return f"{source_id}.{variable}.threshold"
@@ -375,9 +716,13 @@ class ThresholdRule(Rule):
     def _field(self) -> str:
         return self.field or self.measurement_value_path() or "value"
 
+    def _field_label(self) -> str:
+        return _selector_label(self.measurement or self.primary_input_selector()) or self._field()
+
     def _current_field_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
-        if self.field is None and self.measurement is not None:
-            return ctx.value(self.measurement)
+        if self.field is None:
+            selector = self.measurement or self.primary_input_selector()
+            return ctx.value(selector)
         return get_by_path(payload, self._field())
 
     def _match_threshold(self, value: float) -> Severity | None:
@@ -437,8 +782,77 @@ class RateRule(RangeRule):
     per_seconds: float = 1.0
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+        selector = self.measurement or self.primary_input_selector()
+        matches = ctx.inputs(selector) if self.field is None and self.timestamp_field is None and self.previous_field is None and self.previous_timestamp_field is None else []
+        if self.field is None and self.timestamp_field is None and self.previous_field is None and self.previous_timestamp_field is None and selector is None:
+            matches = ctx.inputs()
+        if self.field is None and self.timestamp_field is None and self.previous_field is None and self.previous_timestamp_field is None and selector is None:
+            if not matches:
+                return Evaluation(
+                    state=AlertState.OK,
+                    payload=dict(payload),
+                    message=_missing_field_message(
+                        ctx,
+                        measurement=_selector_label(selector),
+                        field_label="value",
+                        field_path=_selector_label(selector) or "value",
+                        field_is_measurement_derived=selector is not None,
+                    ),
+                )
+            matched_inputs: list[dict[str, Any]] = []
+            missing_inputs: list[str] = []
+            result_payload = dict(payload)
+            for item in matches:
+                previous_value = ctx.prev_value(item.name)
+                previous_timestamp = ctx.prev_timestamp(item.name)
+                if item.value is None or item.timestamp is None or previous_value is None or previous_timestamp is None:
+                    missing_inputs.append(item.name)
+                    continue
+                if not isinstance(item.value, (int, float)) or not isinstance(previous_value, (int, float)):
+                    missing_inputs.append(item.name)
+                    continue
+                current_observed_at = _coerce_datetime(item.timestamp)
+                previous_observed_at = _coerce_datetime(previous_timestamp)
+                delta_seconds = (current_observed_at - previous_observed_at).total_seconds()
+                if delta_seconds <= 0:
+                    missing_inputs.append(item.name)
+                    continue
+                rate = (item.value - previous_value) / delta_seconds * self.per_seconds
+                rate_per_second = (item.value - previous_value) / delta_seconds
+                if self._is_out_of_range(rate):
+                    matched_inputs.append(
+                        {
+                            "name": item.name,
+                            "rate": rate,
+                            "rate_per_second": rate_per_second,
+                            "delta_seconds": delta_seconds,
+                        }
+                    )
+            result_payload["matched_inputs"] = matched_inputs
+            result_payload["missing_inputs"] = missing_inputs
+            if matched_inputs:
+                parts = [f"{row['name']}={self._format_rate_message(row['rate'], row['rate_per_second'])}" for row in matched_inputs]
+                return Evaluation(
+                    state=AlertState.FIRING,
+                    payload=result_payload,
+                    message=f"rate out of range: {', '.join(parts)}",
+                )
+            if missing_inputs:
+                return Evaluation(
+                    state=AlertState.OK,
+                    payload=result_payload,
+                    message=f"previous samples missing: {', '.join(missing_inputs)}",
+                )
+            return Evaluation(
+                state=AlertState.OK,
+                payload=result_payload,
+                message=f"all input rates within range {self._format_range()}",
+            )
+
         field = self._field()
+        field_label = self._field_label()
         timestamp_field = self._timestamp_field()
+        timestamp_label = self._timestamp_label()
         previous_field = self._previous_field()
         previous_timestamp_field = self._previous_timestamp_field()
 
@@ -447,6 +861,7 @@ class RateRule(RangeRule):
         previous_value = self._previous_field_value(ctx)
         previous_timestamp = self._previous_timestamp_value(ctx)
         result_payload = dict(payload)
+        selector_label = _selector_label(self.measurement or self.primary_input_selector())
 
         if current_value is None or current_timestamp is None:
             missing_parts: list[str] = []
@@ -454,20 +869,20 @@ class RateRule(RangeRule):
                 missing_parts.append(
                     _missing_field_message(
                         ctx,
-                        measurement=self.measurement,
+                        measurement=selector_label,
                         field_label="value",
-                        field_path=field,
-                        field_is_measurement_derived=self.field is None and self.measurement is not None,
+                        field_path=field_label,
+                        field_is_measurement_derived=self.field is None and selector_label is not None,
                     )
                 )
             if current_timestamp is None:
                 missing_parts.append(
                     _missing_field_message(
                         ctx,
-                        measurement=self.measurement,
+                        measurement=selector_label,
                         field_label="timestamp",
-                        field_path=timestamp_field,
-                        field_is_measurement_derived=self.timestamp_field is None and self.measurement is not None,
+                        field_path=timestamp_label,
+                        field_is_measurement_derived=self.timestamp_field is None and selector_label is not None,
                     )
                 )
             return Evaluation(
@@ -479,13 +894,13 @@ class RateRule(RangeRule):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"previous {field} sample is missing",
+                message=f"previous {field_label} sample is missing",
             )
         if not isinstance(current_value, (int, float)) or not isinstance(previous_value, (int, float)):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"{field} samples must be numeric",
+                message=f"{field_label} samples must be numeric",
             )
 
         current_observed_at = _coerce_datetime(current_timestamp)
@@ -510,7 +925,7 @@ class RateRule(RangeRule):
                 state=AlertState.FIRING,
                 payload=result_payload,
                 message=(
-                    f"{field} rate={self._format_rate_message(rate, rate_per_second)} "
+                    f"{field_label} rate={self._format_rate_message(rate, rate_per_second)} "
                     f"out of range {self._format_range()}"
                 ),
             )
@@ -519,21 +934,29 @@ class RateRule(RangeRule):
             state=AlertState.OK,
             payload=result_payload,
             message=(
-                f"{field} rate={self._format_rate_message(rate, rate_per_second)} "
+                f"{field_label} rate={self._format_rate_message(rate, rate_per_second)} "
                 f"within range {self._format_range()}"
             ),
         )
 
     @classmethod
     def default_rule_id(cls) -> str | None:
-        source_id = getattr(cls, "source", None)
-        variable = getattr(cls, "measurement", None) or _field_variable_name(getattr(cls, "field", None))
+        source_id, variable = _default_rule_source_and_variable(
+            cls,
+            fallback_variable=_field_variable_name(getattr(cls, "field", None)),
+        )
         if not source_id or not variable:
             return None
         return f"{source_id}.{variable}.rate"
 
     def _timestamp_field(self) -> str:
         return self.timestamp_field or self.measurement_timestamp_path() or "timestamp"
+
+    def _timestamp_label(self) -> str:
+        selector = self.measurement or self.primary_input_selector()
+        if selector is not None and self.timestamp_field is None:
+            return f"{_selector_label(selector)} timestamp"
+        return self._timestamp_field()
 
     def _previous_field(self) -> str:
         return self.previous_field or self._field()
@@ -542,13 +965,15 @@ class RateRule(RangeRule):
         return self.previous_timestamp_field or self._timestamp_field()
 
     def _current_timestamp_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
-        if self.timestamp_field is None and self.measurement is not None:
-            return ctx.timestamp(self.measurement)
+        if self.timestamp_field is None:
+            selector = self.measurement or self.primary_input_selector()
+            return ctx.timestamp(selector)
         return get_by_path(payload, self._timestamp_field())
 
     def _previous_timestamp_value(self, ctx: RuleContext) -> Any:
-        if self.previous_timestamp_field is None and self.timestamp_field is None and self.measurement is not None:
-            return ctx.timestamp(self.measurement, previous=True)
+        if self.previous_timestamp_field is None and self.timestamp_field is None:
+            selector = self.measurement or self.primary_input_selector()
+            return ctx.timestamp(selector, previous=True)
         return get_by_path(ctx.previous, self._previous_timestamp_field())
 
     def _format_rate_message(self, rate: float, rate_per_second: float) -> str:
@@ -622,14 +1047,108 @@ def _field_variable_name(path: str | None) -> str | None:
     return parts[-1]
 
 
+def _default_rule_source_and_variable(
+    cls: type[Any],
+    *,
+    fallback_variable: str | None = None,
+) -> tuple[str | None, str | None]:
+    source_id = getattr(cls, "source", None)
+    variable = getattr(cls, "measurement", None) or fallback_variable
+    if source_id and variable:
+        return source_id, variable
+    inputs = normalize_rule_inputs(
+        getattr(cls, "inputs", None),
+        source=getattr(cls, "source", None),
+    )
+    if len(inputs) == 1 and ":" in inputs[0] and "*" not in inputs[0]:
+        source_id, variable = inputs[0].split(":", 1)
+        return source_id, variable
+    return source_id, variable
+
+
+def _selector_label(selector: str | None) -> str | None:
+    if selector is None:
+        return None
+    if ":" in selector and "*" not in selector:
+        return selector.split(":", 1)[1]
+    return selector
+
+
+def _split_input_selector(selector: str) -> tuple[str | None, str]:
+    if ":" not in selector:
+        return None, selector
+    source_pattern, input_pattern = selector.split(":", 1)
+    return source_pattern or None, input_pattern or "*"
+
+
+def _qualify_input_name(source_id: str, input_name: str) -> str:
+    return f"{source_id}:{input_name}"
+
+
+def _normalize_runtime_selectors(
+    selector: str | Iterable[str] | None,
+    declared_inputs: tuple[str, ...],
+) -> list[str]:
+    if selector is None:
+        return list(declared_inputs)
+    if isinstance(selector, str):
+        return [selector]
+    return [str(item) for item in selector]
+
+
+def _matches_input_selector(input_name: str, selector: str) -> bool:
+    source_id, measurement_name = input_name.split(":", 1)
+    source_pattern, measurement_pattern = _split_input_selector(selector)
+    if source_pattern is None:
+        return source_id == source_pattern if source_pattern is not None else fnmatch(measurement_name, measurement_pattern)
+    return fnmatch(source_id, source_pattern) and fnmatch(measurement_name, measurement_pattern)
+
+
+def _matches_any_input_selector(input_name: str, selectors: list[str]) -> bool:
+    for selector in selectors:
+        if _matches_input_selector(input_name, selector):
+            return True
+    return False
+
+
+def normalize_rule_inputs(inputs: Any, *, source: str | None = None) -> list[str]:
+    if inputs is None or inputs == []:
+        if isinstance(source, str) and source:
+            return [f"{source}:*"]
+        return []
+    if isinstance(inputs, str):
+        return [inputs]
+    if isinstance(inputs, list) and all(isinstance(item, str) for item in inputs):
+        return list(inputs)
+    raise ValueError("inputs must be a string or list[str]")
+
+
+def resolve_rule_sources(inputs: Iterable[str], available_source_ids: Iterable[str]) -> list[str]:
+    resolved: set[str] = set()
+    source_ids = list(available_source_ids)
+    for selector in inputs:
+        source_pattern, _ = _split_input_selector(selector)
+        for source_id in source_ids:
+            if source_pattern is None or fnmatch(source_id, source_pattern):
+                resolved.add(source_id)
+    return sorted(resolved)
+
+
 def prepare_rule_class(cls: type[Any]) -> type[Any]:
     rule_id = getattr(cls, "rule_id", None)
     if not isinstance(rule_id, str) or not rule_id:
         raise ValueError(f"rule '{cls.__name__}' must define non-empty string rule_id")
 
     source = getattr(cls, "source", None)
-    if not isinstance(source, str) or not source:
-        raise ValueError(f"rule '{rule_id}' must define non-empty string source")
+    if source is not None and (not isinstance(source, str) or not source):
+        raise ValueError(f"rule '{rule_id}' source must be non-empty string when set")
+
+    try:
+        inputs = normalize_rule_inputs(getattr(cls, "inputs", None), source=source)
+    except ValueError as exc:
+        raise ValueError(f"rule '{rule_id}' {exc}") from exc
+    if not inputs:
+        raise ValueError(f"rule '{rule_id}' must define source or inputs")
 
     severity = getattr(cls, "severity", None)
     if not isinstance(severity, Severity):
@@ -654,6 +1173,8 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
     _setdefault(cls, "depends_on", [])
     _setdefault(cls, "suppressed_by", [])
     _setdefault(cls, "matched_outputs", [])
+    cls.inputs = inputs
+    _setdefault(cls, "resolved_sources", [])
 
     for attr_name in ("depends_on", "suppressed_by"):
         value = getattr(cls, attr_name)

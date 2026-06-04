@@ -69,38 +69,35 @@ class BufferedTemperatureSource(kanary.BufferedSource):
 
 @kanary.rule(
     rule_id="postgres.temperature.stale",
-    source="postgres",
+    inputs="postgres:temperature",
     severity=kanary.ERROR,
     tags=["infra", "postgres"],
     owner="expert_db",
 )
 class SlowPostgresStale(kanary.StaleRule):
-    measurement = "temperature"
     timeout = 10 * kanary.minute
 
 
 @kanary.rule(
     rule_id="postgres.temperature.range",
-    source="postgres",
+    inputs="postgres:temperature",
     severity=kanary.WARN,
     tags=["infra", "postgres"],
     owner="expert_db",
 )
 class SlowPostgresHighValue(kanary.RangeRule):
-    measurement = "temperature"
     high = 100
     hysteresis = 5.0
 
 
 @kanary.rule(
     rule_id="postgres.humidity.range",
-    source="postgres",
+    inputs="postgres:humidity",
     severity=kanary.WARN,
     tags=["infra", "postgres"],
     owner="expert_db",
 )
 class SlowPostgresExclusiveRange(kanary.RangeRule):
-    measurement = "humidity"
     low = 45
     high = 50
     lower_inclusive = False
@@ -109,13 +106,12 @@ class SlowPostgresExclusiveRange(kanary.RangeRule):
 
 @kanary.rule(
     rule_id="postgres.humidity.suppressed_range",
-    source="postgres",
+    inputs="postgres:humidity",
     severity=kanary.WARN,
     tags=["infra", "postgres"],
     owner="expert_db",
 )
 class SuppressedByTemperatureRange(kanary.RangeRule):
-    measurement = "humidity"
     low = 40
     high = 50
     suppressed_by = ["postgres.temperature.range"]
@@ -123,13 +119,12 @@ class SuppressedByTemperatureRange(kanary.RangeRule):
 
 @kanary.rule(
     rule_id="postgres.temperature.rate",
-    source="postgres",
+    inputs="postgres:temperature",
     severity=kanary.WARN,
     tags=["infra", "postgres"],
     owner="expert_db",
 )
 class TemperatureRate(kanary.RateRule):
-    measurement = "temperature"
     low = -1.0
     high = 0.5
     per_seconds = 1 * kanary.minute
@@ -137,13 +132,12 @@ class TemperatureRate(kanary.RateRule):
 
 @kanary.rule(
     rule_id="postgres.temperature.threshold",
-    source="postgres",
+    inputs="postgres:temperature",
     severity=kanary.WARN,
     tags=["infra", "postgres", "threshold"],
     owner="expert_db",
 )
 class TemperatureThreshold(kanary.ThresholdRule):
-    measurement = "temperature"
     direction = "high"
     hysteresis = 1.0
     thresholds = [
@@ -287,7 +281,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(alert.state, kanary.AlertState.FIRING)
         self.assertEqual(
             alert.message,
-            "channels.temperature.value=123 out of range [-inf, 100]",
+            "temperature=123 out of range [-inf, 100]",
         )
 
     def test_range_rule_hysteresis_keeps_alert_active_until_clear_band(self) -> None:
@@ -307,7 +301,7 @@ class EngineTest(unittest.TestCase):
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         first_state = self.engine.source_states["postgres"]
         self.assertEqual(
-            kanary.get_by_path(first_state.current.payload, "channels.temperature.value"),
+            first_state.current.payload["channels"]["temperature"]["value"],
             123,
         )
         self.assertEqual(first_state.previous.payload, {})
@@ -316,11 +310,11 @@ class EngineTest(unittest.TestCase):
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         second_state = self.engine.source_states["postgres"]
         self.assertEqual(
-            kanary.get_by_path(second_state.previous.payload, "channels.temperature.value"),
+            second_state.previous.payload["channels"]["temperature"]["value"],
             123,
         )
         self.assertEqual(
-            kanary.get_by_path(second_state.current.payload, "channels.humidity.value"),
+            second_state.current.payload["channels"]["humidity"]["value"],
             45,
         )
 
@@ -369,6 +363,119 @@ class EngineTest(unittest.TestCase):
             {"source_name": "raw.channel"},
         )
 
+    def test_rule_context_inputs_are_sorted_and_deduplicated(self) -> None:
+        ctx = kanary.RuleContext(
+            now=self.now,
+            source_states={
+                "secondary": kanary.SourceState(
+                    source_id="secondary",
+                    current=kanary.SourceSnapshot(
+                        payload={
+                            "channels": {
+                                "temperature": {"value": 25, "timestamp": self.now, "metadata": {}}
+                            }
+                        },
+                        observed_at=self.now,
+                    ),
+                ),
+                "primary": kanary.SourceState(
+                    source_id="primary",
+                    current=kanary.SourceSnapshot(
+                        payload={
+                            "channels": {
+                                "temperature": {"value": 20, "timestamp": self.now, "metadata": {}}
+                            }
+                        },
+                        observed_at=self.now,
+                    ),
+                ),
+            },
+            declared_inputs=("primary:*", "*:temperature"),
+            resolved_sources=("secondary", "primary"),
+        )
+
+        self.assertEqual(
+            [item.name for item in ctx.inputs()],
+            ["primary:temperature", "secondary:temperature"],
+        )
+
+    def test_rule_context_single_input_sugar_supports_previous_values(self) -> None:
+        ctx = kanary.RuleContext(
+            now=self.now,
+            source_states={
+                "primary": kanary.SourceState(
+                    source_id="primary",
+                    current=kanary.SourceSnapshot(
+                        payload={
+                            "channels": {
+                                "temperature": {
+                                    "value": 20,
+                                    "timestamp": self.now,
+                                    "metadata": {"unit": "C"},
+                                }
+                            }
+                        },
+                        observed_at=self.now,
+                    ),
+                    previous=kanary.SourceSnapshot(
+                        payload={
+                            "channels": {
+                                "temperature": {
+                                    "value": 19,
+                                    "timestamp": self.now - timedelta(minutes=1),
+                                    "metadata": {"unit": "C"},
+                                }
+                            }
+                        },
+                        observed_at=self.now - timedelta(minutes=1),
+                    ),
+                ),
+            },
+            declared_inputs=("primary:temperature",),
+            resolved_sources=("primary",),
+        )
+
+        self.assertEqual(ctx.value(), 20)
+        self.assertEqual(ctx.prev_value(), 19)
+        self.assertEqual(ctx.names(), ["primary:temperature"])
+        self.assertEqual(ctx.values(), [20])
+        self.assertEqual(ctx.timestamps(), [self.now])
+        self.assertEqual(ctx.metadatas(), [{"unit": "C"}])
+
+    def test_rule_context_short_name_raises_when_ambiguous(self) -> None:
+        ctx = kanary.RuleContext(
+            now=self.now,
+            source_states={
+                "primary": kanary.SourceState(
+                    source_id="primary",
+                    current=kanary.SourceSnapshot(
+                        payload={
+                            "channels": {
+                                "temperature": {"value": 20, "timestamp": self.now, "metadata": {}}
+                            }
+                        },
+                        observed_at=self.now,
+                    ),
+                ),
+                "secondary": kanary.SourceState(
+                    source_id="secondary",
+                    current=kanary.SourceSnapshot(
+                        payload={
+                            "channels": {
+                                "temperature": {"value": 25, "timestamp": self.now, "metadata": {}}
+                            }
+                        },
+                        observed_at=self.now,
+                    ),
+                ),
+            },
+            declared_inputs=("primary:temperature", "secondary:temperature"),
+            resolved_sources=("primary", "secondary"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            ctx.value("temperature")
+
     def test_helper_rules_support_dotted_measurement_names(self) -> None:
         source_state = kanary.SourceState(
             source_id="postgres",
@@ -393,18 +500,16 @@ class EngineTest(unittest.TestCase):
 
         class DottedStale(kanary.StaleRule):
             rule_id = "test.dotted.stale"
-            source = "postgres"
+            inputs = "postgres:kernel_machine_room.oxygen_concentration"
             severity = kanary.ERROR
             tags = ["test"]
-            measurement = "kernel_machine_room.oxygen_concentration"
             timeout = 60.0
 
         class DottedRange(kanary.RangeRule):
             rule_id = "test.dotted.range"
-            source = "postgres"
+            inputs = "postgres:kernel_machine_room.oxygen_concentration"
             severity = kanary.WARN
             tags = ["test"]
-            measurement = "kernel_machine_room.oxygen_concentration"
             high = 21.0
 
         stale_alert = DottedStale().evaluate(source_state.current.payload, ctx)
@@ -430,10 +535,9 @@ class EngineTest(unittest.TestCase):
 
         class MissingMeasurementStale(kanary.StaleRule):
             rule_id = "test.missing_measurement.stale"
-            source = "postgres"
+            inputs = "postgres:det1.radon_conc.Bq_m3"
             severity = kanary.ERROR
             tags = ["test"]
-            measurement = "det1.radon_conc.Bq_m3"
             timeout = 60.0
 
         alert = MissingMeasurementStale().evaluate(source_state.current.payload, ctx)
@@ -458,16 +562,71 @@ class EngineTest(unittest.TestCase):
 
         class MissingValueThreshold(kanary.ThresholdRule):
             rule_id = "test.missing_value.threshold"
-            source = "postgres"
+            inputs = "postgres:temperature"
             severity = kanary.WARN
             tags = ["test"]
-            measurement = "temperature"
             direction = "high"
             thresholds = [(10.0, kanary.WARN)]
 
         alert = MissingValueThreshold().evaluate(source_state.current.payload, ctx)
         self.assertEqual(alert.state, kanary.AlertState.OK)
         self.assertEqual(alert.message, "measurement 'temperature' is present but value is missing")
+
+    def test_multi_input_helper_rule_fires_when_any_input_matches(self) -> None:
+        test_now = self.now
+
+        class PrimarySource(kanary.Source):
+            source_id = "primary"
+            interval = 5.0
+
+            def poll(self, ctx):
+                return kanary.SourceResult(
+                    measurements=[
+                        kanary.Measurement(name="temperature", value=20, timestamp=test_now),
+                    ]
+                )
+
+        class SecondarySource(kanary.Source):
+            source_id = "secondary"
+            interval = 5.0
+
+            def poll(self, ctx):
+                return kanary.SourceResult(
+                    measurements=[
+                        kanary.Measurement(name="temperature", value=80, timestamp=test_now),
+                    ]
+                )
+
+        class DualTemperatureRange(kanary.RangeRule):
+            rule_id = "pair.temperature.range"
+            inputs = ["primary:temperature", "secondary:temperature"]
+            severity = kanary.WARN
+            tags = ["pair"]
+            owner = "expert_pair"
+            high = 50
+
+        engine = kanary.Engine(
+            now_fn=lambda: test_now,
+            source_registry={
+                "primary": PrimarySource,
+                "secondary": SecondarySource,
+            },
+            rule_registry={"pair.temperature.range": DualTemperatureRange},
+            output_registry={},
+        )
+        engine.start()
+        try:
+            engine.evaluate_source("primary", engine.sources["primary"].poll({}), now=test_now)
+            engine.evaluate_source("secondary", engine.sources["secondary"].poll({}), now=test_now)
+            alert = engine.alerts["pair.temperature.range"]
+        finally:
+            engine.shutdown()
+
+        self.assertEqual(alert.state, kanary.AlertState.FIRING)
+        self.assertEqual(
+            alert.payload["matched_inputs"],
+            [{"name": "secondary:temperature", "value": 80}],
+        )
 
     def test_engine_can_exclude_rules_by_glob(self) -> None:
         engine = kanary.Engine(
@@ -492,7 +651,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(alert.state, kanary.AlertState.FIRING)
         self.assertEqual(
             alert.message,
-            "channels.humidity.value=45 out of range (45, 50)",
+            "humidity=45 out of range (45, 50)",
         )
 
     def test_rule_can_be_suppressed_by_other_rule(self) -> None:
@@ -633,7 +792,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(alert.payload["rate_delta_seconds"], 120.0)
         self.assertEqual(
             alert.message,
-            "channels.temperature.value rate=-61.5 / 1 min out of range [-1.0, 0.5]",
+            "temperature rate=-61.5 / 1 min out of range [-1.0, 0.5]",
         )
 
 
@@ -747,12 +906,11 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.rule(
                         rule_id="example.source.a.stale",
-                        source="example.source",
+                        inputs="example.source:a",
                         severity=kanary.ERROR,
                         tags=["example"],
                     )
                     class ExampleRule(kanary.StaleRule):
-                        measurement = "a"
                         timeout = 10
 
                     @kanary.output(output_id="example.output")
@@ -902,13 +1060,12 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.rule(
                         rule_id="example.rule",
-                        source="example.source",
+                        inputs="example.source:value",
                         severity=kanary.ERROR,
                         tags=["example"],
                         owner="expert",
                     )
                     class ExampleRule(kanary.StaleRule):
-                        measurement = "value"
                         timeout = 0.0
                     """
                 )
@@ -936,13 +1093,12 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.rule(
                         rule_id="example.rule",
-                        source="example.source",
+                        inputs="example.source:value",
                         severity=kanary.ERROR,
                         tags=["example"],
                         owner="expert",
                     )
                     class ExampleRule(kanary.StaleRule):
-                        measurement = "value"
                         timeout = "slow"
                     """
                 )
@@ -1250,13 +1406,12 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
 
                 @kanary.rule(
                     rule_id="example.rule",
-                    source="example.source",
+                    inputs="example.source:value",
                     severity=kanary.ERROR,
                     tags=["example"],
                     owner="expert",
                 )
                 class ExampleRule(kanary.RangeRule):
-                    measurement = "value"
                     high = {rule_threshold}
 
                 @kanary.output(output_id="example.output")
@@ -1309,13 +1464,12 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
 
                         @kanary.rule(
                             rule_id="example.extra",
-                            source="example.source",
+                            inputs="example.source:value",
                             severity=kanary.ERROR,
                             tags=["example"],
                             owner="expert",
                         )
                         class ExtraRule(kanary.RangeRule):
-                            measurement = "value"
                             high = 20
                         """
                     )
@@ -2882,6 +3036,12 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("postgres.temperature.stale", plugin_ids)
         self.assertTrue(all("last_updated_at" in plugin for plugin in body["plugins"]))
         self.assertTrue(all("loaded" in plugin for plugin in body["plugins"]))
+        stale_rule = next(
+            plugin for plugin in body["plugins"]
+            if plugin["type"] == "rule" and plugin["plugin_id"] == "postgres.temperature.stale"
+        )
+        self.assertEqual(stale_rule["inputs"], ["postgres:temperature"])
+        self.assertEqual(stale_rule["resolved_sources"], ["postgres"])
 
     def test_test_poll_endpoint_returns_normalized_payload(self) -> None:
         request = Request(f"{self.base_url}/test-poll/postgres", method="POST")
@@ -2892,6 +3052,61 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("temperature", body["channels"])
 
     def test_test_evaluate_endpoint_returns_evaluation(self) -> None:
+        request = Request(
+            f"{self.base_url}/test-evaluate/postgres.temperature.range",
+            method="POST",
+            data=json.dumps(
+                {
+                    "payload": {
+                        "inputs": {
+                            "postgres:temperature": {
+                                "value": 150,
+                                "timestamp": self.now.isoformat(),
+                            }
+                        },
+                        "status": "ok",
+                    },
+                    "now": self.now.isoformat(),
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request) as response:
+            body = json.loads(response.read().decode())
+        self.assertEqual(body["rule_id"], "postgres.temperature.range")
+        self.assertEqual(body["state"], "FIRING")
+        self.assertEqual(body["resolved_sources"], ["postgres"])
+        self.assertIn("would_emit_outputs", body)
+
+    def test_test_evaluate_endpoint_accepts_prev_input_fields(self) -> None:
+        request = Request(
+            f"{self.base_url}/test-evaluate/postgres.temperature.rate",
+            method="POST",
+            data=json.dumps(
+                {
+                    "payload": {
+                        "inputs": {
+                            "postgres:temperature": {
+                                "value": 150,
+                                "timestamp": self.now.isoformat(),
+                                "prev_value": 120,
+                                "prev_timestamp": (self.now - timedelta(minutes=1)).isoformat(),
+                            }
+                        },
+                        "status": "ok",
+                    },
+                    "now": self.now.isoformat(),
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request) as response:
+            body = json.loads(response.read().decode())
+        self.assertEqual(body["rule_id"], "postgres.temperature.rate")
+        self.assertEqual(body["state"], "FIRING")
+        self.assertIn("rate", body["payload"])
+
+    def test_test_evaluate_endpoint_rejects_legacy_channels_payload(self) -> None:
         request = Request(
             f"{self.base_url}/test-evaluate/postgres.temperature.range",
             method="POST",
@@ -2911,11 +3126,9 @@ class ControlAPITest(unittest.TestCase):
             ).encode(),
             headers={"Content-Type": "application/json"},
         )
-        with urlopen(request) as response:
-            body = json.loads(response.read().decode())
-        self.assertEqual(body["rule_id"], "postgres.temperature.range")
-        self.assertEqual(body["state"], "FIRING")
-        self.assertIn("would_emit_outputs", body)
+        with self.assertRaises(HTTPError) as ctx:
+            urlopen(request)
+        self.assertEqual(ctx.exception.code, 400)
 
     def test_test_fire_endpoint_returns_dispatch_summary(self) -> None:
         RecordingOutput.events = []

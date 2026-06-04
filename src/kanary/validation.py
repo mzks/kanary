@@ -4,7 +4,7 @@ from typing import Any
 from .constants import AlertState, Severity
 from .output import Output, prepare_output_class
 from .patterns import matches_any_tag, matches_excluded_tag
-from .rule import Rule, prepare_rule_class
+from .rule import Rule, normalize_rule_inputs, prepare_rule_class, resolve_rule_sources
 from .source import Source, prepare_source_class
 
 
@@ -76,9 +76,14 @@ def validate_registries(
 
     for rule_id, rule_cls in rules.items():
         report.extend(validate_rule_class(rule_id, rule_cls))
-        source_id = getattr(rule_cls, "source", None)
-        if source_id not in sources:
-            report.errors.append(f"rule '{rule_id}' references unknown source '{source_id}'")
+        inputs = normalize_rule_inputs(
+            getattr(rule_cls, "inputs", None),
+            source=getattr(rule_cls, "source", None),
+        )
+        rule_cls.inputs = inputs
+        rule_cls.resolved_sources = resolve_rule_sources(inputs, sources.keys())
+        if not rule_cls.resolved_sources:
+            report.warnings.append(f"rule '{rule_id}' currently resolves zero sources")
 
         severity = getattr(rule_cls, "severity", None)
         if severity is not None and not isinstance(severity, Severity):

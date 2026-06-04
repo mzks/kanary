@@ -18,7 +18,7 @@ from .registry import (
     rule,
     source,
 )
-from .rule import RangeRule, RateRule, Rule, RuleContext, StaleRule, ThresholdRule, get_by_path
+from .rule import InputView, RangeRule, RateRule, Rule, RuleContext, StaleRule, ThresholdRule
 from .runtime import EngineRuntime, RuntimeConfig
 from .source import BufferedSource, Source
 from .store import NullStore, SQLiteStore, build_store
@@ -53,6 +53,7 @@ __all__ = [
     "build_store",
     "Hz",
     "hour",
+    "InputView",
     "kHz",
     "microsecond",
     "millisecond",
@@ -95,5 +96,4 @@ __all__ = [
     "source",
     "import_remote_alarms",
     "severity_label",
-    "get_by_path",
 ]

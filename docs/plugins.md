@@ -77,10 +77,12 @@ kanary.SourceResult(
 Required:
 
 - `rule_id`
-- `source`
+- `inputs`
 - `severity`
 - `tags`
 - `evaluate(payload, ctx) -> kanary.Evaluation`
+
+`source="postgres"` remains available as a shorthand for `inputs="postgres:*"` when you want to depend on everything exposed by one source.
 
 `severity` is required. It acts as the default or fallback severity.
 If you return `kanary.Evaluation(severity=...)`, that specific evaluation overrides the class-level severity.
@@ -95,19 +97,17 @@ These appear in the alert API and in the viewer detail panel.
 
 ### RuleContext
 
-High-level accessors:
+Use input-based accessors:
 
-- `ctx.measurement(name)`
-- `ctx.value(name)`
-- `ctx.timestamp(name)`
-- `ctx.metadata(name)`
+- `ctx.inputs(selector=None, previous=False)`
+- `ctx.value(selector=None, previous=False)`
+- `ctx.timestamp(selector=None, previous=False)`
+- `ctx.metadata(selector=None, previous=False)`
+- `ctx.prev_value(selector=None)`
+- `ctx.prev_timestamp(selector=None)`
+- `ctx.prev_metadata(selector=None)`
 
-If you need to access the previous polled value, add `previous=True` in the argument.
-
-Low-level accessors:
-
-- `ctx.get_current(path)`
-- `ctx.get_previous(path)`
+For a single resolved input, you can omit the selector and call `ctx.value()` directly. Multi-input rules should usually iterate over `ctx.inputs()`.
 
 ## 3. Output
 
@@ -242,12 +242,11 @@ Example:
 ```python
 @kanary.rule(
     rule_id="sqlite.value1.threshold",
-    source="sqlite",
+    inputs="sqlite:value1",
     severity=kanary.WARN,
     tags=["sqlite", "value1"],
 )
 class Value1Threshold(kanary.ThresholdRule):
-    measurement = "value1"
     direction = "high"
     hysteresis = 1.0
     thresholds = [

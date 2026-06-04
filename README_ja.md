@@ -73,7 +73,7 @@ class DemoSource:
 
 @kanary.rule(
     rule_id="demo.temperature.high",
-    source="demo",
+    inputs="demo:temperature",
     severity=kanary.WARN,
     tags=["demo"],
     owner="demo_owner",
@@ -82,7 +82,7 @@ class DemoTemperatureHigh:
     threshold = 25.0
 
     def evaluate(self, payload, ctx):
-        temperature = ctx.value("temperature")
+        temperature = ctx.value()
         if temperature is None:
             return kanary.Evaluation(
                 state=kanary.AlertState.OK,
@@ -171,9 +171,12 @@ kanaryctl help
 
 ```bash
 kanaryctl test-poll demo
-kanaryctl test-evaluate demo.temperature.high --payload-json '{"channels":{"temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-evaluate demo.temperature.high --payload-json '{"inputs":{"demo:temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
 ```
+
+rule 実装では通常、単一 input なら `ctx.value()`、複数 input なら `ctx.inputs()` を使います。  
+`test-evaluate` だけは例外で、fully-qualified input name を key にした `inputs` map を受け取ります。
 
 plugin 単位の reload:
 
@@ -243,3 +246,5 @@ Kanary には組み込みの Web viewer が含まれています。
   開発、lint、tests を説明します。
 - [docs/deployment_ja.md](docs/deployment_ja.md)
   deployment layout と `systemd` を説明します。
+- [docs/rule_inputs_proposal_ja.md](docs/rule_inputs_proposal_ja.md)
+  複数 source input を扱う将来の rule model 案です。

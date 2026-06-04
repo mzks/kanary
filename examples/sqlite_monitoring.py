@@ -110,39 +110,36 @@ class Value1Stale:
 
 @kanary.rule(
     rule_id="sqlite.value2.stale",
-    source="sqlite",
+    inputs="sqlite:value2",
     severity=kanary.ERROR,
     tags=["sqlite", "value2"],
     owner="expert_dev",
 )
 class Value2Stale(kanary.StaleRule):
-    measurement = "value2"
     timeout = 1 * kanary.minute
     suppressed_by = ["sqlite.connection.failed"]
 
 
 @kanary.rule(
     rule_id="sqlite.value3.stale",
-    source="sqlite",
+    inputs="sqlite:value3",
     severity=kanary.ERROR,
     tags=["sqlite", "value3"],
     owner="expert_dev",
 )
 class Value3Stale(kanary.StaleRule):
-    measurement = "value3"
     timeout = 1 * kanary.minute
     suppressed_by = ["sqlite.connection.failed"]
 
 
 @kanary.rule(
     rule_id="sqlite.value1.range",
-    source="sqlite",
+    inputs="sqlite:value1",
     severity=kanary.WARN,
     tags=["sqlite", "value1"],
     owner="expert_dev",
 )
 class Value1Range(kanary.RangeRule):
-    measurement = "value1"
     low = 10.0
     lower_inclusive = False
     high = 20.0
@@ -191,7 +188,6 @@ class Value2Range:
     owner="expert_dev",
 )
 class Value3Range:
-    measurement = "value3"
     suppressed_by = ["sqlite.connection.failed"]
     low = 0.2
     high = 0.8
@@ -199,12 +195,12 @@ class Value3Range:
     upper_inclusive = True
 
     def evaluate(self, payload, ctx):
-        value = ctx.value(self.measurement)
+        value = ctx.value("value3")
         if value is None:
             return kanary.Evaluation(
                 state=kanary.AlertState.OK,
                 payload=payload,
-                message=f"{self.measurement} is missing",
+                message="value3 is missing",
             )
 
         in_lower = value >= self.low if self.lower_inclusive else value > self.low
@@ -215,13 +211,13 @@ class Value3Range:
             return kanary.Evaluation(
                 state=kanary.AlertState.OK,
                 payload=payload,
-                message=f"{self.measurement}={value} within range {range_text}",
+                message=f"value3={value} within range {range_text}",
             )
 
         return kanary.Evaluation(
             state=kanary.AlertState.FIRING,
             payload=payload,
-            message=f"{self.measurement}={value} out of range {range_text}",
+            message=f"value3={value} out of range {range_text}",
         )
 
 
@@ -275,13 +271,12 @@ class ValuesBalance:
 
 @kanary.rule(
     rule_id="sqlite.value1.temperature_levels",
-    source="sqlite",
+    inputs="sqlite:value1",
     severity=kanary.WARN,
     tags=["sqlite", "value1", "threshold"],
     owner="expert_dev",
 )
 class Value1TemperatureLevels(kanary.ThresholdRule):
-    measurement = "value1"
     direction = "high"
     hysteresis = 1.0
     thresholds = [

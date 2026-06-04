@@ -13,8 +13,8 @@ import kanary
 class SlowLatestSource:
 
     def init(self, ctx):
-        # DSN format
-        # host=*** port=**** dbname=*** user=*** password=*****
+        # Measurements exposed to rules use the short names "temperature" and
+        # "humidity". The full upstream names stay in measurement metadata.
         dsn = os.environ["KANARY_POSTGRES_DSN"]
         self.conn = psycopg.connect(dsn, row_factory=dict_row)
 
@@ -63,25 +63,23 @@ class SlowLatestSource:
 
 @kanary.rule(
     rule_id="postgres.temperature.stale",
-    source="postgres",
+    inputs="postgres:temperature",
     severity=kanary.ERROR,
     tags=["infra", "postgres"],
     owner="expert_db",
 )
 class SlowLatestStale(kanary.StaleRule):
-    measurement = "temperature"
     timeout = 1 * kanary.minute
 
 
 @kanary.rule(
     rule_id="postgres.temperature.range",
-    source="postgres",
+    inputs="postgres:temperature",
     severity=kanary.WARN,
     tags=["slow", "temperature"],
     owner="expert_env",
 )
 class SlowLatestHighTemperature(kanary.RangeRule):
-    measurement = "temperature"
     low = 20.0
     high = 28.0
 
@@ -113,24 +111,22 @@ class SlowLatestDbConnection:
 
 @kanary.rule(
     rule_id="postgres.humidity.stale",
-    source="postgres",
+    inputs="postgres:humidity",
     severity=kanary.ERROR,
     tags=["slow", "humidity"],
     owner="expert_env",
 )
 class SlowLatestHumidityStale(kanary.StaleRule):
-    measurement = "humidity"
     timeout = 1 * kanary.minute
 
 
 @kanary.rule(
     rule_id="postgres.humidity.range",
-    source="postgres",
+    inputs="postgres:humidity",
     severity=kanary.WARN,
     tags=["slow", "humidity"],
     owner="expert_env",
 )
 class SlowLatestHumidityRange(kanary.RangeRule):
-    measurement = "humidity"
     low = 20.0
     high = 60.0

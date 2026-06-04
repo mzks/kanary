@@ -78,10 +78,12 @@ kanary.SourceResult(
 必須:
 
 - `rule_id`
-- `source`
+- `inputs`
 - `severity`
 - `tags`
 - `evaluate(payload, ctx) -> kanary.Evaluation`
+
+`source="postgres"` も、`inputs="postgres:*"` の短縮として引き続き使えます。1つの source が公開する全 input に依存したい時の sugar です。
 
 任意 metadata:
 
@@ -94,19 +96,17 @@ kanary.SourceResult(
 
 ### RuleContext
 
-高レベル accessor:
+input を扱う accessor を使います:
 
-- `ctx.measurement(name)`
-- `ctx.value(name)`
-- `ctx.timestamp(name)`
-- `ctx.metadata(name)`
+- `ctx.inputs(selector=None, previous=False)`
+- `ctx.value(selector=None, previous=False)`
+- `ctx.timestamp(selector=None, previous=False)`
+- `ctx.metadata(selector=None, previous=False)`
+- `ctx.prev_value(selector=None)`
+- `ctx.prev_timestamp(selector=None)`
+- `ctx.prev_metadata(selector=None)`
 
-前回pollingした値を取得する際は, `previous=True`を引数に追加してください.
-
-低レベル accessor:
-
-- `ctx.get_current(path)`
-- `ctx.get_previous(path)`
+単一 input に解決される rule では `ctx.value()` のように selector を省略できます。複数 input を扱う rule では通常 `ctx.inputs()` を反復します。
 
 ## 3. Output
 
@@ -241,12 +241,11 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 ```python
 @kanary.rule(
     rule_id="sqlite.value1.threshold",
-    source="sqlite",
+    inputs="sqlite:value1",
     severity=kanary.WARN,
     tags=["sqlite", "value1"],
 )
 class Value1Threshold(kanary.ThresholdRule):
-    measurement = "value1"
     direction = "high"
     hysteresis = 1.0
     thresholds = [

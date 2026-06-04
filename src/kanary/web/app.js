@@ -434,7 +434,10 @@ function renderRulesPage() {
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td>${escapeHtml(plugin.plugin_id)}</td>
+          <td>
+            <div>${escapeHtml(plugin.plugin_id)}</div>
+            ${formatRulePluginContext(plugin)}
+          </td>
           <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
@@ -893,6 +896,25 @@ function matchesSilenceFilter(silence) {
     (silence.rule_patterns || []).join(" "),
     (silence.tags || []).join(" "),
   ], state.silenceFilter);
+}
+
+function formatRulePluginContext(plugin) {
+  if (plugin.type !== "rule") {
+    return "";
+  }
+  const inputs = (plugin.inputs || []).join(", ");
+  const resolvedSources = (plugin.resolved_sources || []).join(", ");
+  if (!inputs && !resolvedSources) {
+    return "";
+  }
+  const parts = [];
+  if (inputs) {
+    parts.push(`inputs: ${inputs}`);
+  }
+  if (resolvedSources) {
+    parts.push(`sources: ${resolvedSources}`);
+  }
+  return `<div class="muted">${escapeHtml(parts.join(" · "))}</div>`;
 }
 
 function historyActionLabel(actionType) {

@@ -241,6 +241,8 @@ class ControlAPI:
                                 "last_failure_at": status.last_failure_at,
                                 "last_updated_at": status.last_updated_at,
                                 "definition_file": status.definition_file or (getattr(plugin.__class__, "__kanary_definition_file__", None) if plugin is not None and not isinstance(plugin, type) else getattr(plugin, "__kanary_definition_file__", None) if plugin is not None else None),
+                                "inputs": list(getattr(plugin, "inputs", [])) if status.plugin_type == "rule" and plugin is not None else [],
+                                "resolved_sources": list(getattr(plugin, "resolved_sources", [])) if status.plugin_type == "rule" and plugin is not None else [],
                             }
                         )
                     plugins.sort(key=lambda row: (row["type"], row["plugin_id"]))

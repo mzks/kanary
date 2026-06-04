@@ -77,26 +77,24 @@ class KanaryPeerConnectionFailed:
 
 @kanary.rule(
     rule_id="kanary.peer.heartbeat.stale",
-    source="kanary.peer",
+    inputs="kanary.peer:heartbeat",
     severity=kanary.ERROR,
     tags=["kanary", "peer", "heartbeat"],
     owner="expert_kanary",
 )
 class KanaryPeerHeartbeatStale(kanary.StaleRule):
-    measurement = "heartbeat"
     timeout = 2 * kanary.minute
     suppressed_by = ["kanary.peer.connection.failed"]
 
 
 @kanary.rule(
     rule_id="kanary.peer.failed_plugins",
-    source="kanary.peer",
+    inputs="kanary.peer:failed_plugins",
     severity=kanary.ERROR,
     tags=["kanary", "peer", "plugins"],
     owner="expert_kanary",
 )
 class KanaryPeerFailedPlugins(kanary.ThresholdRule):
-    measurement = "failed_plugins"
     direction = "high"
     thresholds = [(1.0, kanary.ERROR)]
     suppressed_by = ["kanary.peer.connection.failed"]

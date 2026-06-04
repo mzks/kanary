@@ -53,7 +53,8 @@ Kanary 本体に必須の環境変数はありません。接続情報などは�
 - `@kanary.source`, `@kanary.rule`, `@kanary.output` が登録対象です
 - 各 `Source` は `interval` ごとに独立スレッドで poll されます
 - `Rule` は対応する source の最新結果で評価されます
-- plugin directory は継続監視され、変更時に自動 reload されます
+- plugin directory は継続監視され、変更は自動検知されます
+- default の `--auto-reload off` では、反映は `kanaryctl reload ...` で明示的に行います
 
 ## Web viewer
 
@@ -87,10 +88,11 @@ kanaryctl history sqlite.value1.stale
 kanaryctl test-poll sqlite
 kanaryctl test-evaluate sqlite.value1.range --payload-file payload.json
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
+kanaryctl reload --dirty
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
-kanaryctl reload
+kanaryctl reload --all
 ```
 
 ## 履歴の永続化

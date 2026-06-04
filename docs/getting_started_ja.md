@@ -71,7 +71,7 @@ class LocalLoadSource:
 ```python
 @kanary.rule(
     rule_id="local_load.busy",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
     owner="demo_owner",
@@ -81,7 +81,7 @@ class LocalLoadBusy:
     runbook = "Run `uptime` or `top` on the monitored host."
 
     def evaluate(self, payload, ctx):
-        load = ctx.value("load1_per_cpu")
+        load = ctx.value()
         threshold = 0.50
         if load is None:
             return kanary.Evaluation(
@@ -104,13 +104,13 @@ class LocalLoadBusy:
 
 最小の rule interface は次です。
 
-- `@kanary.rule(rule_id="...", source="...")`
+- `@kanary.rule(rule_id="...", inputs="source_id:input_name")`
 - `severity`
 - `tags`
 - `evaluate(self, payload, ctx)`
 - `kanary.Evaluation(...)` を返すこと
 
-`ctx.value("load1_per_cpu")` のように measurement を名前で読めます。
+単一 input なら `ctx.value()`、複数 input なら `ctx.inputs()` を使えます。
 
 ## 5. helper class を使う
 
@@ -119,13 +119,12 @@ class LocalLoadBusy:
 ```python
 @kanary.rule(
     rule_id="local_load.busy_threshold",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
     owner="demo_owner",
 )
 class LocalLoadBusyThreshold(kanary.ThresholdRule):
-    measurement = "load1_per_cpu"
     direction = "high"
     thresholds = [
         (0.50, kanary.WARN),
@@ -135,10 +134,10 @@ class LocalLoadBusyThreshold(kanary.ThresholdRule):
 
 helper class を使うときは通常 `evaluate()` を書かず、class 変数を設定します。
 
-- `StaleRule`: `measurement`, `timeout`
-- `RangeRule`: `measurement`, `low`, `high`, `hysteresis`
-- `RateRule`: `measurement`, `per_seconds`, `high`, `low`
-- `ThresholdRule`: `measurement`, `direction`, `thresholds`, `hysteresis`
+- `StaleRule`: `inputs`, `timeout`
+- `RangeRule`: `inputs`, `low`, `high`, `hysteresis`
+- `RateRule`: `inputs`, `per_seconds`, `high`, `low`
+- `ThresholdRule`: `inputs`, `direction`, `thresholds`, `hysteresis`
 
 環境が許せば, `openssl speed -multi 8` などのコマンドで負荷をかければ, アラームの発火をテストできます.
 
@@ -181,7 +180,14 @@ class FileOutput:
 
 ## 7. 何が起きるか
 
-ここまで保存すると、Kanary は plugin 定義を自動 reload します。  
+ここまで保存すると、Kanary は file の変更を検知して plugin を dirty にします。  
+default の `--auto-reload off` では、反映は明示的に行います。
+
+```bash
+kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
+```
+
+`--auto-reload dirty` または `--auto-reload all` で起動した場合だけ、自動で反映されます。  
 viewer では source, rules, output が見えるようになります。alert event が起きると `getting_started_alerts.jsonl` に 1 行ずつ追記されます。
 
 ```bash
@@ -194,9 +200,12 @@ viewer と `kanaryctl` は同じ API を使っています。
 
 ```bash
 kanaryctl --base-url http://127.0.0.1:8000 test-poll local_load
-kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"channels":{"load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"inputs":{"local_load:load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIRING --reason "mail output check"
+kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 ```
+
+`test-evaluate` は fully-qualified input name を key にした `inputs` map を受け取ります。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
 
 ## 8. 進んだ機能
 

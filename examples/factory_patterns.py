@@ -34,7 +34,7 @@ def make_threshold_rule(
     *,
     rule_id: str,
     source: str,
-    measurement: str,
+    input_name: str,
     thresholds: list[tuple[float, int]],
     direction: str = "high",
     severity: int = kanary.WARN,
@@ -46,7 +46,7 @@ def make_threshold_rule(
         cls_name,
         (kanary.ThresholdRule,),
         {
-            "measurement": measurement,
+            "inputs": [f"{source}:{input_name}"],
             "direction": direction,
             "thresholds": list(thresholds),
         },
@@ -73,7 +73,7 @@ FactoryDemoSource = make_constant_source(
 FactoryTemperatureThreshold = make_threshold_rule(
     rule_id="factory_demo.temperature.threshold",
     source="factory_demo",
-    measurement="temperature",
+    input_name="temperature",
     thresholds=[
         (25.0, kanary.WARN),
         (28.0, kanary.ERROR),
@@ -86,7 +86,7 @@ FactoryTemperatureThreshold = make_threshold_rule(
 FactoryHumidityThreshold = make_threshold_rule(
     rule_id="factory_demo.humidity.threshold",
     source="factory_demo",
-    measurement="humidity",
+    input_name="humidity",
     thresholds=[
         (60.0, kanary.WARN),
         (75.0, kanary.ERROR),

@@ -58,6 +58,7 @@
   1 つの source を poll し、normalized source payload を返します。
 - `POST /test-evaluate/{rule_id}`
   明示した payload に対して 1 つの rule を dry-run し、normalized evaluation result を返します。
+  ここで与える payload は `postgres:temperature` のような fully-qualified input name を key にした `inputs` object です。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
 - `POST /test-fire/{rule_id}`
   live alert state を変更せず、synthetic な state change を output pipeline に流します。
 
@@ -125,7 +126,7 @@
 ```bash
 kanaryctl alerts
 kanaryctl test-poll sqlite
-kanaryctl test-evaluate sqlite.value1.range --payload-json '{"channels":{"value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-evaluate sqlite.value1.range --payload-json '{"inputs":{"sqlite:value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"

@@ -90,13 +90,12 @@ class KanaryPluginSourceConnectionFailed:
 
 @kanary.rule(
     rule_id="kanary.plugins.heartbeat.stale",
-    source="kanary.plugins",
+    inputs="kanary.plugins:heartbeat",
     severity=kanary.ERROR,
     tags=["kanary", "internal", "plugins"],
     owner="expert_kanary",
 )
 class KanaryPluginSourceHeartbeatStale(kanary.StaleRule):
-    measurement = "heartbeat"
     timeout = 2 * kanary.minute
     suppressed_by = ["kanary.plugins.connection.failed"]
 
@@ -152,7 +151,7 @@ def make_plugin_type_failure_rule(
     )
     return kanary.rule(
         rule_id=rule_id,
-        source="kanary.plugins",
+        inputs=f"kanary.plugins:{measurement}",
         severity=severity,
         tags=["kanary", "internal", plugin_type, "failure"],
         owner=owner,

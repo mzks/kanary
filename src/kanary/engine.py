@@ -13,11 +13,17 @@ from .constants import AlertState, DEESCALATED, ESCALATED, TransitionKind, UNACK
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
 from .output import Output
 from .registry import get_output_registry, get_rule_registry, get_source_registry
-from .rule import Rule, RuleContext
+from .rule import Rule, RuleContext, normalize_rule_inputs, resolve_rule_sources
 from .store import NullStore
 from .source import Source
 
 logger = logging.getLogger("kanary.engine")
+
+
+def _coerce_test_timestamp(value: object) -> object:
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return value
 
 
 class Engine:
@@ -65,10 +71,44 @@ class Engine:
         return {source_id: cls() for source_id, cls in self._source_registry.items()}
 
     def _instantiate_rules(self) -> dict[str, Rule]:
-        return {rule_id: cls() for rule_id, cls in self._rule_registry.items()}
+        rules: dict[str, Rule] = {}
+        for rule_id, cls in self._rule_registry.items():
+            rule = cls()
+            self._configure_rule(rule)
+            rules[rule_id] = rule
+        return rules
 
     def _instantiate_outputs(self) -> dict[str, Output]:
         return {output_id: cls() for output_id, cls in self._output_registry.items()}
+
+    def _configure_rule(self, rule: Rule) -> None:
+        rule.inputs = normalize_rule_inputs(
+            getattr(rule, "inputs", None),
+            source=getattr(rule, "source", None),
+        )
+        rule.resolved_sources = resolve_rule_sources(rule.inputs, self.sources.keys())
+
+    def _refresh_rule_resolutions(self) -> None:
+        for rule in self.rules.values():
+            self._configure_rule(rule)
+
+    def _refresh_rule_plugin_resolution_status(self) -> None:
+        now = self._now_fn()
+        for rule_id, rule in self.rules.items():
+            status = self._plugin_status("rule", rule_id)
+            if getattr(rule, "resolved_sources", []):
+                if status.state == "FAILED" and status.last_error == "rule resolved zero sources or inputs":
+                    self._set_plugin_ready(status)
+                    status.last_error = None
+                    status.last_error_detail = None
+                    status.last_updated_at = now
+                continue
+            self._set_plugin_failed(status)
+            status.init_ok = True
+            status.last_error = "rule resolved zero sources or inputs"
+            status.last_error_detail = None
+            status.last_failure_at = now
+            status.last_updated_at = now
 
     def start(self) -> None:
         with self._lock:
@@ -84,6 +124,7 @@ class Engine:
                 self._initialize_source(source)
             for output_id, output in self.outputs.items():
                 self._initialize_output(output_id, output)
+            self._refresh_rule_plugin_resolution_status()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -109,7 +150,7 @@ class Engine:
                 observed_at=current_time,
             )
             for rule in self.rules.values():
-                if rule.source != source_id:
+                if source_id not in getattr(rule, "resolved_sources", []):
                     continue
                 if self._is_rule_excluded(rule.rule_id):
                     continue
@@ -140,6 +181,7 @@ class Engine:
                     source_id: self.source_states.get(source_id, SourceState(source_id=source_id))
                     for source_id in self.sources
                 }
+                self._refresh_rule_resolutions()
                 self._rebuild_plugin_states()
                 for source in self.sources.values():
                     self._initialize_source(source)
@@ -189,7 +231,9 @@ class Engine:
                 )
                 self.alerts.pop(rule_id, None)
                 self.acknowledgements.pop(rule_id, None)
+            self._refresh_rule_resolutions()
             self._sync_plugin_definition_files()
+            self._refresh_rule_plugin_resolution_status()
 
     def reload_rule_plugins(
         self,
@@ -226,10 +270,13 @@ class Engine:
 
             for rule_id, rule_cls in replacements.items():
                 self._rule_registry[rule_id] = rule_cls
-                self.rules[rule_id] = rule_cls()
+                rule = rule_cls()
+                self._configure_rule(rule)
+                self.rules[rule_id] = rule
 
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
+            self._refresh_rule_plugin_resolution_status()
 
     def reload_output_plugins(
         self,
@@ -282,8 +329,10 @@ class Engine:
                 self.source_states.setdefault(source_id, SourceState(source_id=source_id))
                 self._initialize_source(source)
 
+            self._refresh_rule_resolutions()
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
+            self._refresh_rule_plugin_resolution_status()
 
     def acknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
         with self._lock:
@@ -487,16 +536,15 @@ class Engine:
         with self._lock:
             rule = self.rules[rule_id]
             current_time = now or self._now_fn()
-            normalized_payload = self._normalize_source_result(payload) if isinstance(payload, SourceResult) else dict(payload)
-            existing_state = self.source_states.get(rule.source, SourceState(source_id=rule.source))
-            source_state = SourceState(
-                source_id=rule.source,
-                current=SourceSnapshot(payload=dict(normalized_payload), observed_at=current_time),
-                previous=existing_state.current,
-                updated_at=current_time,
-                poll_count=existing_state.poll_count,
-            )
-            alert = self._evaluate_rule_preview(rule, normalized_payload, source_state, current_time)
+            preview_states = self._build_test_evaluate_source_states(rule, payload, current_time)
+            trigger_source_id = next(iter(getattr(rule, "resolved_sources", []) or [getattr(rule, "source", "")]), "")
+            source_state = preview_states.get(trigger_source_id, SourceState(source_id=trigger_source_id))
+            original_source_states = self.source_states
+            self.source_states = preview_states
+            try:
+                alert = self._evaluate_rule_preview(rule, source_state.current.payload, source_state, current_time)
+            finally:
+                self.source_states = original_source_states
             event = AlertEvent(
                 rule_id=rule.rule_id,
                 previous_state=None,
@@ -518,6 +566,8 @@ class Engine:
                 "message": alert.message,
                 "payload": alert.payload,
                 "occurred_at": current_time,
+                "inputs": list(getattr(rule, "inputs", [])),
+                "resolved_sources": list(getattr(rule, "resolved_sources", [])),
                 "matched_outputs": matched_outputs,
                 "would_emit_outputs": would_emit_outputs,
             }
@@ -683,6 +733,120 @@ class Engine:
         status.last_success_at = now
         status.last_updated_at = now
         return normalized
+
+    def _build_test_evaluate_source_states(
+        self,
+        rule: Rule,
+        payload: Mapping[str, object] | SourceResult,
+        now: datetime,
+    ) -> dict[str, SourceState]:
+        if isinstance(payload, SourceResult):
+            resolved_sources = list(getattr(rule, "resolved_sources", []))
+            if len(resolved_sources) != 1:
+                raise ValueError("SourceResult test payload requires rule with exactly one resolved source")
+            normalized = self._normalize_source_result(payload)
+            return self._overlay_test_source_payloads(
+                rule,
+                {
+                    resolved_sources[0]: {
+                        "current": normalized,
+                    }
+                },
+                now,
+            )
+
+        normalized_payload = dict(payload)
+        if "inputs" in normalized_payload:
+            return self._overlay_test_source_payloads(
+                rule,
+                self._normalize_test_input_map_payload(normalized_payload),
+                now,
+            )
+
+        shorthand_keys = {"value", "timestamp", "metadata", "prev_value", "prev_timestamp", "prev_metadata"}
+        if shorthand_keys.intersection(normalized_payload):
+            normalized_inputs = list(getattr(rule, "inputs", []))
+            if len(normalized_inputs) != 1 or ":" not in normalized_inputs[0] or "*" in normalized_inputs[0]:
+                raise ValueError("single-input shorthand requires exactly one explicit input selector")
+            return self._overlay_test_source_payloads(
+                rule,
+                self._normalize_test_input_map_payload(
+                    {
+                        "inputs": {
+                            normalized_inputs[0]: normalized_payload,
+                        }
+                    }
+                ),
+                now,
+            )
+
+        raise ValueError("test payload must contain 'inputs'")
+
+    def _overlay_test_source_payloads(
+        self,
+        rule: Rule,
+        source_payloads: dict[str, dict[str, dict[str, object]]],
+        now: datetime,
+    ) -> dict[str, SourceState]:
+        preview_states: dict[str, SourceState] = {}
+        all_source_ids = sorted(set(getattr(rule, "resolved_sources", [])) | set(source_payloads))
+        for source_id in all_source_ids:
+            existing_state = self.source_states.get(source_id, SourceState(source_id=source_id))
+            payloads = source_payloads.get(source_id, {})
+            current_payload = dict(payloads.get("current", existing_state.current.payload))
+            previous_payload = dict(payloads.get("previous", existing_state.current.payload))
+            preview_states[source_id] = SourceState(
+                source_id=source_id,
+                current=SourceSnapshot(payload=current_payload, observed_at=now),
+                previous=SourceSnapshot(payload=previous_payload, observed_at=existing_state.current.observed_at),
+                updated_at=now,
+                poll_count=existing_state.poll_count,
+            )
+        return preview_states
+
+    def _normalize_test_input_map_payload(
+        self,
+        payload: Mapping[str, object],
+    ) -> dict[str, dict[str, dict[str, object]]]:
+        raw_inputs = payload.get("inputs", {})
+        if not isinstance(raw_inputs, Mapping):
+            raise ValueError("payload.inputs must be an object")
+        status = payload.get("status", "ok")
+        error = payload.get("error")
+        top_metadata = payload.get("metadata")
+        if top_metadata is not None and not isinstance(top_metadata, Mapping):
+            raise ValueError("payload.metadata must be an object when set")
+        grouped: dict[str, dict[str, dict[str, object]]] = {}
+        for full_name, raw in raw_inputs.items():
+            if not isinstance(full_name, str) or ":" not in full_name:
+                raise ValueError("input names must be '<source_id>:<input_name>'")
+            if not isinstance(raw, Mapping):
+                raise ValueError(f"input '{full_name}' must be an object")
+            source_id, input_name = full_name.split(":", 1)
+            current_channels = grouped.setdefault(source_id, {}).setdefault("current", {}).setdefault("channels", {})
+            previous_channels = grouped.setdefault(source_id, {}).setdefault("previous", {}).setdefault("channels", {})
+            current_channels[input_name] = {
+                "value": raw.get("value"),
+                "timestamp": _coerce_test_timestamp(raw.get("timestamp")),
+                "metadata": dict(raw.get("metadata", {})) if isinstance(raw.get("metadata", {}), Mapping) else {},
+            }
+            if "prev_value" in raw or "prev_timestamp" in raw or "prev_metadata" in raw:
+                previous_channels[input_name] = {
+                    "value": raw.get("prev_value"),
+                    "timestamp": _coerce_test_timestamp(raw.get("prev_timestamp")),
+                    "metadata": dict(raw.get("prev_metadata", {})) if isinstance(raw.get("prev_metadata", {}), Mapping) else {},
+                }
+        for source_id, payloads in grouped.items():
+            current_payload = payloads.setdefault("current", {})
+            current_payload.setdefault("channels", {})
+            current_payload["status"] = status
+            if error is not None:
+                current_payload["error"] = error
+            if isinstance(top_metadata, Mapping) and top_metadata:
+                current_payload["metadata"] = dict(top_metadata)
+            previous_payload = payloads.setdefault("previous", {})
+            previous_payload.setdefault("channels", {})
+        return grouped
 
     def _update_source_state(
         self,
@@ -1242,6 +1406,17 @@ class Engine:
     ) -> None:
         status = self._plugin_status("rule", rule.rule_id)
         try:
+            ctx = RuleContext(
+                now=now,
+                source_id=source_state.source_id,
+                source_state=source_state,
+                source_states=self.source_states,
+                declared_inputs=tuple(getattr(rule, "inputs", [])),
+                resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
+                previous_alert=self.alerts.get(rule.rule_id),
+            )
+            if not ctx.inputs():
+                raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
             dependency_state = self._resolve_dependency_state(rule, source_payload)
             if dependency_state is not None:
                 self._apply_evaluation(
@@ -1256,12 +1431,7 @@ class Engine:
                 evaluation = rule.normalize_evaluation(
                     rule.evaluate(
                         source_payload,
-                        RuleContext(
-                            now=now,
-                            source_id=rule.source,
-                            source_state=source_state,
-                            previous_alert=self.alerts.get(rule.rule_id),
-                        ),
+                        ctx,
                     ),
                     source_payload,
                 )
@@ -1325,6 +1495,17 @@ class Engine:
         source_state: SourceState,
         now: datetime,
     ) -> Alert:
+        ctx = RuleContext(
+            now=now,
+            source_id=source_state.source_id,
+            source_state=source_state,
+            source_states=self.source_states,
+            declared_inputs=tuple(getattr(rule, "inputs", [])),
+            resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
+            previous_alert=self.alerts.get(rule.rule_id),
+        )
+        if not ctx.inputs():
+            raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
         dependency_state = self._resolve_dependency_state(rule, source_payload)
         if dependency_state is not None:
             return dependency_state
@@ -1332,12 +1513,7 @@ class Engine:
         evaluation = rule.normalize_evaluation(
             rule.evaluate(
                 source_payload,
-                RuleContext(
-                    now=now,
-                    source_id=rule.source,
-                    source_state=source_state,
-                    previous_alert=self.alerts.get(rule.rule_id),
-                ),
+                ctx,
             ),
             source_payload,
         )

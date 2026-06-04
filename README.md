@@ -79,7 +79,7 @@ class DemoSource:
 
 @kanary.rule(
     rule_id="demo.temperature.high",
-    source="demo",
+    inputs="demo:temperature",
     severity=kanary.WARN,
     tags=["demo"],
     owner="demo_owner",
@@ -88,7 +88,7 @@ class DemoTemperatureHigh:
     threshold = 25.0
 
     def evaluate(self, payload, ctx):
-        temperature = ctx.value("temperature")
+        temperature = ctx.value()
         if temperature is None:
             return kanary.Evaluation(
                 state=kanary.AlertState.OK,
@@ -177,9 +177,12 @@ Quick diagnostic commands:
 
 ```bash
 kanaryctl test-poll demo
-kanaryctl test-evaluate demo.temperature.high --payload-json '{"channels":{"temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-evaluate demo.temperature.high --payload-json '{"inputs":{"demo:temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
 ```
+
+Rule code should normally use input-based access such as `ctx.value()` for a single input or `ctx.inputs()` for multiple inputs.
+`test-evaluate` is the exception: it accepts an `inputs` map keyed by fully-qualified input names.
 
 Targeted plugin reload:
 
@@ -250,5 +253,7 @@ The operational surface, however, is the HTTP API. The viewer is the standard UI
   Development, linting, and tests.
 - [docs/deployment.md](docs/deployment.md)
   Deployment layout and `systemd`.
+- [docs/rule_inputs_proposal.md](docs/rule_inputs_proposal.md)
+  Proposed future rule model for multi-source inputs.
 
 Japanese versions are available as `_ja` documents, for example [README_ja.md](README_ja.md).
