@@ -26,7 +26,7 @@ class LongEnvironmentSource:
 
     def init(self, ctx):
         self.conn = psycopg.connect(
-            os.environ["KANARY_POSTGRES_DSN"],
+            os.environ["KANARY_POSTGRES_DSN"], # DSN format "host=*** port=**** dbname=*** user=*** password=*****"
             row_factory=dict_row,
         )
 
