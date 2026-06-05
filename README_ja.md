@@ -123,6 +123,13 @@ rule の public API としては `kanary.ok(...)`, `kanary.firing(...)`, `kanary
 kanary ./demo
 ```
 
+version の確認:
+
+```bash
+kanary --version
+kanaryctl --version
+```
+
 `run` は省略可能です。次は同じ意味です。
 
 ```bash

@@ -741,7 +741,7 @@ class ThresholdRule(Rule):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"all inputs within thresholds {self._format_thresholds()}",
+                message=self._all_inputs_ok_message(),
             )
 
         field = self._field()
@@ -777,7 +777,7 @@ class ThresholdRule(Rule):
             return Evaluation(
                 state=AlertState.OK,
                 payload=result_payload,
-                message=f"{field_label}={value} within thresholds {self._format_thresholds()}",
+                message=self._single_value_ok_message(field_label, value),
             )
 
         return Evaluation(
@@ -856,6 +856,16 @@ class ThresholdRule(Rule):
         ordered = sorted(self.thresholds, key=lambda item: item[0], reverse=self.direction == "low")
         joined = ", ".join(f"{value:g}->{severity.name}" for value, severity in ordered)
         return f"{self.direction} [{joined}]"
+
+    def _all_inputs_ok_message(self) -> str:
+        if self.direction == "low":
+            return f"all inputs are above configured low thresholds {self._format_thresholds()}"
+        return f"all inputs are below configured high thresholds {self._format_thresholds()}"
+
+    def _single_value_ok_message(self, field_label: str, value: float) -> str:
+        if self.direction == "low":
+            return f"{field_label}={value} is above configured low thresholds {self._format_thresholds()}"
+        return f"{field_label}={value} is below configured high thresholds {self._format_thresholds()}"
 
 
 class RateRule(RangeRule):

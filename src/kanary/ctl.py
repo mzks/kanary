@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from importlib import metadata as importlib_metadata
 import json
 import os
 from pathlib import Path
 import sys
 from datetime import datetime, timezone
+import tomllib
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -29,9 +31,29 @@ ANSI_COLORS = {
     "SUPPRESSED": "\033[90m",
 }
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _kanary_version() -> str:
+    try:
+        return importlib_metadata.version("kanary")
+    except importlib_metadata.PackageNotFoundError:
+        try:
+            with (PROJECT_ROOT / "pyproject.toml").open("rb") as handle:
+                project = tomllib.load(handle).get("project", {})
+        except OSError:
+            return "unknown"
+        version = project.get("version")
+        return str(version) if version else "unknown"
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inspect and control a running KANARY instance")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_kanary_version()}",
+    )
     parser.add_argument(
         "--base-url",
         default=os.environ.get("KANARY_API_URL", "http://127.0.0.1:8000"),

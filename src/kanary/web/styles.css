@@ -530,6 +530,35 @@ select {
   flex-wrap: nowrap;
 }
 
+.plugin-primary-cell {
+  min-width: 380px;
+}
+
+.plugin-context-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.plugin-context-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.plugin-context-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.plugin-context-value {
+  overflow-wrap: anywhere;
+}
+
 .plugin-error-block {
   min-width: 260px;
   padding: 8px 10px;

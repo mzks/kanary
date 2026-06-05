@@ -6,6 +6,7 @@
 # - compare multiple inputs in one custom rule with ctx.inputs()/ctx.values()
 # - rely on runtime retry/reinit for database failures instead of hiding them
 #   inside ordinary source payloads
+# - set connect_timeout and statement_timeout through environment variables
 
 import os
 
@@ -25,9 +26,13 @@ INPUT_NAME_MAP = {
 class LongEnvironmentSource:
 
     def init(self, ctx):
+        connect_timeout = int(os.environ.get("KANARY_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5"))
+        statement_timeout_ms = int(os.environ.get("KANARY_POSTGRES_STATEMENT_TIMEOUT_MS", "5000"))
         self.conn = psycopg.connect(
             os.environ["KANARY_POSTGRES_DSN"], # DSN format "host=*** port=**** dbname=*** user=*** password=*****"
             row_factory=dict_row,
+            connect_timeout=connect_timeout,
+            options=f"-c statement_timeout={statement_timeout_ms}",
         )
 
     def poll(self, ctx):

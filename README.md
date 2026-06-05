@@ -129,6 +129,13 @@ Basic run:
 kanary ./demo
 ```
 
+Check the installed version:
+
+```bash
+kanary --version
+kanaryctl --version
+```
+
 `run` is optional. These are equivalent:
 
 ```bash

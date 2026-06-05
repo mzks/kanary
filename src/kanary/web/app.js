@@ -434,7 +434,7 @@ function renderRulesPage() {
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td>
+          <td class="plugin-primary-cell">
             <div>${escapeHtml(plugin.plugin_id)}</div>
             ${formatRulePluginContext(plugin)}
           </td>
@@ -909,12 +909,22 @@ function formatRulePluginContext(plugin) {
   }
   const parts = [];
   if (inputs) {
-    parts.push(`inputs: ${inputs}`);
+    parts.push(`
+      <div class="plugin-context-row">
+        <div class="plugin-context-label">Inputs</div>
+        <div class="plugin-context-value">${escapeHtml(inputs)}</div>
+      </div>
+    `);
   }
   if (resolvedSources) {
-    parts.push(`sources: ${resolvedSources}`);
+    parts.push(`
+      <div class="plugin-context-row">
+        <div class="plugin-context-label">Sources</div>
+        <div class="plugin-context-value">${escapeHtml(resolvedSources)}</div>
+      </div>
+    `);
   }
-  return `<div class="muted">${escapeHtml(parts.join(" · "))}</div>`;
+  return `<div class="plugin-context-list muted">${parts.join("")}</div>`;
 }
 
 function historyActionLabel(actionType) {

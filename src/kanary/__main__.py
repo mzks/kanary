@@ -1,11 +1,28 @@
 import argparse
+from importlib import metadata as importlib_metadata
 import logging
 import os
 from pathlib import Path
 import sys
+import tomllib
 
 from .loader import RuleDirectoryLoader
 from .runtime import AUTO_RELOAD_CHOICES, DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _kanary_version() -> str:
+    try:
+        return importlib_metadata.version("kanary")
+    except importlib_metadata.PackageNotFoundError:
+        try:
+            with (PROJECT_ROOT / "pyproject.toml").open("rb") as handle:
+                project = tomllib.load(handle).get("project", {})
+        except OSError:
+            return "unknown"
+        version = project.get("version")
+        return str(version) if version else "unknown"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  kanary lint ./plugins"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_kanary_version()}",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -104,7 +126,7 @@ def main() -> int:
     if not argv:
         parser.print_help()
         return 2
-    if argv[0] not in {"run", "lint", "-h", "--help"}:
+    if argv[0] not in {"run", "lint", "-h", "--help", "--version"}:
         argv = ["run", *argv]
     args = parser.parse_args(argv)
 

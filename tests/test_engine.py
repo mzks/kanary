@@ -672,6 +672,40 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(alert.state, kanary.AlertState.OK)
         self.assertEqual(alert.message, "input 'temperature' is present but value is missing")
 
+    def test_threshold_rule_low_direction_ok_message_reads_naturally(self) -> None:
+        source_state = kanary.SourceState(
+            source_id="slowcontrol_postgres",
+            current=kanary.SourceSnapshot(
+                payload={
+                    "channels": {
+                        "kernel_cleanroom.oxygen": {"value": 21.0, "timestamp": self.now, "metadata": {}},
+                        "kernel_laboratory.oxygen": {"value": 20.8, "timestamp": self.now, "metadata": {}},
+                    }
+                },
+                observed_at=self.now,
+            ),
+        )
+        ctx = kanary.RuleContext(now=self.now, source_id="slowcontrol_postgres", source_state=source_state)
+
+        class KernelOxygenLevel(kanary.ThresholdRule):
+            rule_id = "scdb.oxygen.level"
+            inputs = "slowcontrol_postgres:kernel_*.oxygen"
+            severity = kanary.WARN
+            tags = ["kernel"]
+            direction = "low"
+            thresholds = [
+                (20.5, kanary.WARN),
+                (20.0, kanary.ERROR),
+                (19.5, kanary.CRITICAL),
+            ]
+
+        alert = KernelOxygenLevel().evaluate(source_state.current.payload, ctx)
+        self.assertEqual(alert.state, kanary.OK)
+        self.assertEqual(
+            alert.message,
+            "all inputs are above configured low thresholds low [20.5->WARN, 20->ERROR, 19.5->CRITICAL]",
+        )
+
     def test_multi_input_helper_rule_fires_when_any_input_matches(self) -> None:
         test_now = self.now
 
@@ -3416,6 +3450,11 @@ class CLIHelpersTest(unittest.TestCase):
         self.assertIn("--api-port PORT", help_text)
         self.assertIn("kanary run --help", help_text)
         self.assertIn("kanary lint ./plugins", help_text)
+        self.assertIn("--version", help_text)
+
+    def test_cli_version_helpers_return_project_version(self) -> None:
+        self.assertRegex(kanary_main._kanary_version(), r"^\d+\.\d+\.\d+$")
+        self.assertRegex(kanaryctl._kanary_version(), r"^\d+\.\d+\.\d+$")
 
     def test_python_dash_m_kanaryctl_module_exposes_main(self) -> None:
         self.assertIs(kanaryctl_module.main, kanaryctl.main)

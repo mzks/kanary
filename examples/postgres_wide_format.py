@@ -3,6 +3,7 @@
 # Best practices shown here:
 # - keep the database connection in init()/terminate()
 # - let poll() raise on connection/query failures so Kanary can retry/reinit
+# - set connect_timeout and statement_timeout through environment variables
 # - expose one row as multiple inputs
 # - use source="..." as sugar for source-wide custom rules
 #
@@ -21,9 +22,13 @@ import kanary
 class WideEnvironmentSource:
 
     def init(self, ctx):
+        connect_timeout = int(os.environ.get("KANARY_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5"))
+        statement_timeout_ms = int(os.environ.get("KANARY_POSTGRES_STATEMENT_TIMEOUT_MS", "5000"))
         self.conn = psycopg.connect(
             os.environ["KANARY_POSTGRES_DSN"],
             row_factory=dict_row,
+            connect_timeout=connect_timeout,
+            options=f"-c statement_timeout={statement_timeout_ms}",
         )
 
     def poll(self, ctx):
