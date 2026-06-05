@@ -7,14 +7,14 @@ class UpstreamKanarySource(kanary.RemoteKanarySource):
 
 
 @kanary.rule(
-    rule_id="upstream.sqlite.connection.failed",
+    rule_id="upstream.sqlite.value1.temperature_levels",
     source="remote",
     severity=kanary.ERROR,
     tags=["remote", "upstream"],
     owner="operator_name",
 )
-class ImportedUpstreamConnectionFailed(kanary.RemoteAlarm):
-    remote_alarm_id = "sqlite.connection.failed"
+class ImportedUpstreamValue1TemperatureLevels(kanary.RemoteAlarm):
+    remote_alarm_id = "sqlite.value1.temperature_levels"
     propagate_ack = True
     propagate_silence = True
 
@@ -28,6 +28,7 @@ kanary.import_remote_alarms(
     ],
     prefix="upstream",
     add_tags=["remote", "upstream"],
+    owner="operator_name",
     propagate_ack=True,
     propagate_silence=False,
 )

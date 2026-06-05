@@ -59,6 +59,8 @@ Use `--api-host` and `--api-port` to change the bind address.
 - `POST /test-evaluate/{rule_id}`
   Dry-runs one rule against an explicit payload and returns the normalized evaluation result.
   This payload uses an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`. Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
+- `GET /test-evaluate-template/{rule_id}`
+  Returns a canonical `inputs` payload template for one rule. Single-input rules may also include a shorthand template.
 - `POST /test-fire/{rule_id}`
   Sends a synthetic state change through the output pipeline without changing the live alert state.
 
@@ -114,6 +116,7 @@ Main subcommands:
   Polls one source and prints the normalized payload as JSON.
 - `test-evaluate`
   Dry-runs one rule against a payload from `--payload-json`, `--payload-file`, or `--payload-stdin`.
+  Use `--print-template` first if you want a canonical inputs-based payload skeleton.
 - `test-fire`
   Sends a synthetic alert event through the output pipeline and prints the dispatch summary as JSON.
 
@@ -127,6 +130,7 @@ Examples:
 ```bash
 kanaryctl alerts
 kanaryctl test-poll sqlite
+kanaryctl test-evaluate sqlite.value1.range --print-template
 kanaryctl test-evaluate sqlite.value1.range --payload-json '{"inputs":{"sqlite:value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
@@ -135,3 +139,8 @@ kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
 kanaryctl reload --rule 'sqlite.*'
 kanaryctl reload --dirty
 ```
+
+Additional HTTP endpoint:
+
+- `GET /test-evaluate-template/{rule_id}`
+  Returns a canonical `inputs` payload template plus, when possible, a single-input shorthand template.

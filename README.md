@@ -65,15 +65,10 @@ import kanary
 @kanary.source(source_id="demo", interval=10.0)
 class DemoSource:
     def poll(self, ctx):
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(
-                    name="temperature",
-                    value=23.4,
-                    timestamp=datetime.now(timezone.utc),
-                )
-            ],
-            status="ok",
+        return kanary.inputs(
+            {
+                "temperature": (23.4, datetime.now(timezone.utc)),
+            }
         )
 
 
@@ -90,28 +85,25 @@ class DemoTemperatureHigh:
     def evaluate(self, payload, ctx):
         temperature = ctx.value()
         if temperature is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="temperature is missing",
-            )
-        if temperature > self.threshold:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=f"temperature={temperature} is higher than {self.threshold}",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=f"temperature={temperature} is within limit",
+            return kanary.ok("temperature is missing")
+        return kanary.error_if(
+            temperature > self.threshold,
+            f"temperature={temperature} is higher than {self.threshold}",
+        ) or kanary.ok(
+            f"temperature={temperature} is within limit",
         )
 
 
 @kanary.output(output_id="console")
 class ConsoleOutput:
     def emit(self, event, ctx):
-        print(event.rule_id, event.current_state.value, event.alert.message)
+        print(
+            event.rule_id,
+            event.current_state.value,
+            kanary.severity_label(event.current_severity),
+            event.transition.value if event.transition else "-",
+            event.alert.message,
+        )
 ```
 
 In this example, you only implement the minimum interface:
@@ -124,6 +116,10 @@ Internally, Kanary handles plugin loading, periodic source polling, rule evaluat
 
 If you want shorter definitions later, you can switch to built-in helper classes such as `RangeRule`, `StaleRule`, and `ThresholdRule`.
 Users can create plugin class factory too.
+
+For sources, the usual public API is `kanary.inputs(...)` and `kanary.no_data(...)`.
+For rules, the usual public API is `kanary.ok(...)`, `kanary.firing(...)`, `kanary.warn(...)`, `kanary.error(...)`, and `kanary.critical(...)`.
+`kanary.SourceResult(...)` and `kanary.Evaluation(...)` remain available as advanced forms.
 
 ## Running Kanary
 
@@ -177,12 +173,14 @@ Quick diagnostic commands:
 
 ```bash
 kanaryctl test-poll demo
+kanaryctl test-evaluate demo.temperature.high --print-template
 kanaryctl test-evaluate demo.temperature.high --payload-json '{"inputs":{"demo:temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
 ```
 
 Rule code should normally use input-based access such as `ctx.value()` for a single input or `ctx.inputs()` for multiple inputs.
 `test-evaluate` is the exception: it accepts an `inputs` map keyed by fully-qualified input names.
+Use `kanaryctl test-evaluate <rule_id> --print-template` to print a canonical payload skeleton before writing test data.
 
 Targeted plugin reload:
 
@@ -227,12 +225,13 @@ More realistic examples:
 - [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](examples/discord_webhook_output.py)
-- [examples/latest_postgres.py](examples/latest_postgres.py)
+- [examples/postgres_wide_format.py](examples/postgres_wide_format.py)
+- [examples/postgres_long_format.py](examples/postgres_long_format.py)
 - [examples/peer_monitoring.py](examples/peer_monitoring.py)
 - [examples/self_plugin_monitoring.py](examples/self_plugin_monitoring.py)
 - [examples/remote_alarm_import.py](examples/remote_alarm_import.py)
 
-`demo/` is for the first working run. `examples/` is closer to real deployments and includes helper classes, remote monitoring, PostgreSQL, and webhook outputs.
+`demo/` is for the first working run. `examples/` is closer to real deployments and includes helper classes, remote monitoring, PostgreSQL wide/long table patterns, and webhook outputs.
 
 ## Web Viewer
 
@@ -253,7 +252,5 @@ The operational surface, however, is the HTTP API. The viewer is the standard UI
   Development, linting, and tests.
 - [docs/deployment.md](docs/deployment.md)
   Deployment layout and `systemd`.
-- [docs/rule_inputs_proposal.md](docs/rule_inputs_proposal.md)
-  Proposed future rule model for multi-source inputs.
 
 Japanese versions are available as `_ja` documents, for example [README_ja.md](README_ja.md).

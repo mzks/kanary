@@ -8,7 +8,8 @@ from .constants import AlertState, Severity, TransitionKind
 @dataclass(slots=True)
 class Evaluation:
     state: AlertState
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] | None = None
+    extra: dict[str, Any] | None = None
     message: str | None = None
     severity: Severity | None = None
 
@@ -82,6 +83,7 @@ class SourceResult:
     measurements: list[Measurement] = field(default_factory=list)
     status: str = "ok"
     error: str | None = None
+    reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

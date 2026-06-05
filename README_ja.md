@@ -59,15 +59,10 @@ import kanary
 @kanary.source(source_id="demo", interval=10.0)
 class DemoSource:
     def poll(self, ctx):
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(
-                    name="temperature",
-                    value=23.4,
-                    timestamp=datetime.now(timezone.utc),
-                )
-            ],
-            status="ok",
+        return kanary.inputs(
+            {
+                "temperature": (23.4, datetime.now(timezone.utc)),
+            }
         )
 
 
@@ -84,28 +79,25 @@ class DemoTemperatureHigh:
     def evaluate(self, payload, ctx):
         temperature = ctx.value()
         if temperature is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="temperature is missing",
-            )
-        if temperature > self.threshold:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=f"temperature={temperature} is higher than {self.threshold}",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=f"temperature={temperature} is within limit",
+            return kanary.ok("temperature is missing")
+        return kanary.error_if(
+            temperature > self.threshold,
+            f"temperature={temperature} is higher than {self.threshold}",
+        ) or kanary.ok(
+            f"temperature={temperature} is within limit",
         )
 
 
 @kanary.output(output_id="console")
 class ConsoleOutput:
     def emit(self, event, ctx):
-        print(event.rule_id, event.current_state.value, event.alert.message)
+        print(
+            event.rule_id,
+            event.current_state.value,
+            kanary.severity_label(event.current_severity),
+            event.transition.value if event.transition else "-",
+            event.alert.message,
+        )
 ```
 
 この例で実装しているのは最低限の interface だけです。
@@ -118,6 +110,10 @@ class ConsoleOutput:
 
 あとから短く書きたくなったら、`RangeRule`, `StaleRule`, `ThresholdRule` などの組み込み helper class に置き換えられます。
 また, ユーザーは独自のclass factory関数を実装できます.
+
+source の public API としては `kanary.inputs(...)` と `kanary.no_data(...)` を使うのが通常です。  
+rule の public API としては `kanary.ok(...)`, `kanary.firing(...)`, `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)` を使うのが通常です。  
+`kanary.SourceResult(...)` と `kanary.Evaluation(...)` は advanced な書き方として引き続き使えます。
 
 ## 実行方法
 
@@ -171,12 +167,14 @@ kanaryctl help
 
 ```bash
 kanaryctl test-poll demo
+kanaryctl test-evaluate demo.temperature.high --print-template
 kanaryctl test-evaluate demo.temperature.high --payload-json '{"inputs":{"demo:temperature":{"value":30.0,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test"
 ```
 
 rule 実装では通常、単一 input なら `ctx.value()`、複数 input なら `ctx.inputs()` を使います。  
-`test-evaluate` だけは例外で、fully-qualified input name を key にした `inputs` map を受け取ります。
+`test-evaluate` だけは例外で、fully-qualified input name を key にした `inputs` map を受け取ります。  
+`kanaryctl test-evaluate <rule_id> --print-template` を使うと、その rule 向けの canonical payload template を先に出せます。
 
 plugin 単位の reload:
 
@@ -220,7 +218,8 @@ Kanary 本体に必須の環境変数はありません。必要に応じて次�
 - [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](examples/discord_webhook_output.py)
-- [examples/latest_postgres.py](examples/latest_postgres.py)
+- [examples/postgres_wide_format.py](examples/postgres_wide_format.py)
+- [examples/postgres_long_format.py](examples/postgres_long_format.py)
 - [examples/peer_monitoring.py](examples/peer_monitoring.py)
 - [examples/self_plugin_monitoring.py](examples/self_plugin_monitoring.py)
 - [examples/remote_alarm_import.py](examples/remote_alarm_import.py)
@@ -246,5 +245,3 @@ Kanary には組み込みの Web viewer が含まれています。
   開発、lint、tests を説明します。
 - [docs/deployment_ja.md](docs/deployment_ja.md)
   deployment layout と `systemd` を説明します。
-- [docs/rule_inputs_proposal_ja.md](docs/rule_inputs_proposal_ja.md)
-  複数 source input を扱う将来の rule model 案です。

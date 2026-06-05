@@ -4,6 +4,11 @@ from datetime import datetime
 
 import kanary
 
+# SQLite example that focuses on measurement-level monitoring.
+# Query failures are treated as source plugin failures so Kanary's runtime
+# retry/reinit logic can recover them. Pair this example with
+# examples/self_plugin_monitoring.py if you want alerts about failed plugins.
+
 
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
@@ -14,60 +19,36 @@ class SqliteSource:
         self.conn.row_factory = sqlite3.Row
 
     def poll(self, ctx):
-        try:
-            cur = self.conn.cursor()
-            cur.execute(
-                """
-                SELECT name, ts, value
-                FROM (
-                    SELECT
-                        name,
-                        ts,
-                        value,
-                        ROW_NUMBER() OVER (PARTITION BY name ORDER BY ts DESC) AS rn
-                    FROM dev_samples
-                    WHERE name IN ('value1', 'value2', 'value3')
-                )
-                WHERE rn = 1
-                """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT name, ts, value
+            FROM (
+                SELECT
+                    name,
+                    ts,
+                    value,
+                    ROW_NUMBER() OVER (PARTITION BY name ORDER BY ts DESC) AS rn
+                FROM dev_samples
+                WHERE name IN ('value1', 'value2', 'value3')
             )
-            rows = cur.fetchall()
-        except Exception as exc:
-            return kanary.SourceResult(status="error", error=str(exc))
+            WHERE rn = 1
+            """
+        )
+        rows = cur.fetchall()
 
-        measurements = []
-        for row in rows:
-            measurements.append(
-                kanary.Measurement(
-                    name=row["name"],
-                    value=row["value"],
-                    timestamp=datetime.fromisoformat(row["ts"]),
-                )
-            )
-        return kanary.SourceResult(measurements=measurements, status="ok" if rows else "empty")
+        if not rows:
+            return kanary.no_data(reason="dev_samples has no latest rows")
+        return kanary.inputs(
+            [
+                (row["name"], row["value"], datetime.fromisoformat(row["ts"]))
+                for row in rows
+            ]
+        )
 
     def terminate(self, ctx):
         if hasattr(self, "conn"):
             self.conn.close()
-
-
-@kanary.rule(
-    rule_id="sqlite.connection.failed",
-    source="sqlite",
-    severity=kanary.ERROR,
-    tags=["infra", "sqlite"],
-    owner="expert_db",
-)
-class SqliteConnectionFailed:
-
-    def evaluate(self, payload, ctx):
-        if payload.get("status") == "ok":
-            return kanary.Evaluation(state=kanary.AlertState.OK, payload=payload, message="sqlite query ok")
-        return kanary.Evaluation(
-            state=kanary.AlertState.FIRING,
-            payload=payload,
-            message=payload.get("error") or f"source status={payload.get('status')}",
-        )
 
 
 @kanary.rule(
@@ -79,32 +60,25 @@ class SqliteConnectionFailed:
 )
 class Value1Stale:
     owner = "expert_dev"
-    suppressed_by = ["sqlite.connection.failed"]
     timeout = 1 * kanary.minute
 
     def evaluate(self, payload, ctx):
         timestamp = ctx.timestamp("value1")
         if timestamp is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message="value1 timestamp is missing",
-            )
+            return kanary.error("value1 timestamp is missing")
 
         age_seconds = (ctx.now - timestamp).total_seconds()
         result_payload = dict(payload)
         result_payload["age_seconds"] = age_seconds
         if age_seconds > self.timeout:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=result_payload,
-                message=f"value1 stale for {kanary.format_time(age_seconds)} (> {kanary.format_time(self.timeout)})",
+            return kanary.error(
+                f"value1 stale for {kanary.format_time(age_seconds)} (> {kanary.format_time(self.timeout)})",
+                extra=result_payload,
             )
 
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=result_payload,
-            message=f"value1 age {kanary.format_time(age_seconds)}",
+        return kanary.ok(
+            f"value1 age {kanary.format_time(age_seconds)}",
+            extra=result_payload,
         )
 
 
@@ -117,7 +91,6 @@ class Value1Stale:
 )
 class Value2Stale(kanary.StaleRule):
     timeout = 1 * kanary.minute
-    suppressed_by = ["sqlite.connection.failed"]
 
 
 @kanary.rule(
@@ -129,7 +102,6 @@ class Value2Stale(kanary.StaleRule):
 )
 class Value3Stale(kanary.StaleRule):
     timeout = 1 * kanary.minute
-    suppressed_by = ["sqlite.connection.failed"]
 
 
 @kanary.rule(
@@ -144,7 +116,6 @@ class Value1Range(kanary.RangeRule):
     lower_inclusive = False
     high = 20.0
     hysteresis = 1.0
-    suppressed_by = ["sqlite.connection.failed"]
 
 
 @kanary.rule(
@@ -155,29 +126,17 @@ class Value1Range(kanary.RangeRule):
     owner="expert_dev",
 )
 class Value2Range:
-    suppressed_by = ["sqlite.connection.failed"]
     low = 90.0
     high = 110.0
 
     def evaluate(self, payload, ctx):
         value2 = ctx.value("value2")
         if value2 is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="value2 is missing",
-            )
-        if value2 < self.low or value2 > self.high:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=f"value2={value2} out of range [{self.low}, {self.high}]",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=f"value2={value2} within range [{self.low}, {self.high}]",
-        )
+            return kanary.ok("value2 is missing")
+        return kanary.error_if(
+            value2 < self.low or value2 > self.high,
+            f"value2={value2} out of range [{self.low}, {self.high}]",
+        ) or kanary.ok(f"value2={value2} within range [{self.low}, {self.high}]")
 
 
 @kanary.rule(
@@ -188,7 +147,6 @@ class Value2Range:
     owner="expert_dev",
 )
 class Value3Range:
-    suppressed_by = ["sqlite.connection.failed"]
     low = 0.2
     high = 0.8
     lower_inclusive = True
@@ -197,28 +155,16 @@ class Value3Range:
     def evaluate(self, payload, ctx):
         value = ctx.value("value3")
         if value is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="value3 is missing",
-            )
+            return kanary.ok("value3 is missing")
 
         in_lower = value >= self.low if self.lower_inclusive else value > self.low
         in_upper = value <= self.high if self.upper_inclusive else value < self.high
         range_text = f"{'[' if self.lower_inclusive else '('}{self.low}, {self.high}{']' if self.upper_inclusive else ')'}"
 
         if in_lower and in_upper:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message=f"value3={value} within range {range_text}",
-            )
+            return kanary.ok(f"value3={value} within range {range_text}")
 
-        return kanary.Evaluation(
-            state=kanary.AlertState.FIRING,
-            payload=payload,
-            message=f"value3={value} out of range {range_text}",
-        )
+        return kanary.error(f"value3={value} out of range {range_text}")
 
 
 @kanary.rule(
@@ -229,19 +175,13 @@ class Value3Range:
     owner="expert_dev",
 )
 class ValuesBalance:
-    suppressed_by = ["sqlite.connection.failed"]
-
     def evaluate(self, payload, ctx):
         value1 = ctx.value("value1")
         value2 = ctx.value("value2")
         value3 = ctx.value("value3")
 
         if value1 is None or value2 is None or value3 is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="one of value1/value2/value3 is missing",
-            )
+            return kanary.ok("one of value1/value2/value3 is missing")
 
         expected_value2 = value1 * (4.0 + value3)
         delta = value2 - expected_value2
@@ -250,22 +190,20 @@ class ValuesBalance:
         result_payload["delta"] = delta
 
         if abs(delta) <= 10.0:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=result_payload,
-                message=(
+            return kanary.ok(
+                (
                     f"value2={value2} consistent with value1={value1} "
                     f"and value3={value3} (expected {expected_value2:.2f})"
                 ),
+                extra=result_payload,
             )
 
-        return kanary.Evaluation(
-            state=kanary.AlertState.FIRING,
-            payload=result_payload,
-            message=(
+        return kanary.error(
+            (
                 f"value2={value2} inconsistent with value1={value1} "
                 f"and value3={value3} (expected {expected_value2:.2f}, delta {delta:.2f})"
             ),
+            extra=result_payload,
         )
 
 
@@ -284,7 +222,6 @@ class Value1TemperatureLevels(kanary.ThresholdRule):
         (24.0, kanary.ERROR),
         (28.0, kanary.CRITICAL),
     ]
-    suppressed_by = ["sqlite.connection.failed"]
 
 
 @kanary.rule(
@@ -295,19 +232,13 @@ class Value1TemperatureLevels(kanary.ThresholdRule):
     owner="expert_dev",
 )
 class ValuesBalanceLevels:
-    suppressed_by = ["sqlite.connection.failed"]
-
     def evaluate(self, payload, ctx):
         value1 = ctx.value("value1")
         value2 = ctx.value("value2")
         value3 = ctx.value("value3")
 
         if value1 is None or value2 is None or value3 is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="one of value1/value2/value3 is missing",
-            )
+            return kanary.ok("one of value1/value2/value3 is missing")
 
         expected_value2 = value1 * (4.0 + value3)
         delta = value2 - expected_value2
@@ -317,10 +248,9 @@ class ValuesBalanceLevels:
         result_payload["delta"] = delta
 
         if absolute_delta < 10.0:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=result_payload,
-                message=f"balance delta {delta:.2f} within nominal range",
+            return kanary.ok(
+                f"balance delta {delta:.2f} within nominal range",
+                extra=result_payload,
             )
         if absolute_delta < 20.0:
             severity = kanary.WARN
@@ -329,9 +259,8 @@ class ValuesBalanceLevels:
         else:
             severity = kanary.CRITICAL
 
-        return kanary.Evaluation(
-            state=kanary.AlertState.FIRING,
-            payload=result_payload,
-            message=f"balance delta {delta:.2f} exceeded level threshold",
+        return kanary.firing(
+            f"balance delta {delta:.2f} exceeded level threshold",
             severity=severity,
+            extra=result_payload,
         )

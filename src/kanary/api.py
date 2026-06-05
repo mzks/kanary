@@ -97,6 +97,23 @@ class ControlAPI:
                     self._write_json(HTTPStatus.OK, payload)
                     return
 
+                if request_path.startswith("/test-evaluate-template/"):
+                    engine = engine_getter()
+                    if engine is None:
+                        self._write_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"status": "starting"},
+                        )
+                        return
+                    rule_id = unquote(request_path[len("/test-evaluate-template/") :]).strip("/")
+                    try:
+                        payload = engine.test_evaluate_template(rule_id)
+                    except KeyError:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "rule not found"})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+
                 if request_path == "/health":
                     engine = engine_getter()
                     if engine is None:
@@ -118,7 +135,7 @@ class ControlAPI:
                     return
 
                 if request_path == "/meta":
-                    self._write_json(HTTPStatus.OK, _installation_metadata())
+                    self._write_json(HTTPStatus.OK, _installation_metadata(engine_getter()))
                     return
 
                 if request_path == "/peer-status":
@@ -519,7 +536,7 @@ def _resolve_plugin(engine: Engine, plugin_type: str, plugin_id: str) -> object 
     return getattr(engine, "runtime_discovered_plugin_classes", {}).get((plugin_type, plugin_id))
 
 
-def _installation_metadata() -> dict[str, object]:
+def _installation_metadata(engine: Engine | None = None) -> dict[str, object]:
     result = {
         "package_name": "kanary",
         "version": None,
@@ -528,6 +545,9 @@ def _installation_metadata() -> dict[str, object]:
         "repository_url": None,
         "documentation_url": None,
         "issues_url": None,
+        "state_db_enabled": bool(getattr(getattr(engine, "store", None), "enabled", False)),
+        "state_db_schema_version": getattr(getattr(engine, "store", None), "schema_version", 0) if engine is not None else 0,
+        "state_db_target_schema_version": getattr(getattr(engine, "store", None), "target_schema_version", 1) if engine is not None else 1,
     }
     try:
         dist_metadata = importlib_metadata.metadata("kanary")

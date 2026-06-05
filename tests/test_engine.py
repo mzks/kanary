@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import textwrap
 import threading
@@ -318,7 +319,7 @@ class EngineTest(unittest.TestCase):
             45,
         )
 
-    def test_rule_context_measurement_accessors_work_for_current_and_previous(self) -> None:
+    def test_rule_context_input_accessors_work_for_current_and_previous(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         source.now = self.now - timedelta(seconds=5)
@@ -335,7 +336,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(ctx.value("temperature", previous=True), 123)
         self.assertEqual(ctx.metadata("temperature"), {})
 
-    def test_rule_context_measurement_accessors_support_dotted_names(self) -> None:
+    def test_rule_context_input_accessors_support_dotted_names(self) -> None:
         source_state = kanary.SourceState(
             source_id="postgres",
             current=kanary.SourceSnapshot(
@@ -476,7 +477,7 @@ class EngineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ambiguous"):
             ctx.value("temperature")
 
-    def test_helper_rules_support_dotted_measurement_names(self) -> None:
+    def test_helper_rules_support_dotted_input_names(self) -> None:
         source_state = kanary.SourceState(
             source_id="postgres",
             current=kanary.SourceSnapshot(
@@ -518,7 +519,106 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(stale_alert.state, kanary.AlertState.OK)
         self.assertEqual(range_alert.state, kanary.AlertState.OK)
 
-    def test_stale_rule_missing_measurement_message_shows_candidates(self) -> None:
+    def test_source_inputs_helper_uses_outer_timestamp_and_metadata(self) -> None:
+        payload = self.engine._normalize_source_result(
+            kanary.inputs(
+                [
+                    ("value1", 10),
+                    ("value2", 12, self.now, {"unit": "degC"}),
+                    ("value3", 13, None, {"unit": "pct"}),
+                ],
+                timestamp=self.now,
+                metadata={"table": "demo"},
+            ),
+            now=self.now,
+        )
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["metadata"], {"table": "demo"})
+        self.assertEqual(payload["channels"]["value1"]["timestamp"], self.now)
+        self.assertEqual(payload["channels"]["value2"]["metadata"], {"unit": "degC"})
+        self.assertEqual(payload["channels"]["value3"]["timestamp"], self.now)
+        self.assertEqual(payload["channels"]["value3"]["metadata"], {"unit": "pct"})
+
+    def test_source_inputs_helper_accepts_mapping_style(self) -> None:
+        payload = self.engine._normalize_source_result(
+            kanary.inputs(
+                {
+                    "temperature": (23.4, None, {"unit": "C"}),
+                    "humidity": 40.0,
+                },
+                timestamp=self.now,
+            ),
+            now=self.now,
+        )
+        self.assertEqual(payload["channels"]["temperature"]["value"], 23.4)
+        self.assertEqual(payload["channels"]["temperature"]["metadata"], {"unit": "C"})
+        self.assertEqual(payload["channels"]["humidity"]["timestamp"], self.now)
+
+    def test_source_inputs_helper_accepts_single_named_input_form(self) -> None:
+        payload = self.engine._normalize_source_result(
+            kanary.inputs("temperature", 23.4, self.now),
+            now=self.now,
+        )
+        self.assertEqual(payload["channels"]["temperature"]["value"], 23.4)
+        self.assertEqual(payload["channels"]["temperature"]["timestamp"], self.now)
+
+    def test_no_data_helper_sets_empty_status_and_reason(self) -> None:
+        payload = self.engine._normalize_source_result(
+            kanary.no_data(reason="no rows", metadata={"table": "demo"}),
+            now=self.now,
+        )
+        self.assertEqual(payload["status"], "empty")
+        self.assertEqual(payload["reason"], "no rows")
+        self.assertEqual(payload["metadata"], {"table": "demo"})
+
+    def test_rule_helpers_inherit_payload_and_merge_extra(self) -> None:
+        rule = self.engine.rules["postgres.temperature.custom_threshold"]
+        source_payload = {
+            "channels": {
+                "temperature": {"value": 42, "timestamp": self.now, "metadata": {}},
+            },
+            "status": "ok",
+        }
+        evaluation = rule.normalize_evaluation(
+            kanary.error("too hot", extra={"delta": 2}),
+            source_payload,
+        )
+        self.assertEqual(evaluation.state, kanary.FIRING)
+        self.assertEqual(evaluation.severity, kanary.ERROR)
+        self.assertEqual(evaluation.message, "too hot")
+        self.assertEqual(evaluation.payload["status"], "ok")
+        self.assertEqual(evaluation.payload["delta"], 2)
+
+    def test_rule_normalize_accepts_none_bool_and_tuple_forms(self) -> None:
+        rule = self.engine.rules["postgres.temperature.custom_threshold"]
+        source_payload = {
+            "channels": {
+                "temperature": {"value": 10, "timestamp": self.now, "metadata": {}},
+            },
+            "status": "ok",
+        }
+        self.assertEqual(rule.normalize_evaluation(None, source_payload).state, kanary.OK)
+        self.assertEqual(rule.normalize_evaluation(True, source_payload).state, kanary.FIRING)
+        self.assertEqual(rule.normalize_evaluation(False, source_payload).state, kanary.OK)
+        tuple_eval = rule.normalize_evaluation(("WARN", "watch it"), source_payload)
+        self.assertEqual(tuple_eval.state, kanary.FIRING)
+        self.assertEqual(tuple_eval.severity, kanary.WARN)
+        self.assertEqual(tuple_eval.message, "watch it")
+        tuple_eval = rule.normalize_evaluation((kanary.ERROR, "too hot"), source_payload)
+        self.assertEqual(tuple_eval.state, kanary.FIRING)
+        self.assertEqual(tuple_eval.severity, kanary.ERROR)
+        self.assertEqual(tuple_eval.message, "too hot")
+
+    def test_error_if_returns_evaluation_or_none(self) -> None:
+        self.assertIsNone(kanary.error_if(False, "nope"))
+        result = kanary.error_if(True, "boom")
+        self.assertIsInstance(result, kanary.Evaluation)
+        assert result is not None
+        self.assertEqual(result.state, kanary.FIRING)
+        self.assertEqual(result.severity, kanary.ERROR)
+        self.assertEqual(result.message, "boom")
+
+    def test_stale_rule_missing_input_message_shows_candidates(self) -> None:
         source_state = kanary.SourceState(
             source_id="postgres",
             current=kanary.SourceSnapshot(
@@ -542,9 +642,9 @@ class EngineTest(unittest.TestCase):
 
         alert = MissingMeasurementStale().evaluate(source_state.current.payload, ctx)
         self.assertEqual(alert.state, kanary.AlertState.FIRING)
-        self.assertIn("measurement 'det1.radon_conc.Bq_m3' is missing", alert.message)
-        self.assertIn("closest available measurement: det1.radon_conc", alert.message)
-        self.assertIn("available measurements: det1.radon_conc, det2.radon_conc", alert.message)
+        self.assertIn("input 'det1.radon_conc.Bq_m3' is missing", alert.message)
+        self.assertIn("closest available input: postgres:det1.radon_conc", alert.message)
+        self.assertIn("available inputs: postgres:det1.radon_conc, postgres:det2.radon_conc", alert.message)
 
     def test_threshold_rule_reports_missing_value_inside_existing_measurement(self) -> None:
         source_state = kanary.SourceState(
@@ -570,7 +670,7 @@ class EngineTest(unittest.TestCase):
 
         alert = MissingValueThreshold().evaluate(source_state.current.payload, ctx)
         self.assertEqual(alert.state, kanary.AlertState.OK)
-        self.assertEqual(alert.message, "measurement 'temperature' is present but value is missing")
+        self.assertEqual(alert.message, "input 'temperature' is present but value is missing")
 
     def test_multi_input_helper_rule_fires_when_any_input_matches(self) -> None:
         test_now = self.now
@@ -1044,6 +1144,92 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
         self.assertEqual(report.errors, [])
         self.assertIn("rule 'example.rule' has no owner", report.warnings)
+
+    def test_inspect_warns_for_broad_and_duplicate_input_selectors(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "rules.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="alpha", interval=5.0)
+                    class AlphaSource:
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+
+                    @kanary.source(source_id="beta", interval=5.0)
+                    class BetaSource:
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+
+                    @kanary.output(output_id="example.output")
+                    class ExampleOutput:
+                        def emit(self, event, ctx):
+                            return None
+
+                    @kanary.rule(
+                        rule_id="example.rule",
+                        inputs=["temperature", "*:*", "*:*", "alpha:*"],
+                        severity=kanary.ERROR,
+                        tags=["example"],
+                        owner="owner",
+                    )
+                    class ExampleRule:
+                        def evaluate(self, payload, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(tmp)
+            _, report = loader.inspect()
+
+        self.assertEqual(report.errors, [])
+        self.assertIn(
+            "rule 'example.rule' input selector 'temperature' omits source pattern; prefer fully-qualified 'source:input'",
+            report.warnings,
+        )
+        self.assertIn(
+            "rule 'example.rule' uses very broad input selector '*:*'; prefer narrower source:input patterns",
+            report.warnings,
+        )
+        self.assertIn(
+            "rule 'example.rule' declares duplicate input selector '*:*'",
+            report.warnings,
+        )
+
+    def test_inspect_rejects_legacy_measurement_attribute(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "rules.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source", interval=5.0)
+                    class ExampleSource:
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+
+                    @kanary.rule(
+                        rule_id="example.rule",
+                        source="example.source",
+                        severity=kanary.ERROR,
+                        tags=["example"],
+                        owner="owner",
+                    )
+                    class ExampleRule(kanary.RangeRule):
+                        measurement = "temperature"
+                        high = 10.0
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(tmp)
+            with self.assertRaisesRegex(
+                ValueError,
+                "rule 'example.rule' measurement is no longer supported; use inputs='source_id:input_name'",
+            ):
+                loader.inspect()
 
     def test_inspect_rejects_non_positive_stale_timeout(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1894,6 +2080,9 @@ class ControlAPITest(unittest.TestCase):
         self.assertTrue(payload["version"])
         self.assertIn("git_commit", payload)
         self.assertEqual(payload["repository_url"], "https://github.com/mzks/kanary")
+        self.assertIn("state_db_enabled", payload)
+        self.assertIn("state_db_schema_version", payload)
+        self.assertIn("state_db_target_schema_version", payload)
 
     def test_alerts_endpoint_includes_tags_and_owner(self) -> None:
         engine = kanary.Engine(output_registry={})
@@ -2271,6 +2460,36 @@ class ControlAPITest(unittest.TestCase):
 
 
 class SQLiteStoreTest(unittest.TestCase):
+    def test_new_sqlite_store_sets_user_version(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanary.db"
+            store = kanary.SQLiteStore(db_path)
+            store.initialize()
+            try:
+                conn = sqlite3.connect(db_path)
+                try:
+                    version = conn.execute("PRAGMA user_version").fetchone()[0]
+                finally:
+                    conn.close()
+            finally:
+                store.close()
+
+        self.assertEqual(version, kanary.SQLiteStore.SCHEMA_VERSION)
+
+    def test_legacy_schema_version_zero_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanary.db"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("CREATE TABLE legacy_table (id INTEGER PRIMARY KEY)")
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = kanary.SQLiteStore(db_path)
+            with self.assertRaisesRegex(RuntimeError, "unsupported legacy state DB schema"):
+                store.initialize()
+
     def test_store_restores_acknowledgements_and_silences(self) -> None:
         with TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanary.db"
@@ -3077,6 +3296,19 @@ class ControlAPITest(unittest.TestCase):
         self.assertEqual(body["state"], "FIRING")
         self.assertEqual(body["resolved_sources"], ["postgres"])
         self.assertIn("would_emit_outputs", body)
+
+    def test_test_evaluate_template_endpoint_returns_inputs_payload_template(self) -> None:
+        with urlopen(f"{self.base_url}/test-evaluate-template/postgres.temperature.range") as response:
+            body = json.loads(response.read().decode())
+        self.assertEqual(body["rule_id"], "postgres.temperature.range")
+        self.assertEqual(body["inputs"], ["postgres:temperature"])
+        self.assertEqual(body["resolved_sources"], ["postgres"])
+        self.assertIn("payload", body)
+        self.assertEqual(
+            sorted(body["payload"]["inputs"]),
+            ["postgres:temperature"],
+        )
+        self.assertIn("single_input_shorthand", body)
 
     def test_test_evaluate_endpoint_accepts_prev_input_fields(self) -> None:
         request = Request(

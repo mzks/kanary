@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 from typing import Any
 
-from .constants import AlertState, Severity, ERROR
+from .constants import AlertState, Severity, CRITICAL, ERROR, FIRING, INFO, OK, WARN
 from .models import Alert, Evaluation, SourceState
 from .units import format_rate, format_time, second
 
@@ -109,12 +109,6 @@ class RuleContext:
                     )
         return [matched[name] for name in sorted(matched)]
 
-    def measurement(self, name: str | None = None, *, previous: bool = False) -> dict[str, Any]:
-        match = self._single_input_match(name, previous=previous)
-        if match is None:
-            return {}
-        return dict(match.raw)
-
     def names(
         self,
         selector: str | Iterable[str] | None = None,
@@ -183,22 +177,6 @@ class RuleContext:
     def prev_metadata(self, name: str | None = None, default: Any = None) -> Any:
         return self.metadata(name, default, previous=True)
 
-    def has_measurement(self, name: str, *, previous: bool = False) -> bool:
-        return bool(self.inputs(name, previous=previous))
-
-    def available_measurements(self, *, previous: bool = False) -> list[str]:
-        names = self.names(previous=previous)
-        if len(self.resolved_sources) == 1:
-            prefix = f"{self.resolved_sources[0]}:"
-            stripped: list[str] = []
-            for name in names:
-                if name.startswith(prefix):
-                    stripped.append(name[len(prefix) :])
-                else:
-                    stripped.append(name)
-            return stripped
-        return names
-
     def _single_input_match(self, selector: str | None, *, previous: bool = False) -> InputView | None:
         matches = self.inputs(selector, previous=previous)
         if not matches:
@@ -230,7 +208,6 @@ class Rule:
     source: str
     inputs: list[str] = []
     resolved_sources: list[str] = []
-    measurement: str | None = None
     severity: Severity = ERROR
     tags: list[str] = []
     owner: str | None = None
@@ -244,30 +221,53 @@ class Rule:
 
     def normalize_evaluation(
         self,
-        result: Evaluation,
+        result: Any,
         payload: dict[str, Any],
     ) -> Evaluation:
         if isinstance(result, Evaluation):
+            base_payload = dict(payload)
+            if result.payload is None:
+                normalized_payload = base_payload
+            else:
+                normalized_payload = dict(result.payload)
+            if result.extra:
+                if result.payload is None:
+                    normalized_payload.update(result.extra)
+                else:
+                    normalized_payload.update(result.extra)
+            result.payload = normalized_payload
             return result
-        raise TypeError(f"{type(self).__name__}.evaluate() must return kanary.Evaluation")
+        if result is None:
+            return Evaluation(state=OK, payload=dict(payload))
+        if isinstance(result, bool):
+            return Evaluation(state=FIRING if result else OK, payload=dict(payload))
+        if isinstance(result, tuple) and len(result) == 2:
+            severity_like, message = result
+            if not isinstance(message, str):
+                raise TypeError(
+                    f"{type(self).__name__}.evaluate() tuple return must be (severity_or_bool_or_none, message)"
+                )
+            if isinstance(severity_like, bool):
+                return Evaluation(
+                    state=FIRING if severity_like else OK,
+                    payload=dict(payload),
+                    message=message,
+                )
+            if severity_like is None:
+                return Evaluation(state=OK, payload=dict(payload), message=message)
+            return Evaluation(
+                state=FIRING,
+                payload=dict(payload),
+                message=message,
+                severity=_coerce_severity_value(severity_like),
+            )
+        raise TypeError(
+            f"{type(self).__name__}.evaluate() must return kanary.Evaluation, None, bool, or (severity, message)"
+        )
 
     @classmethod
     def default_rule_id(cls) -> str | None:
         return None
-
-    @classmethod
-    def measurement_value_path(cls) -> str | None:
-        measurement = getattr(cls, "measurement", None)
-        if not measurement:
-            return None
-        return f"channels.{measurement}.value"
-
-    @classmethod
-    def measurement_timestamp_path(cls) -> str | None:
-        measurement = getattr(cls, "measurement", None)
-        if not measurement:
-            return None
-        return f"channels.{measurement}.timestamp"
 
     @classmethod
     def normalized_inputs(cls) -> list[str]:
@@ -286,12 +286,99 @@ class Rule:
         return None
 
 
+def ok(
+    message: str | None = None,
+    *,
+    extra: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> Evaluation:
+    return Evaluation(
+        state=OK,
+        payload=dict(payload) if payload is not None else None,
+        extra=dict(extra) if extra is not None else None,
+        message=message,
+    )
+
+
+def firing(
+    message: str | None = None,
+    *,
+    severity: Severity | str | None = None,
+    extra: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> Evaluation:
+    return Evaluation(
+        state=FIRING,
+        payload=dict(payload) if payload is not None else None,
+        extra=dict(extra) if extra is not None else None,
+        message=message,
+        severity=_coerce_severity_value(severity) if severity is not None else None,
+    )
+
+
+def info(message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation:
+    return firing(message, severity=INFO, extra=extra, payload=payload)
+
+
+def warn(message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation:
+    return firing(message, severity=WARN, extra=extra, payload=payload)
+
+
+def error(message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation:
+    return firing(message, severity=ERROR, extra=extra, payload=payload)
+
+
+def critical(message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation:
+    return firing(message, severity=CRITICAL, extra=extra, payload=payload)
+
+
+def ok_if(
+    condition: Any,
+    message: str | None = None,
+    *,
+    extra: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> Evaluation | None:
+    if not condition:
+        return None
+    return ok(message, extra=extra, payload=payload)
+
+
+def fire_if(
+    condition: Any,
+    message: str | None = None,
+    *,
+    severity: Severity | str | None = None,
+    extra: Mapping[str, Any] | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> Evaluation | None:
+    if not condition:
+        return None
+    return firing(message, severity=severity, extra=extra, payload=payload)
+
+
+def info_if(condition: Any, message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation | None:
+    return fire_if(condition, message, severity=INFO, extra=extra, payload=payload)
+
+
+def warn_if(condition: Any, message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation | None:
+    return fire_if(condition, message, severity=WARN, extra=extra, payload=payload)
+
+
+def error_if(condition: Any, message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation | None:
+    return fire_if(condition, message, severity=ERROR, extra=extra, payload=payload)
+
+
+def critical_if(condition: Any, message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation | None:
+    return fire_if(condition, message, severity=CRITICAL, extra=extra, payload=payload)
+
+
 class StaleRule(Rule):
     timeout: float
     timestamp_field: str | None = None
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
-        selector = self.measurement or self.primary_input_selector()
+        selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.timestamp_field is None else []
         if self.timestamp_field is None and selector is None:
             matches = ctx.inputs()
@@ -302,10 +389,10 @@ class StaleRule(Rule):
                     payload=dict(payload),
                     message=_missing_field_message(
                         ctx,
-                        measurement=_selector_label(selector),
+                        input_selector=selector,
                         field_label="timestamp",
                         field_path=_selector_label(selector) or "timestamp",
-                        field_is_measurement_derived=selector is not None,
+                        field_is_input_derived=selector is not None,
                     ),
                 )
             stale_inputs: list[dict[str, Any]] = []
@@ -344,7 +431,7 @@ class StaleRule(Rule):
         result_payload = dict(payload)
         timestamp_field = self._timestamp_field()
         timestamp_value = self._current_timestamp_value(payload, ctx)
-        selector_label = _selector_label(self.measurement or self.primary_input_selector())
+        selector_label = _selector_label(self.primary_input_selector())
 
         if timestamp_value is None:
             return Evaluation(
@@ -352,10 +439,10 @@ class StaleRule(Rule):
                 payload=result_payload,
                 message=_missing_field_message(
                     ctx,
-                    measurement=selector_label,
+                    input_selector=selector,
                     field_label="timestamp",
                     field_path=timestamp_field,
-                    field_is_measurement_derived=self.timestamp_field is None and selector_label is not None,
+                    field_is_input_derived=self.timestamp_field is None and selector_label is not None,
                 ),
             )
 
@@ -387,12 +474,11 @@ class StaleRule(Rule):
         return f"{source_id}.{variable}.stale"
 
     def _timestamp_field(self) -> str:
-        return self.timestamp_field or self.measurement_timestamp_path() or "timestamp"
+        return self.timestamp_field or "timestamp"
 
     def _current_timestamp_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
         if self.timestamp_field is None:
-            selector = self.measurement or self.primary_input_selector()
-            return ctx.timestamp(selector)
+            return ctx.timestamp(self.primary_input_selector())
         return get_by_path(payload, self._timestamp_field())
 
 
@@ -405,7 +491,7 @@ class RangeRule(Rule):
     upper_inclusive: bool = True
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
-        selector = self.measurement or self.primary_input_selector()
+        selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.field is None else []
         if self.field is None and selector is None:
             matches = ctx.inputs()
@@ -416,10 +502,10 @@ class RangeRule(Rule):
                     payload=dict(payload),
                     message=_missing_field_message(
                         ctx,
-                        measurement=_selector_label(selector),
+                        input_selector=selector,
                         field_label="value",
                         field_path=_selector_label(selector) or "value",
-                        field_is_measurement_derived=selector is not None,
+                        field_is_input_derived=selector is not None,
                     ),
                 )
             matched_inputs: list[dict[str, Any]] = []
@@ -462,7 +548,7 @@ class RangeRule(Rule):
         field_label = self._field_label()
         value = self._current_field_value(payload, ctx)
         result_payload = dict(payload)
-        selector_label = _selector_label(self.measurement or self.primary_input_selector())
+        selector_label = _selector_label(self.primary_input_selector())
 
         if value is None:
             return Evaluation(
@@ -470,10 +556,10 @@ class RangeRule(Rule):
                 payload=result_payload,
                 message=_missing_field_message(
                     ctx,
-                    measurement=selector_label,
+                    input_selector=selector,
                     field_label="value",
                     field_path=field_label,
-                    field_is_measurement_derived=self.field is None and selector_label is not None,
+                    field_is_input_derived=self.field is None and selector_label is not None,
                 ),
             )
 
@@ -574,23 +660,21 @@ class RangeRule(Rule):
         return f"{source_id}.{variable}.range"
 
     def _field(self) -> str:
-        return self.field or self.measurement_value_path() or "value"
+        return self.field or "value"
 
     def _field_label(self) -> str:
-        return _selector_label(self.measurement or self.primary_input_selector()) or self._field()
+        return _selector_label(self.primary_input_selector()) or self._field()
 
     def _previous_field_value(self, ctx: RuleContext) -> Any:
         if self.field is None:
-            selector = self.measurement or self.primary_input_selector()
-            return ctx.value(selector, previous=True)
+            return ctx.value(self.primary_input_selector(), previous=True)
         if ctx.previous_alert is None:
             return None
         return get_by_path(ctx.previous_alert.payload, self._field())
 
     def _current_field_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
         if self.field is None:
-            selector = self.measurement or self.primary_input_selector()
-            return ctx.value(selector)
+            return ctx.value(self.primary_input_selector())
         return get_by_path(payload, self._field())
 
 
@@ -601,7 +685,7 @@ class ThresholdRule(Rule):
     hysteresis: float = 0.0
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
-        selector = self.measurement or self.primary_input_selector()
+        selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.field is None else []
         if self.field is None and selector is None:
             matches = ctx.inputs()
@@ -612,10 +696,10 @@ class ThresholdRule(Rule):
                     payload=dict(payload),
                     message=_missing_field_message(
                         ctx,
-                        measurement=_selector_label(selector),
+                        input_selector=selector,
                         field_label="value",
                         field_path=_selector_label(selector) or "value",
-                        field_is_measurement_derived=selector is not None,
+                        field_is_input_derived=selector is not None,
                     ),
                 )
             matched_inputs: list[dict[str, Any]] = []
@@ -664,7 +748,7 @@ class ThresholdRule(Rule):
         field_label = self._field_label()
         value = self._current_field_value(payload, ctx)
         result_payload = dict(payload)
-        selector_label = _selector_label(self.measurement or self.primary_input_selector())
+        selector_label = _selector_label(self.primary_input_selector())
 
         if value is None:
             return Evaluation(
@@ -672,10 +756,10 @@ class ThresholdRule(Rule):
                 payload=result_payload,
                 message=_missing_field_message(
                     ctx,
-                    measurement=selector_label,
+                    input_selector=selector,
                     field_label="value",
                     field_path=field_label,
-                    field_is_measurement_derived=self.field is None and selector_label is not None,
+                    field_is_input_derived=self.field is None and selector_label is not None,
                 ),
             )
         if not isinstance(value, (int, float)):
@@ -714,15 +798,14 @@ class ThresholdRule(Rule):
         return f"{source_id}.{variable}.threshold"
 
     def _field(self) -> str:
-        return self.field or self.measurement_value_path() or "value"
+        return self.field or "value"
 
     def _field_label(self) -> str:
-        return _selector_label(self.measurement or self.primary_input_selector()) or self._field()
+        return _selector_label(self.primary_input_selector()) or self._field()
 
     def _current_field_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
         if self.field is None:
-            selector = self.measurement or self.primary_input_selector()
-            return ctx.value(selector)
+            return ctx.value(self.primary_input_selector())
         return get_by_path(payload, self._field())
 
     def _match_threshold(self, value: float) -> Severity | None:
@@ -782,7 +865,7 @@ class RateRule(RangeRule):
     per_seconds: float = 1.0
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
-        selector = self.measurement or self.primary_input_selector()
+        selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.field is None and self.timestamp_field is None and self.previous_field is None and self.previous_timestamp_field is None else []
         if self.field is None and self.timestamp_field is None and self.previous_field is None and self.previous_timestamp_field is None and selector is None:
             matches = ctx.inputs()
@@ -793,10 +876,10 @@ class RateRule(RangeRule):
                     payload=dict(payload),
                     message=_missing_field_message(
                         ctx,
-                        measurement=_selector_label(selector),
+                        input_selector=selector,
                         field_label="value",
                         field_path=_selector_label(selector) or "value",
-                        field_is_measurement_derived=selector is not None,
+                        field_is_input_derived=selector is not None,
                     ),
                 )
             matched_inputs: list[dict[str, Any]] = []
@@ -861,7 +944,7 @@ class RateRule(RangeRule):
         previous_value = self._previous_field_value(ctx)
         previous_timestamp = self._previous_timestamp_value(ctx)
         result_payload = dict(payload)
-        selector_label = _selector_label(self.measurement or self.primary_input_selector())
+        selector_label = _selector_label(self.primary_input_selector())
 
         if current_value is None or current_timestamp is None:
             missing_parts: list[str] = []
@@ -869,20 +952,20 @@ class RateRule(RangeRule):
                 missing_parts.append(
                     _missing_field_message(
                         ctx,
-                        measurement=selector_label,
+                        input_selector=selector,
                         field_label="value",
                         field_path=field_label,
-                        field_is_measurement_derived=self.field is None and selector_label is not None,
+                        field_is_input_derived=self.field is None and selector_label is not None,
                     )
                 )
             if current_timestamp is None:
                 missing_parts.append(
                     _missing_field_message(
                         ctx,
-                        measurement=selector_label,
+                        input_selector=selector,
                         field_label="timestamp",
                         field_path=timestamp_label,
-                        field_is_measurement_derived=self.timestamp_field is None and selector_label is not None,
+                        field_is_input_derived=self.timestamp_field is None and selector_label is not None,
                     )
                 )
             return Evaluation(
@@ -950,10 +1033,10 @@ class RateRule(RangeRule):
         return f"{source_id}.{variable}.rate"
 
     def _timestamp_field(self) -> str:
-        return self.timestamp_field or self.measurement_timestamp_path() or "timestamp"
+        return self.timestamp_field or "timestamp"
 
     def _timestamp_label(self) -> str:
-        selector = self.measurement or self.primary_input_selector()
+        selector = self.primary_input_selector()
         if selector is not None and self.timestamp_field is None:
             return f"{_selector_label(selector)} timestamp"
         return self._timestamp_field()
@@ -966,14 +1049,12 @@ class RateRule(RangeRule):
 
     def _current_timestamp_value(self, payload: dict[str, Any], ctx: RuleContext) -> Any:
         if self.timestamp_field is None:
-            selector = self.measurement or self.primary_input_selector()
-            return ctx.timestamp(selector)
+            return ctx.timestamp(self.primary_input_selector())
         return get_by_path(payload, self._timestamp_field())
 
     def _previous_timestamp_value(self, ctx: RuleContext) -> Any:
         if self.previous_timestamp_field is None and self.timestamp_field is None:
-            selector = self.measurement or self.primary_input_selector()
-            return ctx.timestamp(selector, previous=True)
+            return ctx.timestamp(self.primary_input_selector(), previous=True)
         return get_by_path(ctx.previous, self._previous_timestamp_field())
 
     def _format_rate_message(self, rate: float, rate_per_second: float) -> str:
@@ -995,27 +1076,27 @@ def _coerce_datetime(value: Any) -> datetime:
 def _missing_field_message(
     ctx: RuleContext,
     *,
-    measurement: str | None,
+    input_selector: str | None,
     field_label: str,
     field_path: str,
-    field_is_measurement_derived: bool,
+    field_is_input_derived: bool,
 ) -> str:
-    if not field_is_measurement_derived or not measurement:
+    if not field_is_input_derived or not input_selector:
         return f"{field_path} is missing"
 
-    if ctx.has_measurement(measurement):
-        return f"measurement '{measurement}' is present but {field_label} is missing"
+    if ctx.inputs(input_selector):
+        return f"input '{_selector_label(input_selector) or input_selector}' is present but {field_label} is missing"
 
-    available = ctx.available_measurements()
-    message = f"measurement '{measurement}' is missing"
-    closest = get_close_matches(measurement, available, n=1)
+    available = ctx.names()
+    message = f"input '{_selector_label(input_selector) or input_selector}' is missing"
+    closest = get_close_matches(input_selector, available, n=1)
     if closest:
-        message += f"; closest available measurement: {closest[0]}"
+        message += f"; closest available input: {closest[0]}"
     if available:
         shown = ", ".join(sorted(available)[:5])
         if len(available) > 5:
             shown += ", ..."
-        message += f"; available measurements: {shown}"
+        message += f"; available inputs: {shown}"
     return message
 
 
@@ -1053,7 +1134,7 @@ def _default_rule_source_and_variable(
     fallback_variable: str | None = None,
 ) -> tuple[str | None, str | None]:
     source_id = getattr(cls, "source", None)
-    variable = getattr(cls, "measurement", None) or fallback_variable
+    variable = fallback_variable
     if source_id and variable:
         return source_id, variable
     inputs = normalize_rule_inputs(
@@ -1111,6 +1192,15 @@ def _matches_any_input_selector(input_name: str, selectors: list[str]) -> bool:
     return False
 
 
+def _coerce_severity_value(value: Any) -> Severity:
+    if isinstance(value, Severity):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        return Severity[normalized]
+    raise TypeError("severity must be kanary.INFO/WARN/ERROR/CRITICAL or a matching string")
+
+
 def normalize_rule_inputs(inputs: Any, *, source: str | None = None) -> list[str]:
     if inputs is None or inputs == []:
         if isinstance(source, str) and source:
@@ -1139,6 +1229,11 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
     if not isinstance(rule_id, str) or not rule_id:
         raise ValueError(f"rule '{cls.__name__}' must define non-empty string rule_id")
 
+    if getattr(cls, "measurement", None) is not None:
+        raise ValueError(
+            f"rule '{rule_id}' measurement is no longer supported; use inputs='source_id:input_name'"
+        )
+
     source = getattr(cls, "source", None)
     if source is not None and (not isinstance(source, str) or not source):
         raise ValueError(f"rule '{rule_id}' source must be non-empty string when set")
@@ -1166,7 +1261,6 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
     if not callable(evaluate):
         raise ValueError(f"rule '{rule_id}' must implement evaluate(payload, ctx)")
 
-    _setdefault(cls, "measurement", None)
     _setdefault(cls, "owner", None)
     _setdefault(cls, "description", None)
     _setdefault(cls, "runbook", None)
@@ -1199,10 +1293,6 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
 
     if "normalize_evaluation" not in cls.__dict__:
         cls.normalize_evaluation = Rule.normalize_evaluation
-    if "measurement_value_path" not in cls.__dict__:
-        cls.measurement_value_path = classmethod(Rule.measurement_value_path.__func__)
-    if "measurement_timestamp_path" not in cls.__dict__:
-        cls.measurement_timestamp_path = classmethod(Rule.measurement_timestamp_path.__func__)
     if "default_rule_id" not in cls.__dict__:
         cls.default_rule_id = classmethod(lambda inner_cls: getattr(inner_cls, "rule_id", None))
     return cls

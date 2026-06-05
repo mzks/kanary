@@ -5,6 +5,10 @@ from urllib.request import urlopen
 
 import kanary
 
+# Self-monitoring example that turns failed source/rule/output plugins into
+# ordinary alerts. Transport failures while reading /plugins are treated as
+# source plugin failures and handled by the runtime recovery policy.
+
 
 @kanary.source(source_id="kanary.plugins", interval=30.0)
 class KanaryPluginSource:
@@ -16,15 +20,12 @@ class KanaryPluginSource:
         self.timeout_seconds = float(os.environ.get("KANARY_PLUGIN_SOURCE_TIMEOUT_SECONDS", "5.0"))
 
     def poll(self, ctx):
-        try:
-            with urlopen(self.plugins_url, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode())
-        except Exception as exc:
-            return kanary.SourceResult(status="error", error=str(exc))
+        with urlopen(self.plugins_url, timeout=self.timeout_seconds) as response:
+            payload = json.loads(response.read().decode())
 
         now = datetime.now(timezone.utc)
         plugins = payload.get("plugins", [])
-        measurements = [kanary.Measurement(name="heartbeat", value=1, timestamp=now)]
+        inputs = [("heartbeat", 1, now)]
 
         for plugin_type in ("source", "rule", "output"):
             typed_plugins = [plugin for plugin in plugins if plugin.get("type") == plugin_type]
@@ -37,12 +38,12 @@ class KanaryPluginSource:
                 )
                 for plugin in failed_plugins
             ) if failed_plugins else now
-            measurements.append(
-                kanary.Measurement(
-                    name=f"{plugin_type}.failed_count",
-                    value=len(failed_plugins),
-                    timestamp=latest_failure_at,
-                    metadata={
+            inputs.append(
+                (
+                    f"{plugin_type}.failed_count",
+                    len(failed_plugins),
+                    latest_failure_at,
+                    {
                         "plugin_type": plugin_type,
                         "failed_plugin_ids": [plugin.get("plugin_id") or "unknown" for plugin in failed_plugins],
                         "failed_plugins": [
@@ -58,35 +59,7 @@ class KanaryPluginSource:
                 )
             )
 
-        return kanary.SourceResult(
-            measurements=measurements,
-            status="ok",
-            metadata={"plugins_url": self.plugins_url},
-        )
-
-
-@kanary.rule(
-    rule_id="kanary.plugins.connection.failed",
-    source="kanary.plugins",
-    severity=kanary.ERROR,
-    tags=["kanary", "internal", "plugins"],
-    owner="expert_kanary",
-)
-class KanaryPluginSourceConnectionFailed:
-
-    def evaluate(self, payload, ctx):
-        if payload.get("status") == "ok":
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message=f"plugin API ok: {payload.get('metadata', {}).get('plugins_url', 'unknown')}",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.FIRING,
-            payload=payload,
-            message=payload.get("error") or f"plugin source status={payload.get('status')}",
-        )
-
+        return kanary.inputs(inputs, metadata={"plugins_url": self.plugins_url})
 
 @kanary.rule(
     rule_id="kanary.plugins.heartbeat.stale",
@@ -97,7 +70,6 @@ class KanaryPluginSourceConnectionFailed:
 )
 class KanaryPluginSourceHeartbeatStale(kanary.StaleRule):
     timeout = 2 * kanary.minute
-    suppressed_by = ["kanary.plugins.connection.failed"]
 
 
 def make_plugin_type_failure_rule(
@@ -111,22 +83,13 @@ def make_plugin_type_failure_rule(
     cls_name = f"Kanary{plugin_type.title()}Failure"
 
     def evaluate(self, payload, ctx):
-        count = ctx.value(measurement)
-        result_payload = dict(payload)
-        metadata = ctx.metadata(measurement, default={}) or {}
+        count = ctx.value()
+        metadata = ctx.metadata(default={}) or {}
         failed_plugins = metadata.get("failed_plugins", [])
         if count is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=result_payload,
-                message=f"{measurement} is missing",
-            )
+            return kanary.ok(f"{measurement} is missing")
         if count <= 0:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=result_payload,
-                message=f"no failed {plugin_type} plugins",
-            )
+            return kanary.ok(f"no failed {plugin_type} plugins")
         summaries = []
         for plugin in failed_plugins[:3]:
             plugin_id = plugin.get("plugin_id") or "unknown"
@@ -135,11 +98,10 @@ def make_plugin_type_failure_rule(
         summary_text = "; ".join(summaries) if summaries else "details are in metadata"
         if len(failed_plugins) > 3:
             summary_text += f"; ... (+{len(failed_plugins) - 3} more)"
-        return kanary.Evaluation(
-            state=kanary.AlertState.FIRING,
-            payload=result_payload,
+        return kanary.firing(
             message=f"{count} failed {plugin_type} plugin(s); {summary_text}",
             severity=severity,
+            extra={"failed_plugins": failed_plugins},
         )
 
     cls = type(
@@ -155,7 +117,6 @@ def make_plugin_type_failure_rule(
         severity=severity,
         tags=["kanary", "internal", plugin_type, "failure"],
         owner=owner,
-        suppressed_by=["kanary.plugins.connection.failed"],
     )(cls)
 
 

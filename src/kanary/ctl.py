@@ -107,10 +107,15 @@ def main() -> int:
 
     test_evaluate_parser = subparsers.add_parser("test-evaluate", help="Dry-run one rule against a payload")
     test_evaluate_parser.add_argument("rule_id")
-    payload_group = test_evaluate_parser.add_mutually_exclusive_group(required=True)
+    payload_group = test_evaluate_parser.add_mutually_exclusive_group(required=False)
     payload_group.add_argument("--payload-file")
     payload_group.add_argument("--payload-json")
     payload_group.add_argument("--payload-stdin", action="store_true")
+    payload_group.add_argument(
+        "--print-template",
+        action="store_true",
+        help="Print a canonical inputs-based payload template for this rule and exit",
+    )
     test_evaluate_parser.add_argument("--now")
     test_evaluate_parser.add_argument("--json", action="store_true", help="Print raw JSON")
 
@@ -290,6 +295,12 @@ def main() -> int:
             return 0
 
         if args.command == "test-evaluate":
+            if args.print_template:
+                payload = fetch_json(
+                    f"{args.base_url}/test-evaluate-template/{args.rule_id}",
+                )
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+                return 0
             payload = fetch_json(
                 f"{args.base_url}/test-evaluate/{args.rule_id}",
                 method="POST",
@@ -340,7 +351,10 @@ def load_payload_argument(args: argparse.Namespace) -> dict:
         return _parse_json_object(Path(args.payload_file).read_text(encoding="utf-8"), source=args.payload_file)
     if getattr(args, "payload_stdin", False):
         return _parse_json_object(sys.stdin.read(), source="stdin")
-    raise ValueError("one payload input is required")
+    raise ValueError(
+        "one payload input is required unless --print-template is used "
+        "(choose one of --payload-json, --payload-file, or --payload-stdin)"
+    )
 
 
 def _parse_json_object(raw: str, *, source: str) -> dict:

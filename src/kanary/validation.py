@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from typing import Any
 
 from .constants import AlertState, Severity
@@ -82,6 +83,7 @@ def validate_registries(
         )
         rule_cls.inputs = inputs
         rule_cls.resolved_sources = resolve_rule_sources(inputs, sources.keys())
+        report.extend(_validate_rule_inputs(rule_id, inputs, sources.keys()))
         if not rule_cls.resolved_sources:
             report.warnings.append(f"rule '{rule_id}' currently resolves zero sources")
 
@@ -173,4 +175,45 @@ def _validate_rule_settings(
         return report
     if isinstance(timeout, (int, float)) and timeout <= 0:
         report.errors.append(f"rule '{rule_id}' timeout must be a positive number")
+    return report
+
+
+def _validate_rule_inputs(
+    rule_id: str,
+    inputs: list[str],
+    available_source_ids: Any,
+) -> ValidationReport:
+    report = ValidationReport()
+    seen: set[str] = set()
+    source_ids = list(available_source_ids)
+    for selector in inputs:
+        if selector in seen:
+            report.warnings.append(f"rule '{rule_id}' declares duplicate input selector '{selector}'")
+            continue
+        seen.add(selector)
+
+        if selector in {"*", "*:*"}:
+            report.warnings.append(
+                f"rule '{rule_id}' uses very broad input selector '{selector}'; prefer narrower source:input patterns"
+            )
+            continue
+
+        if ":" not in selector:
+            report.warnings.append(
+                f"rule '{rule_id}' input selector '{selector}' omits source pattern; prefer fully-qualified 'source:input'"
+            )
+            continue
+
+        source_pattern, input_pattern = selector.split(":", 1)
+        if source_pattern == "*":
+            report.warnings.append(
+                f"rule '{rule_id}' input selector '{selector}' matches every source; prefer a narrower source pattern"
+            )
+        if input_pattern == "*":
+            matched_sources = [source_id for source_id in source_ids if fnmatch(source_id, source_pattern or "*")]
+            if len(matched_sources) > 1 or source_pattern == "*":
+                report.warnings.append(
+                    f"rule '{rule_id}' input selector '{selector}' matches all inputs from multiple sources"
+                )
+
     return report

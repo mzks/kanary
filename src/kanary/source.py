@@ -1,5 +1,6 @@
 from collections import deque
-from datetime import datetime, timedelta
+from collections.abc import Iterable, Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .models import Measurement, SourceResult
@@ -105,6 +106,170 @@ class BufferedSource(Source):
         cutoff = latest_timestamp - timedelta(seconds=self.history_window_seconds)
         while history and history[0].timestamp < cutoff:
             history.popleft()
+
+
+def inputs(
+    *items: Any,
+    timestamp: datetime | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> SourceResult:
+    normalized_measurements = _normalize_input_items(items, default_timestamp=timestamp)
+    return SourceResult(
+        measurements=normalized_measurements,
+        metadata=dict(metadata or {}),
+    )
+
+
+def no_data(
+    *,
+    reason: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> SourceResult:
+    return SourceResult(
+        measurements=[],
+        status="empty",
+        reason=reason,
+        metadata=dict(metadata or {}),
+    )
+
+
+def normalize_source_output(
+    result: Any,
+    *,
+    now: datetime | None = None,
+) -> SourceResult:
+    if isinstance(result, SourceResult):
+        return result
+    default_timestamp = now
+    if isinstance(result, Mapping):
+        return SourceResult(
+            measurements=_measurements_from_mapping(result, default_timestamp=default_timestamp),
+        )
+    if isinstance(result, list):
+        return SourceResult(
+            measurements=_measurements_from_iterable(result, default_timestamp=default_timestamp),
+        )
+    if isinstance(result, tuple):
+        return SourceResult(
+            measurements=_normalize_input_items(result, default_timestamp=default_timestamp),
+        )
+    raise TypeError(
+        "source poll() must return kanary.SourceResult, kanary.inputs(...), "
+        "a dict[name, value], or a list/tuple of input tuples"
+    )
+
+
+def _normalize_input_items(
+    items: tuple[Any, ...],
+    *,
+    default_timestamp: datetime | None,
+) -> list[Measurement]:
+    if not items:
+        return []
+    if len(items) >= 2 and isinstance(items[0], str):
+        return [_measurement_from_named_item(tuple(items), default_timestamp=default_timestamp)]
+    if len(items) == 1:
+        first = items[0]
+        if isinstance(first, Mapping):
+            return _measurements_from_mapping(first, default_timestamp=default_timestamp)
+        if isinstance(first, list):
+            return _measurements_from_iterable(first, default_timestamp=default_timestamp)
+        if isinstance(first, tuple):
+            return [_measurement_from_named_item(first, default_timestamp=default_timestamp)]
+    return _measurements_from_iterable(items, default_timestamp=default_timestamp)
+
+
+def _measurements_from_mapping(
+    mapping: Mapping[str, Any],
+    *,
+    default_timestamp: datetime | None,
+) -> list[Measurement]:
+    measurements: list[Measurement] = []
+    for name, raw in mapping.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("inputs mapping keys must be non-empty strings")
+        measurements.append(
+            _measurement_from_mapping_value(name, raw, default_timestamp=default_timestamp)
+        )
+    return measurements
+
+
+def _measurements_from_iterable(
+    items: Iterable[Any],
+    *,
+    default_timestamp: datetime | None,
+) -> list[Measurement]:
+    measurements: list[Measurement] = []
+    for item in items:
+        if isinstance(item, Measurement):
+            measurements.append(item)
+            continue
+        if not isinstance(item, tuple):
+            raise ValueError("inputs iterable items must be tuples or Measurement objects")
+        measurements.append(_measurement_from_named_item(item, default_timestamp=default_timestamp))
+    return measurements
+
+
+def _measurement_from_mapping_value(
+    name: str,
+    raw: Any,
+    *,
+    default_timestamp: datetime | None,
+) -> Measurement:
+    if isinstance(raw, Mapping):
+        value = raw.get("value")
+        timestamp = _resolve_timestamp(raw.get("timestamp"), default_timestamp)
+        metadata = _coerce_item_metadata(raw.get("metadata"))
+        return Measurement(name=name, value=value, timestamp=timestamp, metadata=metadata)
+    if isinstance(raw, tuple):
+        length = len(raw)
+        if length == 0 or length > 3:
+            raise ValueError("mapping tuple values must be (value), (value, timestamp), or (value, timestamp, metadata)")
+        value = raw[0]
+        timestamp = _resolve_timestamp(raw[1] if length >= 2 else None, default_timestamp)
+        metadata = _coerce_item_metadata(raw[2] if length >= 3 else None)
+        return Measurement(name=name, value=value, timestamp=timestamp, metadata=metadata)
+    return Measurement(
+        name=name,
+        value=raw,
+        timestamp=_resolve_timestamp(None, default_timestamp),
+        metadata={},
+    )
+
+
+def _measurement_from_named_item(
+    item: tuple[Any, ...],
+    *,
+    default_timestamp: datetime | None,
+) -> Measurement:
+    if len(item) < 2 or len(item) > 4:
+        raise ValueError("input tuples must be (name, value), (name, value, timestamp), or (name, value, timestamp, metadata)")
+    name = item[0]
+    if not isinstance(name, str) or not name:
+        raise ValueError("input tuple name must be a non-empty string")
+    value = item[1]
+    timestamp = _resolve_timestamp(item[2] if len(item) >= 3 else None, default_timestamp)
+    metadata = _coerce_item_metadata(item[3] if len(item) >= 4 else None)
+    return Measurement(name=name, value=value, timestamp=timestamp, metadata=metadata)
+
+
+def _coerce_item_metadata(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    return {"value": value}
+
+
+def _resolve_timestamp(
+    value: datetime | None,
+    default_timestamp: datetime | None,
+) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(default_timestamp, datetime):
+        return default_timestamp
+    return datetime.now(timezone.utc)
 
 
 def prepare_source_class(cls: type[Any]) -> type[Any]:

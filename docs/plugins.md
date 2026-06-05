@@ -9,7 +9,7 @@ This document first explains the minimum interface a user needs to implement, an
 Required:
 
 - `source_id`
-- `poll(ctx) -> kanary.SourceResult`
+- `poll(ctx)`
 
 Optional:
 
@@ -56,19 +56,42 @@ Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
 
 If all attempts fail, the source stays `FAILED` until the next scheduled poll or an explicit reload.
 
-### SourceResult
+### Returning inputs
 
-`SourceResult` can return multiple `Measurement` objects.
+The usual public API is `kanary.inputs(...)`.
+
+Tuple/list style:
 
 ```python
-kanary.SourceResult(
-    measurements=[
-        kanary.Measurement(name="temperature", value=..., timestamp=...),
-        kanary.Measurement(name="humidity", value=..., timestamp=...),
+return kanary.inputs(
+    [
+        ("temperature", 23.4, observed_at, {"unit": "C"}),
+        ("humidity", 40.0),
     ],
-    status="ok",
+    metadata={"table": "env_samples_wide"},
 )
 ```
+
+Mapping style is also accepted:
+
+```python
+return kanary.inputs(
+    {
+        "temperature": (23.4, observed_at, {"unit": "C"}),
+        "humidity": 40.0,
+    }
+)
+```
+
+Rules:
+
+- `(name, value)`, `(name, value, timestamp)`, and `(name, value, timestamp, metadata)` are accepted
+- if the item timestamp is omitted or `None`, Kanary uses the outer `timestamp=` if present, otherwise the server's current time
+- outer `metadata=` becomes `SourceResult.metadata`
+- `kanary.no_data(reason=..., metadata=...)` means the poll succeeded but produced no usable inputs
+- raising an exception means source/plugin failure and triggers the runtime retry/reinit policy
+
+`kanary.SourceResult(...)` remains available as an advanced form.
 
 ## 2. Rule
 
@@ -80,12 +103,21 @@ Required:
 - `inputs`
 - `severity`
 - `tags`
-- `evaluate(payload, ctx) -> kanary.Evaluation`
+- `evaluate(payload, ctx)`
 
 `source="postgres"` remains available as a shorthand for `inputs="postgres:*"` when you want to depend on everything exposed by one source.
 
+`inputs` may be:
+
+- one exact input, such as `inputs="postgres:temperature"`
+- a list, such as `inputs=["primary:temperature", "secondary:temperature"]`
+- a glob on the source side, the input side, or both, such as `inputs="postgres:*"` or `inputs="kernel_*:temperature"`
+
+Internally, `inputs="postgres:temperature"` is normalized to `["postgres:temperature"]`.
+Kanary resolves `resolved_sources` from these selectors at load/reload time and reevaluates the rule whenever one of those sources updates.
+
 `severity` is required. It acts as the default or fallback severity.
-If you return `kanary.Evaluation(severity=...)`, that specific evaluation overrides the class-level severity.
+If you return `kanary.firing(..., severity=...)` or `kanary.Evaluation(severity=...)`, that specific evaluation overrides the class-level severity.
 
 Optional metadata:
 
@@ -106,8 +138,60 @@ Use input-based accessors:
 - `ctx.prev_value(selector=None)`
 - `ctx.prev_timestamp(selector=None)`
 - `ctx.prev_metadata(selector=None)`
+- `ctx.names(selector=None, previous=False)`
+- `ctx.values(selector=None, previous=False)`
+- `ctx.timestamps(selector=None, previous=False)`
+- `ctx.metadatas(selector=None, previous=False)`
+
+`ctx.inputs()` returns `InputView` items sorted by fully-qualified input name and removes duplicates when multiple selectors match the same input.
+
+Each `InputView` has:
+
+- `name`
+- `source_id`
+- `input_name`
+- `value`
+- `timestamp`
+- `metadata`
 
 For a single resolved input, you can omit the selector and call `ctx.value()` directly. Multi-input rules should usually iterate over `ctx.inputs()`.
+If the selector would match more than one input, `ctx.value()` and the other scalar helpers raise an error instead of guessing.
+For multi-source rules, the `payload` argument still corresponds to the source that triggered the current evaluation. Use `ctx.inputs()` for cross-source data access.
+
+### Returning evaluations
+
+The usual public API is one of:
+
+- `kanary.ok(message, extra=...)`
+- `kanary.firing(message, severity=..., extra=...)`
+- `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)`
+- `kanary.fire_if(...)`, `kanary.warn_if(...)`, `kanary.error_if(...)`, `kanary.critical_if(...)`
+
+Example:
+
+```python
+def evaluate(self, payload, ctx):
+    value = ctx.value()
+    if value is None:
+        return kanary.ok("temperature is missing")
+    return kanary.error_if(
+        value > self.threshold,
+        f"temperature={value} is higher than {self.threshold}",
+    ) or kanary.ok(
+        f"temperature={value} is within limit",
+    )
+```
+
+Accepted shorthand forms:
+
+- `None` means `OK`
+- `True` means `FIRING`, `False` means `OK`
+- `(severity, message)` means `FIRING` with that severity
+- `(None, message)` means `OK`
+- `severity` may be a constant such as `kanary.ERROR` or a string such as `"ERROR"`
+
+If you do not specify a payload explicitly, Kanary automatically inherits the current source payload. Use `extra={...}` to merge additional fields into that payload.
+`kanary.Evaluation(...)` remains available as an advanced form.
 
 ## 3. Output
 
@@ -221,14 +305,17 @@ Available helpers:
 - single severity
 - `lower_inclusive` and `upper_inclusive` define `[]` vs `()`
 - `hysteresis` shifts the clear boundary slightly after a firing condition
+- when multiple inputs are matched, each input is evaluated independently and any out-of-range input fires the rule
 
 #### StaleRule
 
 - checks measurement age via its timestamp
+- when multiple inputs are matched, any stale or timestamp-missing input fires the rule
 
 #### RateRule
 
 - computes a rate from current and previous snapshots and evaluates it as a range
+- when multiple inputs are matched, each input rate is evaluated independently
 
 #### ThresholdRule
 
@@ -236,6 +323,7 @@ Available helpers:
 - `direction = "high" | "low"`
 - `thresholds = [(value, severity), ...]`
 - `hysteresis` adds a return margin when severity drops
+- when multiple inputs are matched, the rule fires if any input matches and uses the highest matched severity
 
 Example:
 
@@ -302,6 +390,25 @@ Example:
 class MailAlert(kanary.MailOutput):
     sender = "kanary@example.com"
     recipients = ["operator@example.com"]
+    subject_prefix = "[KANARY production]"
+
+    def _body(self, event):
+        lines = [
+            f"Rule: {event.rule_id}",
+            f"Occurred At: {event.occurred_at.isoformat()}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
+            f"State: {event.current_state.value}",
+            (
+                "Previous Severity: "
+                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
+            ),
+            f"Severity: {kanary.severity_label(event.current_severity)}",
+            f"Transition: {event.transition.value if event.transition else '-'}",
+            f"Owner: {event.alert.owner or '-'}",
+            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
+            f"Message: {event.alert.message or '-'}",
+        ]
+        return "\n".join(lines)
 ```
 
 ## 5. User-Defined Factories

@@ -7,17 +7,11 @@ def make_constant_source(
     *,
     source_id: str,
     interval: float,
-    measurements: dict[str, float],
+    inputs: dict[str, float],
 ):
     def poll(self, ctx):
         now = datetime.now(timezone.utc)
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(name=name, value=value, timestamp=now)
-                for name, value in measurements.items()
-            ],
-            status="ok",
-        )
+        return kanary.inputs(inputs, timestamp=now)
 
     cls_name = f"{source_id.replace('.', '_').title()}Source"
     cls = type(
@@ -46,14 +40,13 @@ def make_threshold_rule(
         cls_name,
         (kanary.ThresholdRule,),
         {
-            "inputs": [f"{source}:{input_name}"],
+            "inputs": f"{source}:{input_name}",
             "direction": direction,
             "thresholds": list(thresholds),
         },
     )
     return kanary.rule(
         rule_id=rule_id,
-        source=source,
         severity=severity,
         tags=list(tags or []),
         owner=owner,
@@ -63,7 +56,7 @@ def make_threshold_rule(
 FactoryDemoSource = make_constant_source(
     source_id="factory_demo",
     interval=30 * kanary.second,
-    measurements={
+    inputs={
         "temperature": 24.5,
         "humidity": 48.0,
     },

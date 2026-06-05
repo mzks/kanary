@@ -53,16 +53,14 @@ class LocalLoadSource:
     def poll(self, ctx):
         load1, _, _ = os.getloadavg()
         cpu_count = os.cpu_count() or 1
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(
-                    name="load1_per_cpu",
-                    value=load1 / cpu_count,
-                    timestamp=datetime.now(timezone.utc),
-                    metadata={"raw_load1": load1, "cpu_count": cpu_count},
+        return kanary.inputs(
+            {
+                "load1_per_cpu": (
+                    load1 / cpu_count,
+                    datetime.now(timezone.utc),
+                    {"raw_load1": load1, "cpu_count": cpu_count},
                 ),
-            ],
-            status="ok",
+            }
         )
 ```
 
@@ -70,7 +68,7 @@ The minimum source interface is:
 
 - `@kanary.source(source_id="...")`
 - `poll(self, ctx)`
-- return `kanary.SourceResult(...)`
+- usually return `kanary.inputs(...)`
 
 `interval` controls how often the source is polled. If you omit it, the default
 is 60 seconds. If you prefer wall-clock timing, you can use `schedule` with a
@@ -98,21 +96,12 @@ class LocalLoadBusy:
         load = ctx.value()
         threshold = 0.50
         if load is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="load1_per_cpu is missing",
-            )
-        if load > threshold:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=f"load1_per_cpu={load:.2f} is within the normal range",
+            return kanary.ok("load1_per_cpu is missing")
+        return kanary.error_if(
+            load > threshold,
+            f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
+        ) or kanary.ok(
+            f"load1_per_cpu={load:.2f} is within the normal range",
         )
 ```
 
@@ -122,7 +111,7 @@ The minimum rule interface is:
 - `severity`
 - `tags`
 - `evaluate(self, payload, ctx)`
-- return `kanary.Evaluation(...)`
+- usually return `kanary.ok(...)` or `kanary.firing(...)`
 
 High-level accessors such as `ctx.value()` for a single input or `ctx.inputs()` for multiple inputs are usually enough.
 
@@ -200,6 +189,8 @@ class FileOutput:
             ),
             "current_severity": kanary.severity_label(event.current_severity),
             "transition": event.transition.value if event.transition else None,
+            "owner": event.alert.owner,
+            "tags": list(event.alert.tags),
             "message": event.alert.message,
             "occurred_at": event.occurred_at.isoformat(),
         }
@@ -241,6 +232,7 @@ For quick diagnostics, the CLI also supports:
 
 ```bash
 kanaryctl --base-url http://127.0.0.1:8000 test-poll local_load
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --print-template
 kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"inputs":{"local_load:load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIRING --reason "mail output check"
 kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
@@ -280,6 +272,8 @@ Remote alert import uses `origin_node_id` and `mirror_path` to avoid import loop
 For local testing, Mailpit is much easier than a real SMTP server.
 
 ```python
+import json
+
 @kanary.output(output_id="mail", include_tags=["getting-started"])
 class MailAlert(kanary.MailOutput):
     smtp_host = "127.0.0.1"
@@ -287,6 +281,40 @@ class MailAlert(kanary.MailOutput):
     use_starttls = False
     sender = "kanary@example.test"
     recipients = ["operator@example.test"]
+    subject_prefix = "[KANARY getting-started]"
+
+    def _subject(self, event):
+        marker = event.transition.value if event.transition is not None else event.current_state.value
+        return (
+            f"{self.subject_prefix} "
+            f"{marker} {kanary.severity_label(event.effective_severity)} {event.rule_id}"
+        )
+
+    def _body(self, event):
+        lines = [
+            f"Rule: {event.rule_id}",
+            f"Occurred At: {event.occurred_at.isoformat()}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
+            f"State: {event.current_state.value}",
+            (
+                "Previous Severity: "
+                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
+            ),
+            f"Severity: {kanary.severity_label(event.current_severity)}",
+            f"Transition: {event.transition.value if event.transition else '-'}",
+            f"Owner: {event.alert.owner or '-'}",
+            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
+            f"Message: {event.alert.message or '-'}",
+        ]
+        if event.alert.payload:
+            lines.extend(
+                [
+                    "",
+                    "Payload:",
+                    json.dumps(event.alert.payload, ensure_ascii=False, indent=2, sort_keys=True),
+                ]
+            )
+        return "\n".join(lines)
 ```
 
 Start Mailpit with:

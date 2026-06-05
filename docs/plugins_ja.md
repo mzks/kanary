@@ -9,7 +9,7 @@
 必須:
 
 - `source_id`
-- `poll(ctx) -> kanary.SourceResult`
+- `poll(ctx)`
 
 任意:
 
@@ -57,19 +57,42 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 
 それでも失敗した場合は source は `FAILED` のままになり、次の定期 poll または明示 reload まで復帰しません。
 
-### SourceResult
+### input を返す
 
-`SourceResult` では複数の `Measurement` を返せます。
+通常の public API は `kanary.inputs(...)` です。
+
+tuple/list 形式:
 
 ```python
-kanary.SourceResult(
-    measurements=[
-        kanary.Measurement(name="temperature", value=..., timestamp=...),
-        kanary.Measurement(name="humidity", value=..., timestamp=...),
+return kanary.inputs(
+    [
+        ("temperature", 23.4, observed_at, {"unit": "C"}),
+        ("humidity", 40.0),
     ],
-    status="ok",
+    metadata={"table": "env_samples_wide"},
 )
 ```
+
+dict 形式も使えます:
+
+```python
+return kanary.inputs(
+    {
+        "temperature": (23.4, observed_at, {"unit": "C"}),
+        "humidity": 40.0,
+    }
+)
+```
+
+規則:
+
+- `(name, value)`, `(name, value, timestamp)`, `(name, value, timestamp, metadata)` を受け付けます
+- item 側の timestamp が省略または `None` の場合、outer `timestamp=` があればそれを使い、無ければ Kanary server の current time を使います
+- outer `metadata=` は `SourceResult.metadata` になります
+- `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功したが usable な input が 0 件だったことを表します
+- 例外を送出した場合は source/plugin failure として扱われ、runtime の retry/reinit policy に入ります
+
+`kanary.SourceResult(...)` も advanced な書き方として引き続き使えます。
 
 ## 2. Rule
 
@@ -81,9 +104,21 @@ kanary.SourceResult(
 - `inputs`
 - `severity`
 - `tags`
-- `evaluate(payload, ctx) -> kanary.Evaluation`
+- `evaluate(payload, ctx)`
 
 `source="postgres"` も、`inputs="postgres:*"` の短縮として引き続き使えます。1つの source が公開する全 input に依存したい時の sugar です。
+
+`inputs` には次を指定できます。
+
+- 1 個の exact input
+  例: `inputs="postgres:temperature"`
+- list
+  例: `inputs=["primary:temperature", "secondary:temperature"]`
+- source 側、input 側、または両側の glob
+  例: `inputs="postgres:*"`, `inputs="kernel_*:temperature"`
+
+内部では `inputs="postgres:temperature"` も `["postgres:temperature"]` に正規化されます。  
+Kanary は load/reload 時にこれらの selector から `resolved_sources` を計算し、その source のどれかが更新されるたびに rule を再評価します。
 
 任意 metadata:
 
@@ -92,7 +127,7 @@ kanary.SourceResult(
 - `runbook`
 
 `severity` は default / fallback severity として使われます。  
-`kanary.Evaluation(severity=...)` を返すと、その評価だけ上書きできます。
+`kanary.firing(..., severity=...)` または `kanary.Evaluation(severity=...)` を返すと、その評価だけ上書きできます。
 
 ### RuleContext
 
@@ -105,8 +140,60 @@ input を扱う accessor を使います:
 - `ctx.prev_value(selector=None)`
 - `ctx.prev_timestamp(selector=None)`
 - `ctx.prev_metadata(selector=None)`
+- `ctx.names(selector=None, previous=False)`
+- `ctx.values(selector=None, previous=False)`
+- `ctx.timestamps(selector=None, previous=False)`
+- `ctx.metadatas(selector=None, previous=False)`
 
-単一 input に解決される rule では `ctx.value()` のように selector を省略できます。複数 input を扱う rule では通常 `ctx.inputs()` を反復します。
+`ctx.inputs()` は fully-qualified input name の昇順で `InputView` を返し、複数 selector に同じ input が当たっても重複を除去します。
+
+各 `InputView` が持つもの:
+
+- `name`
+- `source_id`
+- `input_name`
+- `value`
+- `timestamp`
+- `metadata`
+
+単一 input に解決される rule では `ctx.value()` のように selector を省略できます。複数 input を扱う rule では通常 `ctx.inputs()` を反復します。  
+selector が複数 input に一致しうる場合、`ctx.value()` などの scalar helper は推測せず error にします。  
+複数 source に依存する rule でも、`payload` 引数は「今回の評価を trigger した source の payload」です。cross-source の参照は `ctx.inputs()` を使ってください。
+
+### 評価結果を返す
+
+通常の public API は次のどれかです。
+
+- `kanary.ok(message, extra=...)`
+- `kanary.firing(message, severity=..., extra=...)`
+- `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)`
+- `kanary.fire_if(...)`, `kanary.warn_if(...)`, `kanary.error_if(...)`, `kanary.critical_if(...)`
+
+例:
+
+```python
+def evaluate(self, payload, ctx):
+    value = ctx.value()
+    if value is None:
+        return kanary.ok("temperature is missing")
+    return kanary.error_if(
+        value > self.threshold,
+        f"temperature={value} is higher than {self.threshold}",
+    ) or kanary.ok(
+        f"temperature={value} is within limit",
+    )
+```
+
+短縮形として次も受け付けます:
+
+- `None` は `OK`
+- `True` は `FIRING`, `False` は `OK`
+- `(severity, message)` はその severity で `FIRING`
+- `(None, message)` は `OK`
+- `severity` には `kanary.ERROR` のような定数だけでなく `"ERROR"` のような文字列も使えます
+
+payload を明示しない場合、Kanary は current source payload を自動で引き継ぎます。追加情報を入れたい時は `extra={...}` を使って merge します。  
+`kanary.Evaluation(...)` も advanced な書き方として引き続き使えます。
 
 ## 3. Output
 
@@ -220,14 +307,17 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 - 単一 severity
 - `lower_inclusive` / `upper_inclusive`
 - `hysteresis`
+- 複数 input に一致した場合は各 input を独立に評価し、どれか 1 つでも範囲外なら `FIRING`
 
 #### StaleRule
 
 - measurement の timestamp の古さを判定
+- 複数 input に一致した場合は、どれか 1 つでも stale または timestamp 欠落なら `FIRING`
 
 #### RateRule
 
 - current / previous から rate を計算して範囲評価
+- 複数 input に一致した場合は各 input の rate を独立に評価
 
 #### ThresholdRule
 
@@ -235,6 +325,7 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 - `direction = "high" | "low"`
 - `thresholds = [(value, severity), ...]`
 - `hysteresis`
+- 複数 input に一致した場合は、どれか 1 つでも threshold に一致すれば `FIRING` し、その中の最高 severity を採用
 
 例:
 
@@ -277,6 +368,34 @@ class Value1Threshold(kanary.ThresholdRule):
 
 - SMTP でメールを送る helper class
 - `smtp_host`, `sender`, `recipients` を class 属性か環境変数で指定する
+
+例:
+
+```python
+@kanary.output(output_id="mail")
+class MailAlert(kanary.MailOutput):
+    sender = "kanary@example.com"
+    recipients = ["operator@example.com"]
+    subject_prefix = "[KANARY production]"
+
+    def _body(self, event):
+        lines = [
+            f"Rule: {event.rule_id}",
+            f"Occurred At: {event.occurred_at.isoformat()}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
+            f"State: {event.current_state.value}",
+            (
+                "Previous Severity: "
+                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
+            ),
+            f"Severity: {kanary.severity_label(event.current_severity)}",
+            f"Transition: {event.transition.value if event.transition else '-'}",
+            f"Owner: {event.alert.owner or '-'}",
+            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
+            f"Message: {event.alert.message or '-'}",
+        ]
+        return "\n".join(lines)
+```
 
 ## 5. user-defined factory
 

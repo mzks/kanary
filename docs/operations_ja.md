@@ -110,6 +110,9 @@ kanary ./plugins --state-db ./var/kanary.db
 - operator action
 - silence
 
+Kanary は新しく作る SQLite state DB に schema version を記録します。  
+この versioning は意図的に最小限で、0.3.x では認識できない旧 legacy DB を自動 migrate しません。古い DB を使う場合は、新しい `--state-db` path を使って作り直してください。
+
 ## Demo と Examples
 
 - [demo/basic_monitoring.py](../demo/basic_monitoring.py)
@@ -117,6 +120,7 @@ kanary ./plugins --state-db ./var/kanary.db
 - [examples/sqlite_monitoring.py](../examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](../examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](../examples/discord_webhook_output.py)
-- [examples/latest_postgres.py](../examples/latest_postgres.py)
+- [examples/postgres_wide_format.py](../examples/postgres_wide_format.py)
+- [examples/postgres_long_format.py](../examples/postgres_long_format.py)
 - [examples/peer_monitoring.py](../examples/peer_monitoring.py)
 - [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)

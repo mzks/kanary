@@ -15,7 +15,7 @@ from .output import Output
 from .registry import get_output_registry, get_rule_registry, get_source_registry
 from .rule import Rule, RuleContext, normalize_rule_inputs, resolve_rule_sources
 from .store import NullStore
-from .source import Source
+from .source import Source, normalize_source_output
 
 logger = logging.getLogger("kanary.engine")
 
@@ -522,8 +522,9 @@ class Engine:
     def test_poll(self, source_id: str) -> dict[str, object]:
         with self._lock:
             source = self.sources[source_id]
-            result = source.poll({"engine": self, "now": self._now_fn()})
-            normalized = self._normalize_source_result(result) if isinstance(result, SourceResult) else dict(result)
+            current_time = self._now_fn()
+            result = source.poll({"engine": self, "now": current_time})
+            normalized = self._normalize_source_result(result, now=current_time)
             return normalized
 
     def test_evaluate(
@@ -571,6 +572,62 @@ class Engine:
                 "matched_outputs": matched_outputs,
                 "would_emit_outputs": would_emit_outputs,
             }
+
+    def test_evaluate_template(self, rule_id: str) -> dict[str, object]:
+        with self._lock:
+            rule = self.rules[rule_id]
+            now = self._now_fn()
+            ctx = RuleContext(
+                now=now,
+                source_states=self.source_states,
+                declared_inputs=tuple(getattr(rule, "inputs", [])),
+                resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
+            )
+
+            template_inputs: dict[str, dict[str, object]] = {}
+            unresolved_selectors: list[str] = []
+            for selector in getattr(rule, "inputs", []):
+                matched_names = ctx.names(selector)
+                if matched_names:
+                    for name in matched_names:
+                        template_inputs.setdefault(
+                            name,
+                            {
+                                "value": None,
+                                "timestamp": now.isoformat(),
+                            },
+                        )
+                    continue
+                if ":" in selector and "*" not in selector:
+                    template_inputs.setdefault(
+                        selector,
+                        {
+                            "value": None,
+                            "timestamp": now.isoformat(),
+                        },
+                    )
+                    continue
+                unresolved_selectors.append(selector)
+
+            result: dict[str, object] = {
+                "rule_id": rule.rule_id,
+                "inputs": list(getattr(rule, "inputs", [])),
+                "resolved_sources": list(getattr(rule, "resolved_sources", [])),
+                "payload": {
+                    "inputs": template_inputs,
+                    "status": "ok",
+                },
+            }
+            if len(template_inputs) == 1:
+                result["single_input_shorthand"] = {
+                    "value": None,
+                    "timestamp": now.isoformat(),
+                    "prev_value": None,
+                    "prev_timestamp": now.isoformat(),
+                }
+            if unresolved_selectors:
+                result["unresolved_selectors"] = unresolved_selectors
+            return result
 
     def test_fire(
         self,
@@ -677,7 +734,7 @@ class Engine:
         status = self._plugin_status("source", source_id)
         try:
             result = source.poll({"engine": self, "now": now})
-            payload = self._normalize_source_result(result)
+            payload = self._normalize_source_result(result, now=now)
             self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
@@ -697,9 +754,10 @@ class Engine:
             status.last_updated_at = now
             raise
 
-    def _normalize_source_result(self, result: SourceResult) -> dict[str, object]:
+    def _normalize_source_result(self, result: object, *, now: datetime | None = None) -> dict[str, object]:
+        normalized_result = normalize_source_output(result, now=now)
         channels: dict[str, dict[str, object]] = {}
-        for measurement in result.measurements:
+        for measurement in normalized_result.measurements:
             channels[measurement.name] = {
                 "value": measurement.value,
                 "timestamp": measurement.timestamp,
@@ -708,12 +766,14 @@ class Engine:
 
         payload: dict[str, object] = {
             "channels": channels,
-            "status": result.status,
+            "status": normalized_result.status,
         }
-        if result.error is not None:
-            payload["error"] = result.error
-        if result.metadata:
-            payload["metadata"] = result.metadata
+        if normalized_result.error is not None:
+            payload["error"] = normalized_result.error
+        if normalized_result.reason is not None:
+            payload["reason"] = normalized_result.reason
+        if normalized_result.metadata:
+            payload["metadata"] = normalized_result.metadata
         return payload
 
     def _normalize_source_input(
@@ -723,7 +783,7 @@ class Engine:
         now: datetime,
     ) -> dict[str, object]:
         status = self._plugin_status("source", source_id)
-        normalized = self._normalize_source_result(payload) if isinstance(payload, SourceResult) else dict(payload)
+        normalized = self._normalize_source_result(payload, now=now)
         self._set_plugin_ready(status)
         status.init_ok = True
         status.last_error = None
@@ -744,7 +804,7 @@ class Engine:
             resolved_sources = list(getattr(rule, "resolved_sources", []))
             if len(resolved_sources) != 1:
                 raise ValueError("SourceResult test payload requires rule with exactly one resolved source")
-            normalized = self._normalize_source_result(payload)
+            normalized = self._normalize_source_result(payload, now=now)
             return self._overlay_test_source_payloads(
                 rule,
                 {
@@ -780,7 +840,10 @@ class Engine:
                 now,
             )
 
-        raise ValueError("test payload must contain 'inputs'")
+        raise ValueError(
+            "test payload must contain 'inputs' or the single-input shorthand fields "
+            "('value', 'timestamp', 'metadata', 'prev_value', 'prev_timestamp', 'prev_metadata')"
+        )
 
     def _overlay_test_source_payloads(
         self,

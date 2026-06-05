@@ -53,7 +53,6 @@ class RuleDirectoryLoader:
         previous_outputs = get_output_registry()
         clear_registries()
         self._generation += 1
-
         try:
             for index, path in enumerate(self._iter_rule_files()):
                 module_name = f"_kanary_rules_{self._generation}_{index}"

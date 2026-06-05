@@ -131,6 +131,9 @@ Stored data:
 
 The history API and the viewer's History panel only retain data when SQLite persistence is enabled.
 
+Kanary stamps newly created SQLite state DBs with a schema version.
+This versioning is intentionally minimal: if you point 0.3.x at an older legacy DB without a recognized schema version, Kanary rejects it and asks you to start with a fresh state DB path.
+
 ## Demo And Examples
 
 - [demo/basic_monitoring.py](../demo/basic_monitoring.py)
@@ -138,6 +141,7 @@ The history API and the viewer's History panel only retain data when SQLite pers
 - [examples/sqlite_monitoring.py](../examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](../examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](../examples/discord_webhook_output.py)
-- [examples/latest_postgres.py](../examples/latest_postgres.py)
+- [examples/postgres_wide_format.py](../examples/postgres_wide_format.py)
+- [examples/postgres_long_format.py](../examples/postgres_long_format.py)
 - [examples/peer_monitoring.py](../examples/peer_monitoring.py)
 - [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)

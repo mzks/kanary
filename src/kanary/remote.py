@@ -121,9 +121,8 @@ class RemoteAlarm(Rule):
     propagate_silence: bool = False
 
     def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
-        measurement = ctx.measurement(self.remote_alarm_id)
-        metadata = measurement.get("metadata", {})
-        if not measurement or not isinstance(metadata, dict):
+        metadata = ctx.metadata(self.remote_alarm_id, default={}) or {}
+        if not ctx.inputs(self.remote_alarm_id) or not isinstance(metadata, dict):
             return Evaluation(
                 state=AlertState.OK,
                 payload=payload,

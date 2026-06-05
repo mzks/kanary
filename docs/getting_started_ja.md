@@ -40,16 +40,14 @@ class LocalLoadSource:
     def poll(self, ctx):
         load1, _, _ = os.getloadavg()
         cpu_count = os.cpu_count() or 1
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(
-                    name="load1_per_cpu",
-                    value=load1 / cpu_count,
-                    timestamp=datetime.now(timezone.utc),
-                    metadata={"raw_load1": load1, "cpu_count": cpu_count},
+        return kanary.inputs(
+            {
+                "load1_per_cpu": (
+                    load1 / cpu_count,
+                    datetime.now(timezone.utc),
+                    {"raw_load1": load1, "cpu_count": cpu_count},
                 ),
-            ],
-            status="ok",
+            }
         )
 ```
 
@@ -57,7 +55,7 @@ class LocalLoadSource:
 
 - `@kanary.source(source_id="...")`
 - `poll(self, ctx)`
-- `kanary.SourceResult(...)` を返すこと
+- 通常は `kanary.inputs(...)` を返すこと
 
 `interval` は source の取得間隔です。省略すると 60 秒です。wall-clock に
 合わせたい場合は、`*/5 * * * *` のような Unix cron 互換 5-field の
@@ -84,21 +82,12 @@ class LocalLoadBusy:
         load = ctx.value()
         threshold = 0.50
         if load is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="load1_per_cpu is missing",
-            )
-        if load > threshold:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=f"load1_per_cpu={load:.2f} is within the normal range",
+            return kanary.ok("load1_per_cpu is missing")
+        return kanary.error_if(
+            load > threshold,
+            f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
+        ) or kanary.ok(
+            f"load1_per_cpu={load:.2f} is within the normal range",
         )
 ```
 
@@ -108,7 +97,7 @@ class LocalLoadBusy:
 - `severity`
 - `tags`
 - `evaluate(self, payload, ctx)`
-- `kanary.Evaluation(...)` を返すこと
+- 通常は `kanary.ok(...)` または `kanary.firing(...)` を返すこと
 
 単一 input なら `ctx.value()`、複数 input なら `ctx.inputs()` を使えます。
 
@@ -171,6 +160,8 @@ class FileOutput:
             ),
             "current_severity": kanary.severity_label(event.current_severity),
             "transition": event.transition.value if event.transition else None,
+            "owner": event.alert.owner,
+            "tags": list(event.alert.tags),
             "message": event.alert.message,
             "occurred_at": event.occurred_at.isoformat(),
         }
@@ -200,6 +191,7 @@ viewer と `kanaryctl` は同じ API を使っています。
 
 ```bash
 kanaryctl --base-url http://127.0.0.1:8000 test-poll local_load
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --print-template
 kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"inputs":{"local_load:load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIRING --reason "mail output check"
 kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
@@ -223,6 +215,52 @@ kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 ### Mail output と Mailpit
 
 `kanary.MailOutput` を使うと SMTP 出力を短く書けます。ローカルで試すなら Mailpit が便利です。
+
+```python
+import json
+
+@kanary.output(output_id="mail", include_tags=["getting-started"])
+class MailAlert(kanary.MailOutput):
+    smtp_host = "127.0.0.1"
+    smtp_port = 1025
+    use_starttls = False
+    sender = "kanary@example.test"
+    recipients = ["operator@example.test"]
+    subject_prefix = "[KANARY getting-started]"
+
+    def _subject(self, event):
+        marker = event.transition.value if event.transition is not None else event.current_state.value
+        return (
+            f"{self.subject_prefix} "
+            f"{marker} {kanary.severity_label(event.effective_severity)} {event.rule_id}"
+        )
+
+    def _body(self, event):
+        lines = [
+            f"Rule: {event.rule_id}",
+            f"Occurred At: {event.occurred_at.isoformat()}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
+            f"State: {event.current_state.value}",
+            (
+                "Previous Severity: "
+                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
+            ),
+            f"Severity: {kanary.severity_label(event.current_severity)}",
+            f"Transition: {event.transition.value if event.transition else '-'}",
+            f"Owner: {event.alert.owner or '-'}",
+            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
+            f"Message: {event.alert.message or '-'}",
+        ]
+        if event.alert.payload:
+            lines.extend(
+                [
+                    "",
+                    "Payload:",
+                    json.dumps(event.alert.payload, ensure_ascii=False, indent=2, sort_keys=True),
+                ]
+            )
+        return "\n".join(lines)
+```
 
 ```bash
 docker run --rm -p 1025:1025 -p 8025:8025 axllent/mailpit
