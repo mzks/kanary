@@ -186,6 +186,7 @@ async function refreshAll() {
     }
 
     renderBuildMeta();
+    renderSidebarPluginStatus();
     renderDashboardPage();
     renderAlertsPage();
     renderSourcesPage();
@@ -198,6 +199,34 @@ async function refreshAll() {
     setRefreshStatus(`Updated ${new Date().toLocaleTimeString()}`, false);
   } catch (error) {
     setRefreshStatus(`Load failed: ${error.message}`, true);
+  }
+}
+
+function renderSidebarPluginStatus() {
+  renderPluginNavBadge("source", "sources");
+  renderPluginNavBadge("rule", "rules");
+  renderPluginNavBadge("output", "outputs");
+}
+
+function renderPluginNavBadge(pluginType, routeName) {
+  const plugins = state.plugins.filter((plugin) => plugin.type === pluginType);
+  const total = plugins.length;
+  const ready = plugins.filter((plugin) => plugin.state === "READY").length;
+  const pending = plugins.filter((plugin) => ["DISCOVERED", "DIRTY", "PENDING_REMOVE"].includes(plugin.state)).length;
+  const countElement = document.getElementById(`nav-${routeName}-count`);
+  const dirtyElement = document.getElementById(`nav-${routeName}-dirty`);
+
+  if (countElement) {
+    countElement.textContent = `${ready}/${total}`;
+    countElement.title = `${ready} ready plugin${ready === 1 ? "" : "s"} / ${total} registered`;
+  }
+
+  if (dirtyElement) {
+    dirtyElement.textContent = String(pending);
+    dirtyElement.classList.toggle("hidden", pending <= 0);
+    dirtyElement.title = pending > 0
+      ? `${pending} plugin${pending === 1 ? "" : "s"} pending apply or unload`
+      : "";
   }
 }
 
@@ -287,7 +316,7 @@ function renderDashboardPage() {
 
   const container = document.getElementById("dashboard-active-alerts");
   if (activeAlerts.length === 0) {
-    container.innerHTML = `<div class="muted">No firing, acknowledged, or silenced alerts. Suppressed dependency fallout, scheduled silences, and plugin health remain available from the navigation.</div>`;
+    container.innerHTML = `<div class="muted">No firing, acknowledged, or silenced alerts. No news is good news. Relax! ;)</div>`;
     return;
   }
 

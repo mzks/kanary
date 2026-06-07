@@ -1,5 +1,6 @@
-import os
+from pathlib import Path
 import sqlite3
+import tomllib
 from datetime import datetime
 
 import kanary
@@ -9,12 +10,20 @@ import kanary
 # retry/reinit logic can recover them. Pair this example with
 # examples/self_plugin_monitoring.py if you want alerts about failed plugins.
 
+CONFIG_PATH = Path(__file__).with_name("sqlite_monitoring_config.toml")
+
+
+def load_config() -> dict:
+    with CONFIG_PATH.open("rb") as handle:
+        return tomllib.load(handle)
+
 
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
 
     def init(self, ctx):
-        db_path = os.environ.get("KANARY_SQLITE_PATH", "dev_data.db")
+        config = load_config()
+        db_path = str(config.get("db_path", "dev_data.db"))
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 

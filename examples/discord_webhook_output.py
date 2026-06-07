@@ -1,9 +1,17 @@
 import json
-import os
+from pathlib import Path
+import tomllib
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import kanary
+
+CONFIG_PATH = Path(__file__).with_name("discord_webhook_output_config.toml")
+
+
+def load_config() -> dict:
+    with CONFIG_PATH.open("rb") as handle:
+        return tomllib.load(handle)
 
 
 @kanary.output(
@@ -15,9 +23,10 @@ import kanary
 class DiscordOutput:
 
     def init(self, ctx):
-        self.webhook_url = os.environ.get("KANARY_DISCORD_WEBHOOK_URL")
+        config = load_config()
+        self.webhook_url = str(config.get("webhook_url") or "").strip()
         if not self.webhook_url:
-            raise RuntimeError("KANARY_DISCORD_WEBHOOK_URL is not set")
+            raise RuntimeError(f"{CONFIG_PATH.name} must define webhook_url")
 
     def emit(self, event, ctx):
         color = alert_color(event.current_state.value, int(event.effective_severity))

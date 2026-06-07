@@ -288,6 +288,8 @@ class EngineRuntime:
             del self._source_threads[source_id]
 
         for source_id in current_source_ids - existing_source_ids:
+            if not self._source_is_initialized(source_id):
+                continue
             stop_event = threading.Event()
             thread = threading.Thread(
                 target=self._source_loop,
@@ -315,6 +317,8 @@ class EngineRuntime:
         for source_id in set(source_ids):
             if source_id not in self.engine.sources or source_id in self._source_threads:
                 continue
+            if not self._source_is_initialized(source_id):
+                continue
             stop_event = threading.Event()
             thread = threading.Thread(
                 target=self._source_loop,
@@ -324,6 +328,12 @@ class EngineRuntime:
             self._source_stop_events[source_id] = stop_event
             self._source_threads[source_id] = thread
             thread.start()
+
+    def _source_is_initialized(self, source_id: str) -> bool:
+        if self.engine is None:
+            return False
+        status = self.engine._plugin_status("source", source_id)
+        return status.init_ok
 
     def _source_loop(self, source_id: str, stop_event: threading.Event) -> None:
         assert self.engine is not None

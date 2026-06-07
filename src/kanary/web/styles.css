@@ -238,11 +238,61 @@ h3 {
 }
 
 .nav-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   border-radius: 13px;
   padding: 11px 13px;
   color: var(--muted);
   font-weight: 600;
   border: 1px solid transparent;
+}
+
+.nav-link-title {
+  min-width: 0;
+}
+
+.nav-link-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.nav-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(76, 105, 135, 0.18);
+  background: rgba(76, 105, 135, 0.08);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.nav-dirty-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff9f4;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 0 0 2px rgba(244, 236, 220, 0.75);
+}
+
+.nav-dirty-badge.hidden {
+  display: none;
 }
 
 .nav-link:hover {
@@ -256,6 +306,12 @@ h3 {
   color: #fef9f2;
   border-color: rgba(34, 29, 20, 0.12);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.nav-link.active .nav-count-badge {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.14);
+  color: #fef9f2;
 }
 
 .page-area {

@@ -17,7 +17,7 @@ from .registry import (
     get_source_registry,
     replace_registries,
 )
-from .validation import ValidationReport, validate_registries
+from .validation import ValidationReport, validate_plugin_files, validate_registries
 
 
 @dataclass(slots=True)
@@ -53,8 +53,9 @@ class RuleDirectoryLoader:
         previous_outputs = get_output_registry()
         clear_registries()
         self._generation += 1
+        files = self._iter_rule_files()
         try:
-            for index, path in enumerate(self._iter_rule_files()):
+            for index, path in enumerate(files):
                 module_name = f"_kanary_rules_{self._generation}_{index}"
                 self._load_file(module_name, path)
 
@@ -73,6 +74,7 @@ class RuleDirectoryLoader:
                 duplicate_source_ids=get_source_duplicates(),
                 duplicate_output_ids=get_output_duplicates(),
             )
+            report.extend(validate_plugin_files(files))
             return snapshot, report
         except Exception:
             replace_registries(

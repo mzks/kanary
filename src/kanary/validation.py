@@ -1,5 +1,7 @@
+import ast
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
+from pathlib import Path
 from typing import Any
 
 from .constants import AlertState, Severity
@@ -34,9 +36,6 @@ def validate_rule_class(rule_id: str, rule_cls: type[Any]) -> ValidationReport:
     tags = getattr(rule_cls, "tags", None)
     if tags == []:
         report.warnings.append(f"rule '{rule_id}' has no tags")
-    owner = getattr(rule_cls, "owner", None)
-    if owner is None or (isinstance(owner, str) and not owner.strip()):
-        report.warnings.append(f"rule '{rule_id}' has no owner")
     return report
 
 
@@ -217,3 +216,44 @@ def _validate_rule_inputs(
                 )
 
     return report
+
+
+def validate_plugin_files(paths: list[Path]) -> ValidationReport:
+    report = ValidationReport()
+    for path in paths:
+        report.extend(_validate_plugin_file(path))
+    return report
+
+
+def _validate_plugin_file(path: Path) -> ValidationReport:
+    report = ValidationReport()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError):
+        return report
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "open":
+            continue
+        if not node.args:
+            continue
+        first_arg = node.args[0]
+        if not isinstance(first_arg, ast.Constant) or not isinstance(first_arg.value, str):
+            continue
+        file_name = first_arg.value
+        if _is_absolute_or_explicit_relative(file_name):
+            continue
+        report.warnings.append(
+            f"file '{path.name}' uses open('{file_name}') with a cwd-relative path; prefer Path(__file__).with_name(...)"
+        )
+
+    return report
+
+
+def _is_absolute_or_explicit_relative(value: str) -> bool:
+    pure = Path(value)
+    if pure.is_absolute():
+        return True
+    return value.startswith("./") or value.startswith("../")

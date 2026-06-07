@@ -51,9 +51,11 @@ Kanary 本体に必須の環境変数はありません。接続情報などは�
 
 - 起動時に 1 個以上の plugin directory を読み込みます
 - `@kanary.source`, `@kanary.rule`, `@kanary.output` が登録対象です
+- `Source.init()` に失敗した source は `FAILED` になりますが、engine / API / viewer 自体は起動を継続します
 - 各 `Source` は `interval` ごとに独立スレッドで poll されます
 - `Rule` は対応する source の最新結果で評価されます
-- plugin directory は継続監視され、変更は自動検知されます
+- plugin directory は継続監視され、Python file の変更は自動検知されます
+- local TOML config のような `.py` 以外の file は監視対象ではないので、変更後は `kanaryctl reload ...` を明示的に実行してください
 - default の `--auto-reload off` では、反映は `kanaryctl reload ...` で明示的に行います
 
 ## Web viewer

@@ -208,7 +208,10 @@ Kanary 本体に必須の環境変数はありません。必要に応じて次�
 - `KANARY_NODE_ID`
   peer export/import に使う node identifier を指定したいときに使います。未指定時は hostname を使います。
 
-実際の監視対象ごとの接続情報は、各 `Source` 実装側で定義します。たとえば PostgreSQL の source は `KANARY_POSTGRES_DSN` を使えます。
+`KANARY_*` という prefix は、基本的には Kanary engine/runtime 側の設定に使います。  
+この repository の example plugin は、接続情報を追加の `KANARY_*` 変数に置く代わりに、plugin script の隣に置いた `*_config.toml`
+のような local file を読む形を主に使います。  
+これらの local config file は auto-reload の監視対象ではないので、変更後は `kanaryctl reload ...` を明示的に実行してください。
 
 ## Demo と Examples
 

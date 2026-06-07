@@ -94,6 +94,10 @@ return kanary.inputs(
 
 `kanary.SourceResult(...)` も advanced な書き方として引き続き使えます。
 
+plugin は、site-specific な設定が必要な場合に自分の directory 内の local file を自由に読んで構いません。  
+よくある形は、plugin script の隣に `*_config.toml` を置き、`Path(__file__).with_name(...)` で読むやり方です。  
+これらの local config file は auto-reload の検知対象ではないため、変更後は `kanaryctl reload ...` を明示的に実行してください。
+
 ## 2. Rule
 
 ### 最小 interface
@@ -215,6 +219,9 @@ payload を明示しない場合、Kanary は current source payload を自動�
 - `minimum_severity`
 - `max_retry`
 - `max_reinit`
+
+この repository の example が主に使う「local plugin config を読む」流儀に対して、組み込み SMTP output は例外です。  
+SMTP output は利便性のために、引き続き `KANARY_SMTP_*` 環境変数を読みます。
 
 `include_tags` と `exclude_tags` は glob pattern を使えます。  
 たとえば `include_tags=["expert_*"]` とすると、`expert_db` や `expert_shift` のような tag に一致します。

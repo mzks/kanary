@@ -6,14 +6,24 @@
 # - compare multiple inputs in one custom rule with ctx.inputs()/ctx.values()
 # - rely on runtime retry/reinit for database failures instead of hiding them
 #   inside ordinary source payloads
-# - set connect_timeout and statement_timeout through environment variables
+# - keep connection settings in a local TOML file next to this plugin
+# - remember that changing the TOML requires an explicit reload because only
+#   Python files are watched automatically
 
-import os
+from pathlib import Path
+import tomllib
 
 import psycopg
 from psycopg.rows import dict_row
 
 import kanary
+
+CONFIG_PATH = Path(__file__).with_name("postgres_long_format_config.toml")
+
+
+def load_config() -> dict:
+    with CONFIG_PATH.open("rb") as handle:
+        return tomllib.load(handle)
 
 INPUT_NAME_MAP = {
     "plant.room_a.temperature_c": "room_a.temperature",
@@ -26,10 +36,14 @@ INPUT_NAME_MAP = {
 class LongEnvironmentSource:
 
     def init(self, ctx):
-        connect_timeout = int(os.environ.get("KANARY_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5"))
-        statement_timeout_ms = int(os.environ.get("KANARY_POSTGRES_STATEMENT_TIMEOUT_MS", "5000"))
+        config = load_config()
+        dsn = str(config.get("dsn") or "").strip()
+        if not dsn:
+            raise RuntimeError(f"{CONFIG_PATH.name} must define dsn")
+        connect_timeout = int(config.get("connect_timeout_seconds", 5))
+        statement_timeout_ms = int(config.get("statement_timeout_ms", 5000))
         self.conn = psycopg.connect(
-            os.environ["KANARY_POSTGRES_DSN"], # DSN format "host=*** port=**** dbname=*** user=*** password=*****"
+            dsn,
             row_factory=dict_row,
             connect_timeout=connect_timeout,
             options=f"-c statement_timeout={statement_timeout_ms}",

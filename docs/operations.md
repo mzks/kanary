@@ -63,9 +63,11 @@ Kanary itself does not require any environment variables. Source-specific connec
 
 - Kanary loads one or more plugin directories at startup.
 - `@kanary.source`, `@kanary.rule`, and `@kanary.output` are the registration points.
+- A source that fails during `init()` is marked `FAILED`, but the engine, API, and viewer still start.
 - Each source is polled in its own thread according to `interval`.
 - Rules are evaluated against the latest result from their source.
-- Plugin directories are watched continuously and file changes are detected automatically.
+- Plugin directories are watched continuously and Python file changes are detected automatically.
+- Non-Python files such as local TOML config files are not watched; after changing them, run an explicit `kanaryctl reload ...`.
 - With the default `--auto-reload off`, discovered changes are applied explicitly with `kanaryctl reload ...`.
 
 ## Web Viewer

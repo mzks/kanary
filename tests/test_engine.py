@@ -1143,12 +1143,11 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
             report.warnings,
             [
                 "rule 'example.warning' has no tags",
-                "rule 'example.warning' has no owner",
                 "rule 'example.warning' has no matching output",
             ],
         )
 
-    def test_inspect_warns_when_owner_missing(self) -> None:
+    def test_inspect_allows_missing_owner(self) -> None:
         with TemporaryDirectory() as tmp:
             rule_file = Path(tmp) / "rules.py"
             rule_file.write_text(
@@ -1177,7 +1176,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
             _, report = loader.inspect()
 
         self.assertEqual(report.errors, [])
-        self.assertIn("rule 'example.rule' has no owner", report.warnings)
+        self.assertNotIn("rule 'example.rule' has no owner", report.warnings)
 
     def test_inspect_warns_for_broad_and_duplicate_input_selectors(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1229,6 +1228,34 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
         )
         self.assertIn(
             "rule 'example.rule' declares duplicate input selector '*:*'",
+            report.warnings,
+        )
+
+    def test_inspect_warns_for_cwd_relative_open_calls(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "rules.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source", interval=5.0)
+                    class ExampleSource:
+                        def init(self, ctx):
+                            with open("config.toml", "rb") as handle:
+                                self.config = handle.read()
+
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(tmp)
+            _, report = loader.inspect()
+
+        self.assertEqual(report.errors, [])
+        self.assertIn(
+            "file 'rules.py' uses open('config.toml') with a cwd-relative path; prefer Path(__file__).with_name(...)",
             report.warnings,
         )
 
@@ -1880,6 +1907,44 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
 
 
 class RuntimeRecoveryTest(unittest.TestCase):
+    def test_runtime_does_not_start_threads_for_sources_with_failed_init(self) -> None:
+        class BrokenSource(kanary.Source):
+            source_id = "broken.source"
+            interval = 60.0
+
+            def init(self, ctx):
+                raise RuntimeError("SC_POSTGRES_DSN is not set")
+
+            def poll(self, ctx):
+                return kanary.SourceResult()
+
+        class HealthySource(kanary.Source):
+            source_id = "healthy.source"
+            interval = 60.0
+
+            def poll(self, ctx):
+                return kanary.SourceResult()
+
+        runtime = EngineRuntime(RuntimeConfig(rule_directories=[], api_port=0))
+        engine = kanary.Engine(
+            source_registry={
+                "broken.source": BrokenSource,
+                "healthy.source": HealthySource,
+            },
+            rule_registry={},
+            output_registry={},
+        )
+        engine.start()
+        runtime.engine = engine
+        try:
+            runtime._sync_source_threads()
+            self.assertNotIn("broken.source", runtime._source_threads)
+            self.assertIn("healthy.source", runtime._source_threads)
+        finally:
+            runtime._stop_source_threads(set(runtime._source_threads))
+            runtime.api._server.server_close()
+            engine.shutdown()
+
     def test_source_poll_failure_recovers_with_retry_then_reinit(self) -> None:
         attempts: list[str] = []
 
@@ -2697,6 +2762,17 @@ class BrokenInitOutput(kanary.Output):
         raise RuntimeError("webhook is not set")
 
 
+class BrokenInitSource(kanary.Source):
+    source_id = "broken-init"
+    interval = 60.0
+
+    def init(self, ctx):
+        raise RuntimeError("SC_POSTGRES_DSN is not set")
+
+    def poll(self, ctx):
+        return kanary.SourceResult()
+
+
 class BrokenEmitOutput(kanary.Output):
     output_id = "broken-emit"
 
@@ -2934,6 +3010,28 @@ class OutputTest(unittest.TestCase):
             self.assertEqual(status.last_error, "webhook is not set")
             self.assertIn("RuntimeError: webhook is not set", status.last_error_detail or "")
             self.assertIsNotNone(status.last_updated_at)
+        finally:
+            engine.shutdown()
+
+    def test_source_init_failure_is_recorded_without_crashing_engine_startup(self) -> None:
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            source_registry={
+                "broken-init": BrokenInitSource,
+                "postgres": SlowPostgresSource,
+            },
+            output_registry={},
+        )
+        engine.start()
+        try:
+            broken_status = engine.plugin_states["source:broken-init"]
+            healthy_status = engine.plugin_states["source:postgres"]
+            self.assertEqual(broken_status.state, "FAILED")
+            self.assertFalse(broken_status.init_ok)
+            self.assertEqual(broken_status.last_error, "SC_POSTGRES_DSN is not set")
+            self.assertIn("RuntimeError: SC_POSTGRES_DSN is not set", broken_status.last_error_detail or "")
+            self.assertEqual(healthy_status.state, "READY")
+            self.assertTrue(healthy_status.init_ok)
         finally:
             engine.shutdown()
 

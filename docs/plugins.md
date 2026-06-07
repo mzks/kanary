@@ -93,6 +93,11 @@ Rules:
 
 `kanary.SourceResult(...)` remains available as an advanced form.
 
+Plugins are also free to read local files from their own directory when they need site-specific configuration.
+A common pattern is to place `*_config.toml` next to the plugin script and read it with `Path(__file__).with_name(...)`.
+Those local config files are not part of auto-reload detection, so after editing them you should run an explicit
+`kanaryctl reload ...`.
+
 ## 2. Rule
 
 ### Minimum Interface
@@ -213,6 +218,9 @@ Optional:
 - `minimum_severity`
 - `max_retry`
 - `max_reinit`
+
+The built-in SMTP output is an exception to the "prefer local plugin config" style used by the examples in this repository.
+It still reads `KANARY_SMTP_*` environment variables for convenience.
 
 `include_tags` and `exclude_tags` support glob patterns.  
 For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.

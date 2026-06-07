@@ -1,6 +1,7 @@
 import json
-import os
+from pathlib import Path
 import time
+import tomllib
 from datetime import datetime
 from urllib.request import urlopen
 
@@ -10,13 +11,21 @@ import kanary
 # ordinary inputs, while transport failures to the peer API remain source
 # plugin failures handled by Kanary's runtime recovery policy.
 
+CONFIG_PATH = Path(__file__).with_name("peer_monitoring_config.toml")
+
+
+def load_config() -> dict:
+    with CONFIG_PATH.open("rb") as handle:
+        return tomllib.load(handle)
+
 
 @kanary.source(source_id="kanary.peer", interval=30.0)
 class KanaryPeerSource:
 
     def init(self, ctx):
-        self.peer_url = os.environ.get("KANARY_PEER_URL", "http://127.0.0.1:8000/peer-status")
-        self.timeout_seconds = float(os.environ.get("KANARY_PEER_TIMEOUT_SECONDS", "5.0"))
+        config = load_config()
+        self.peer_url = str(config.get("peer_url", "http://127.0.0.1:8000/peer-status"))
+        self.timeout_seconds = float(config.get("timeout_seconds", 5.0))
 
     def poll(self, ctx):
         started = time.monotonic()

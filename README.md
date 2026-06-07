@@ -215,7 +215,11 @@ You can use these when needed:
 - `KANARY_NODE_ID`
   Optional node identifier for peer export and import. If unset, Kanary uses the hostname.
 
-Connection details for actual monitoring targets are defined by each `Source` implementation. For example, a PostgreSQL source may use `KANARY_POSTGRES_DSN`.
+The `KANARY_*` prefix is primarily reserved for Kanary engine/runtime settings.
+Example plugins in this repository usually read connection details from local files such as
+`*_config.toml` next to the plugin script instead of relying on additional `KANARY_*` variables.
+Those local config files are not watched for auto-reload, so after editing them you should run an explicit
+`kanaryctl reload ...`.
 
 ## Demo And Examples
 

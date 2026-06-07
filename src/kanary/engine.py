@@ -121,7 +121,10 @@ class Engine:
             }
             self.silences = restored.silences
             for source in self.sources.values():
-                self._initialize_source(source)
+                try:
+                    self._initialize_source(source)
+                except Exception:
+                    logger.exception("source '%s' init failed during startup", source.source_id)
             for output_id, output in self.outputs.items():
                 self._initialize_output(output_id, output)
             self._refresh_rule_plugin_resolution_status()
