@@ -1,5 +1,7 @@
 # Kanary
 
+![image](https://private-user-images.githubusercontent.com/12980386/604350221-b01161f4-f4f6-443f-8fa7-6682e06612c3.png)
+
 Kanary is a Python-based alerting, notification, and reliability monitoring runtime inspired by the historical “canary in a coal mine”
 You define three kinds of plugins in Python:
 
