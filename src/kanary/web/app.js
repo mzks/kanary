@@ -268,15 +268,25 @@ function renderBuildMeta() {
   }
 
   if (parts.length === 0) {
-    element.classList.add("hidden");
-    element.innerHTML = "";
-    return;
+    element.classList.toggle("hidden", !meta.plugin_load_error);
+  } else {
+    element.classList.remove("hidden");
   }
 
-  element.classList.remove("hidden");
+  const loadErrorBlock = meta.plugin_load_error
+    ? `
+      <div class="viewer-build-warning">
+        <strong>Plugin Load Error</strong>
+        <div>${escapeHtml(String(meta.plugin_load_error))}</div>
+      </div>
+    `
+    : "";
   element.innerHTML = `
-    <strong>Project Metadata</strong>
-    <div class="viewer-build-meta-links">${parts.join('<span aria-hidden="true">·</span>')}</div>
+    ${parts.length > 0 ? `
+      <strong>Project Metadata</strong>
+      <div class="viewer-build-meta-links">${parts.join('<span aria-hidden="true">·</span>')}</div>
+    ` : ""}
+    ${loadErrorBlock}
   `;
 }
 

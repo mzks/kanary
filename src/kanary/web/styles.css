@@ -157,6 +157,21 @@ h3 {
   align-items: center;
 }
 
+.viewer-build-warning {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(147, 54, 22, 0.32);
+  background: rgba(147, 54, 22, 0.10);
+  color: var(--danger);
+}
+
+.viewer-build-warning strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--danger);
+}
+
 .topbar-controls {
   display: flex;
   align-items: end;

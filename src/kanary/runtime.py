@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import fnmatch
 import hashlib
 import inspect
@@ -72,9 +72,12 @@ class EngineRuntime:
         self._discovered_metadata: dict[tuple[str, str], PluginMetadata] = {}
         self._loaded_metadata: dict[tuple[str, str], PluginMetadata] = {}
         self._untracked_files: list[str] = []
+        self._last_loader_error: str | None = None
+        self._last_loader_error_at: datetime | None = None
         self.api = ControlAPI(
             engine_getter=lambda: self.engine,
             reload_callback=self.reload_now,
+            meta_getter=self.meta_payload,
             host=config.api_host,
             port=config.api_port,
             enable_default_viewer=config.enable_default_viewer,
@@ -82,6 +85,8 @@ class EngineRuntime:
 
     def start(self) -> None:
         snapshot = self.loader.load(exclude_patterns=self.config.exclude_plugins)
+        self._last_loader_error = None
+        self._last_loader_error_at = None
         self._signature = self.loader.snapshot_signature()
         self._discovered_snapshot = snapshot
         self._discovered_metadata = self._collect_plugin_metadata(snapshot)
@@ -162,9 +167,13 @@ class EngineRuntime:
         new_signature = expected_signature or self.loader.snapshot_signature()
         try:
             snapshot = self.loader.load(exclude_patterns=self.config.exclude_plugins)
-        except Exception:
+        except Exception as exc:
+            self._last_loader_error = str(exc)
+            self._last_loader_error_at = datetime.now(timezone.utc)
             logger.exception("reload failed while loading rule directory")
             return False
+        self._last_loader_error = None
+        self._last_loader_error_at = None
         changed_files = _changed_files(self._signature, new_signature)
         self._signature = new_signature
         if self.engine is None:
@@ -182,6 +191,12 @@ class EngineRuntime:
             len(self._untracked_files),
         )
         return True
+
+    def meta_payload(self) -> dict[str, object]:
+        return {
+            "plugin_load_error": self._last_loader_error,
+            "plugin_load_error_at": self._last_loader_error_at,
+        }
 
     def _apply_reload_request(self, request: dict[str, Any]) -> dict[str, Any]:
         if self.engine is None or self._discovered_snapshot is None:

@@ -997,7 +997,7 @@ class SourceScheduleTest(unittest.TestCase):
                 )
             )
             loader = kanary.RuleDirectoryLoader(tmp)
-            with self.assertRaisesRegex(ValueError, "source 'example.source' schedule is invalid"):
+            with self.assertRaisesRegex(RuntimeError, "source 'example.source' schedule is invalid"):
                 loader.inspect()
 
     def test_initial_schedule_run_allows_current_matching_minute(self) -> None:
@@ -1259,6 +1259,50 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
             report.warnings,
         )
 
+    def test_loader_accepts_single_plugin_file_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "single_plugin.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source", interval=5.0)
+                    class ExampleSource:
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(rule_file)
+            snapshot = loader.load()
+
+        self.assertIn("example.source", snapshot.sources)
+
+    def test_loader_error_includes_plugin_file_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "broken_plugin.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.output(output_id="example.output")
+                    class ExampleOutput:
+                        output_path = Path("kanary_outputs.jsonl")
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(rule_file)
+
+            with self.assertRaises(RuntimeError) as captured:
+                loader.load()
+
+        message = str(captured.exception)
+        self.assertIn("failed to load plugin file", message)
+        self.assertIn("broken_plugin.py", message)
+        self.assertIn("NameError: name 'Path' is not defined", message)
+
     def test_inspect_rejects_legacy_measurement_attribute(self) -> None:
         with TemporaryDirectory() as tmp:
             rule_file = Path(tmp) / "rules.py"
@@ -1287,7 +1331,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
             )
             loader = kanary.RuleDirectoryLoader(tmp)
             with self.assertRaisesRegex(
-                ValueError,
+                RuntimeError,
                 "rule 'example.rule' measurement is no longer supported; use inputs='source_id:input_name'",
             ):
                 loader.inspect()

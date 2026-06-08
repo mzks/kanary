@@ -89,6 +89,10 @@ class RuleDirectoryLoader:
         for rule_directory in self.rule_directories:
             if not rule_directory.exists():
                 continue
+            if rule_directory.is_file():
+                if rule_directory.suffix == ".py":
+                    files.append(rule_directory)
+                continue
             files.extend(
                 path for path in rule_directory.rglob("*.py") if path.is_file()
             )
@@ -101,7 +105,12 @@ class RuleDirectoryLoader:
 
         module = module_from_spec(spec)
         sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to load plugin file '{path}': {type(exc).__name__}: {exc}"
+            ) from exc
         return module
 
 

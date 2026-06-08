@@ -25,12 +25,14 @@ class ControlAPI:
         *,
         engine_getter: Callable[[], Engine | None],
         reload_callback: Callable[[], bool],
+        meta_getter: Callable[[], dict[str, object]] | None = None,
         host: str = "0.0.0.0",
         port: int = 8000,
         enable_default_viewer: bool = True,
     ) -> None:
         self._engine_getter = engine_getter
         self._reload_callback = reload_callback
+        self._meta_getter = meta_getter or (lambda: {})
         self._enable_default_viewer = enable_default_viewer
         self.host = host
         self.port = port
@@ -135,7 +137,7 @@ class ControlAPI:
                     return
 
                 if request_path == "/meta":
-                    self._write_json(HTTPStatus.OK, _installation_metadata(engine_getter()))
+                    self._write_json(HTTPStatus.OK, _installation_metadata(engine_getter(), self.server.control_api._meta_getter()))
                     return
 
                 if request_path == "/peer-status":
@@ -536,7 +538,7 @@ def _resolve_plugin(engine: Engine, plugin_type: str, plugin_id: str) -> object 
     return getattr(engine, "runtime_discovered_plugin_classes", {}).get((plugin_type, plugin_id))
 
 
-def _installation_metadata(engine: Engine | None = None) -> dict[str, object]:
+def _installation_metadata(engine: Engine | None = None, extra: dict[str, object] | None = None) -> dict[str, object]:
     result = {
         "package_name": "kanary",
         "version": None,
@@ -549,6 +551,8 @@ def _installation_metadata(engine: Engine | None = None) -> dict[str, object]:
         "state_db_schema_version": getattr(getattr(engine, "store", None), "schema_version", 0) if engine is not None else 0,
         "state_db_target_schema_version": getattr(getattr(engine, "store", None), "target_schema_version", 1) if engine is not None else 1,
     }
+    if extra:
+        result.update(extra)
     try:
         dist_metadata = importlib_metadata.metadata("kanary")
         result["version"] = importlib_metadata.version("kanary")
