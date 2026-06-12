@@ -2,13 +2,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .constants import AlertState, Severity
+from .constants import AlertState, Severity, TransitionKind
 
 
 @dataclass(slots=True)
 class Evaluation:
     state: AlertState
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] | None = None
+    extra: dict[str, Any] | None = None
     message: str | None = None
     severity: Severity | None = None
 
@@ -24,7 +25,6 @@ class Alert:
     message: str | None = None
     active_since: datetime | None = None
     last_evaluated_at: datetime | None = None
-    resolved_at: datetime | None = None
     acked_at: datetime | None = None
     acked_by: str | None = None
     ack_reason: str | None = None
@@ -83,6 +83,7 @@ class SourceResult:
     measurements: list[Measurement] = field(default_factory=list)
     status: str = "ok"
     error: str | None = None
+    reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -91,8 +92,17 @@ class AlertEvent:
     rule_id: str
     previous_state: AlertState | None
     current_state: AlertState
+    previous_severity: Severity | None
+    current_severity: Severity
+    transition: TransitionKind | None
     alert: Alert
     occurred_at: datetime
+
+    @property
+    def effective_severity(self) -> Severity:
+        if self.current_state == AlertState.OK and self.previous_severity is not None:
+            return self.previous_severity
+        return self.current_severity
 
 
 @dataclass(slots=True)
@@ -100,6 +110,9 @@ class PluginStatus:
     plugin_type: str
     plugin_id: str
     state: str = "created"
+    loaded: bool = True
+    dirty_reason: str | None = None
+    definition_file: str | None = None
     init_ok: bool = False
     last_error: str | None = None
     last_error_detail: str | None = None

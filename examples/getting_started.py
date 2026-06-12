@@ -11,61 +11,44 @@ class LocalLoadSource:
     def poll(self, ctx):
         load1, _, _ = os.getloadavg()
         cpu_count = os.cpu_count() or 1
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(
-                    name="load1_per_cpu",
-                    value=load1 / cpu_count,
-                    timestamp=datetime.now(timezone.utc),
-                    metadata={"raw_load1": load1, "cpu_count": cpu_count},
-                ),
-            ],
-            status="ok",
-        )
+        return kanary.inputs([
+            (
+                "load1_per_cpu",
+                load1 / cpu_count,
+                datetime.now(timezone.utc),
+                {"raw_load1": load1, "cpu_count": cpu_count},
+            ),
+        ])
 
 
 @kanary.rule(
     rule_id="local_load.busy",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusy:
     description = "Alert when the 1-minute load average per CPU is high."
     runbook = "Run `uptime` or `top` on the monitored host."
 
     def evaluate(self, payload, ctx):
-        load = ctx.value("load1_per_cpu")
+        load = ctx.value()
         threshold = 0.70
         if load is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="load1_per_cpu is missing",
-            )
-        if load > threshold:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=f"load1_per_cpu={load:.2f} is within the normal range",
-        )
+            return kanary.ok("load1_per_cpu is missing")
+        return kanary.error_if(
+            load > threshold,
+            f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
+        ) or kanary.ok(f"load1_per_cpu={load:.2f} is within the normal range")
 
 
 @kanary.rule(
     rule_id="local_load.busy_threshold",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusyThreshold(kanary.ThresholdRule):
-    measurement = "load1_per_cpu"
     direction = "high"
     thresholds = [
         (0.70, kanary.WARN),
@@ -86,7 +69,14 @@ class FileOutput:
             "rule_id": event.rule_id,
             "previous_state": event.previous_state.value if event.previous_state else None,
             "current_state": event.current_state.value,
-            "severity": kanary.severity_label(int(event.alert.severity)),
+            "previous_severity": (
+                kanary.severity_label(event.previous_severity)
+                if event.previous_severity is not None else None
+            ),
+            "current_severity": kanary.severity_label(event.current_severity),
+            "transition": event.transition.value if event.transition else None,
+            "owner": event.alert.owner,
+            "tags": list(event.alert.tags),
             "message": event.alert.message,
             "occurred_at": event.occurred_at.isoformat(),
         }
@@ -101,3 +91,37 @@ class MailAlert(kanary.MailOutput):
     use_starttls = False
     sender = "kanary@example.test"
     recipients = ["operator@example.test"]
+    subject_prefix = "[KANARY getting-started]"
+
+    def _subject(self, event):
+        marker = event.transition.value if event.transition is not None else event.current_state.value
+        return (
+            f"{self.subject_prefix} "
+            f"{marker} {kanary.severity_label(event.effective_severity)} {event.rule_id}"
+        )
+
+    def _body(self, event):
+        lines = [
+            f"Rule: {event.rule_id}",
+            f"Occurred At: {event.occurred_at.isoformat()}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
+            f"State: {event.current_state.value}",
+            (
+                "Previous Severity: "
+                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
+            ),
+            f"Severity: {kanary.severity_label(event.current_severity)}",
+            f"Transition: {event.transition.value if event.transition else '-'}",
+            f"Owner: {event.alert.owner or '-'}",
+            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
+            f"Message: {event.alert.message or '-'}",
+        ]
+        if event.alert.payload:
+            lines.extend(
+                [
+                    "",
+                    "Payload:",
+                    json.dumps(event.alert.payload, ensure_ascii=False, indent=2, sort_keys=True),
+                ]
+            )
+        return "\n".join(lines)

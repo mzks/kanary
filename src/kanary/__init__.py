@@ -1,6 +1,6 @@
 from .api import ControlAPI
-from .constants import ACKED, CRITICAL, ERROR, FIRING, INFO, OK, RESOLVED, SILENCED, SUPPRESSED, WARN, severity_label
-from .constants import AlertState, Severity
+from .constants import ACKED, CRITICAL, DEESCALATED, ERROR, ESCALATED, FIRING, INFO, OK, SILENCED, SUPPRESSED, UNACK, WARN, severity_label
+from .constants import AlertState, Severity, TransitionKind
 from .engine import Engine
 from .loader import RuleDirectoryLoader
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
@@ -18,9 +18,29 @@ from .registry import (
     rule,
     source,
 )
-from .rule import RangeRule, RateRule, Rule, RuleContext, StaleRule, ThresholdRule, get_by_path
+from .rule import (
+    InputView,
+    RangeRule,
+    RateRule,
+    Rule,
+    RuleContext,
+    StaleRule,
+    ThresholdRule,
+    critical,
+    critical_if,
+    error,
+    error_if,
+    fire_if,
+    firing,
+    info,
+    info_if,
+    ok,
+    ok_if,
+    warn,
+    warn_if,
+)
 from .runtime import EngineRuntime, RuntimeConfig
-from .source import BufferedSource, Source
+from .source import BufferedSource, Source, inputs, no_data
 from .store import NullStore, SQLiteStore, build_store
 from .units import Hz, MHz, cps, day, format_rate, format_time, hour, kHz, microsecond, millisecond, minute, nanosecond, second
 
@@ -32,15 +52,26 @@ __all__ = [
     "AlertState",
     "ControlAPI",
     "CRITICAL",
+    "critical",
+    "critical_if",
+    "DEESCALATED",
     "ERROR",
+    "error",
+    "error_if",
     "Engine",
     "EngineRuntime",
+    "ESCALATED",
     "Evaluation",
+    "fire_if",
     "FIRING",
     "INFO",
+    "info",
+    "info_if",
     "Measurement",
     "MailOutput",
     "OK",
+    "ok",
+    "ok_if",
     "Output",
     "PluginStatus",
     "BufferedSource",
@@ -51,6 +82,8 @@ __all__ = [
     "build_store",
     "Hz",
     "hour",
+    "InputView",
+    "inputs",
     "kHz",
     "microsecond",
     "millisecond",
@@ -58,11 +91,11 @@ __all__ = [
     "MHz",
     "nanosecond",
     "NullStore",
+    "no_data",
     "RangeRule",
     "RateRule",
     "RemoteAlarm",
     "RemoteKanarySource",
-    "RESOLVED",
     "RuleDirectoryLoader",
     "Rule",
     "RuleContext",
@@ -79,7 +112,12 @@ __all__ = [
     "SUPPRESSED",
     "StaleRule",
     "ThresholdRule",
+    "TransitionKind",
+    "UNACK",
     "WARN",
+    "warn",
+    "warn_if",
+    "firing",
     "clear_registries",
     "get_output_registry",
     "get_rule_registry",
@@ -92,5 +130,4 @@ __all__ = [
     "source",
     "import_remote_alarms",
     "severity_label",
-    "get_by_path",
 ]

@@ -51,9 +51,12 @@ Kanary 本体に必須の環境変数はありません。接続情報などは�
 
 - 起動時に 1 個以上の plugin directory を読み込みます
 - `@kanary.source`, `@kanary.rule`, `@kanary.output` が登録対象です
+- `Source.init()` に失敗した source は `FAILED` になりますが、engine / API / viewer 自体は起動を継続します
 - 各 `Source` は `interval` ごとに独立スレッドで poll されます
 - `Rule` は対応する source の最新結果で評価されます
-- plugin directory は継続監視され、変更時に自動 reload されます
+- plugin directory は継続監視され、Python file の変更は自動検知されます
+- local TOML config のような `.py` 以外の file は監視対象ではないので、変更後は `kanaryctl reload ...` を明示的に実行してください
+- default の `--auto-reload off` では、反映は `kanaryctl reload ...` で明示的に行います
 
 ## Web viewer
 
@@ -84,10 +87,14 @@ kanaryctl health
 kanaryctl alerts
 kanaryctl alerts --json
 kanaryctl history sqlite.value1.stale
+kanaryctl test-poll sqlite
+kanaryctl test-evaluate sqlite.value1.range --payload-file payload.json
+kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
+kanaryctl reload --dirty
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
-kanaryctl reload
+kanaryctl reload --all
 ```
 
 ## 履歴の永続化
@@ -100,9 +107,13 @@ kanary ./plugins --state-db ./var/kanary.db
 
 保存されるもの:
 
-- alert state change
+- alert event。state change と severity transition を含みます
+- output dispatch summary
 - operator action
 - silence
+
+Kanary は新しく作る SQLite state DB に schema version を記録します。  
+この versioning は意図的に最小限で、0.3.x では認識できない旧 legacy DB を自動 migrate しません。古い DB を使う場合は、新しい `--state-db` path を使って作り直してください。
 
 ## Demo と Examples
 
@@ -111,6 +122,7 @@ kanary ./plugins --state-db ./var/kanary.db
 - [examples/sqlite_monitoring.py](../examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](../examples/sqlite_console_output.py)
 - [examples/discord_webhook_output.py](../examples/discord_webhook_output.py)
-- [examples/latest_postgres.py](../examples/latest_postgres.py)
+- [examples/postgres_wide_format.py](../examples/postgres_wide_format.py)
+- [examples/postgres_long_format.py](../examples/postgres_long_format.py)
 - [examples/peer_monitoring.py](../examples/peer_monitoring.py)
 - [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)

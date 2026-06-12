@@ -72,7 +72,8 @@ function bindControls() {
   document.getElementById("silence-window-button").addEventListener("click", submitSilenceWindow);
   document.getElementById("admin-duration-button").addEventListener("click", submitAdminDurationSilence);
   document.getElementById("admin-window-button").addEventListener("click", submitAdminWindowSilence);
-  document.getElementById("admin-reload-button").addEventListener("click", reloadEngine);
+  document.getElementById("admin-reload-dirty-button").addEventListener("click", reloadDirtyPlugins);
+  document.getElementById("admin-reload-all-button").addEventListener("click", reloadAllPlugins);
   document.getElementById("source-modal-close").addEventListener("click", closeSourceModal);
   for (const element of document.querySelectorAll("[data-close-source]")) {
     element.addEventListener("click", closeSourceModal);
@@ -185,6 +186,7 @@ async function refreshAll() {
     }
 
     renderBuildMeta();
+    renderSidebarPluginStatus();
     renderDashboardPage();
     renderAlertsPage();
     renderSourcesPage();
@@ -197,6 +199,34 @@ async function refreshAll() {
     setRefreshStatus(`Updated ${new Date().toLocaleTimeString()}`, false);
   } catch (error) {
     setRefreshStatus(`Load failed: ${error.message}`, true);
+  }
+}
+
+function renderSidebarPluginStatus() {
+  renderPluginNavBadge("source", "sources");
+  renderPluginNavBadge("rule", "rules");
+  renderPluginNavBadge("output", "outputs");
+}
+
+function renderPluginNavBadge(pluginType, routeName) {
+  const plugins = state.plugins.filter((plugin) => plugin.type === pluginType);
+  const total = plugins.length;
+  const ready = plugins.filter((plugin) => plugin.state === "READY").length;
+  const pending = plugins.filter((plugin) => ["DISCOVERED", "DIRTY", "PENDING_REMOVE"].includes(plugin.state)).length;
+  const countElement = document.getElementById(`nav-${routeName}-count`);
+  const dirtyElement = document.getElementById(`nav-${routeName}-dirty`);
+
+  if (countElement) {
+    countElement.textContent = `${ready}/${total}`;
+    countElement.title = `${ready} ready plugin${ready === 1 ? "" : "s"} / ${total} registered`;
+  }
+
+  if (dirtyElement) {
+    dirtyElement.textContent = String(pending);
+    dirtyElement.classList.toggle("hidden", pending <= 0);
+    dirtyElement.title = pending > 0
+      ? `${pending} plugin${pending === 1 ? "" : "s"} pending apply or unload`
+      : "";
   }
 }
 
@@ -238,15 +268,25 @@ function renderBuildMeta() {
   }
 
   if (parts.length === 0) {
-    element.classList.add("hidden");
-    element.innerHTML = "";
-    return;
+    element.classList.toggle("hidden", !meta.plugin_load_error);
+  } else {
+    element.classList.remove("hidden");
   }
 
-  element.classList.remove("hidden");
+  const loadErrorBlock = meta.plugin_load_error
+    ? `
+      <div class="viewer-build-warning">
+        <strong>Plugin Load Error</strong>
+        <div>${escapeHtml(String(meta.plugin_load_error))}</div>
+      </div>
+    `
+    : "";
   element.innerHTML = `
-    <strong>Project Metadata</strong>
-    <div class="viewer-build-meta-links">${parts.join('<span aria-hidden="true">·</span>')}</div>
+    ${parts.length > 0 ? `
+      <strong>Project Metadata</strong>
+      <div class="viewer-build-meta-links">${parts.join('<span aria-hidden="true">·</span>')}</div>
+    ` : ""}
+    ${loadErrorBlock}
   `;
 }
 
@@ -254,7 +294,7 @@ function renderDashboardPage() {
   const activeAlerts = state.alerts.filter((alert) => DASHBOARD_STATES.has(alert.state));
   const counts = countByState(activeAlerts);
   const severityCounts = countBySeverity(activeAlerts);
-  const failedPlugins = state.plugins.filter((plugin) => plugin.state === "failed").length;
+  const failedPlugins = state.plugins.filter((plugin) => plugin.state === "FAILED").length;
   const cards = [
     { label: "FIRING", value: counts.FIRING || 0, note: "Requires attention now", className: "firing" },
     { label: "ACKED", value: counts.ACKED || 0, note: "Someone already responded", className: "acked" },
@@ -286,7 +326,7 @@ function renderDashboardPage() {
 
   const container = document.getElementById("dashboard-active-alerts");
   if (activeAlerts.length === 0) {
-    container.innerHTML = `<div class="muted">No firing, acknowledged, or silenced alerts. Suppressed dependency fallout, scheduled silences, and plugin health remain available from the navigation.</div>`;
+    container.innerHTML = `<div class="muted">No firing, acknowledged, or silenced alerts. No news is good news. Relax! ;)</div>`;
     return;
   }
 
@@ -400,16 +440,24 @@ function renderSourcesPage() {
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
+          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
           <td>${formatPluginError(plugin)}</td>
-          <td class="action-cell"><button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button></td>
+          <td class="action-cell">
+            <div class="plugin-action-group">
+              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button>
+              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button>
+            </div>
+          </td>
         </tr>
       `
     )
     .join("");
 
+  for (const button of tbody.querySelectorAll("[data-apply-plugin]")) {
+    button.addEventListener("click", () => applyPlugin(button.dataset.pluginType, button.dataset.applyPlugin));
+  }
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
   }
@@ -425,17 +473,28 @@ function renderRulesPage() {
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
+          <td class="plugin-primary-cell">
+            <div>${escapeHtml(plugin.plugin_id)}</div>
+            ${formatRulePluginContext(plugin)}
+          </td>
+          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
           <td>${formatPluginError(plugin)}</td>
-          <td class="action-cell"><button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button></td>
+          <td class="action-cell">
+            <div class="plugin-action-group">
+              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button>
+              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button>
+            </div>
+          </td>
         </tr>
       `
     )
     .join("");
 
+  for (const button of tbody.querySelectorAll("[data-apply-plugin]")) {
+    button.addEventListener("click", () => applyPlugin(button.dataset.pluginType, button.dataset.applyPlugin));
+  }
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
   }
@@ -450,7 +509,7 @@ function renderOutputsPage() {
     .filter(matchesOutputFilter)
     .sort(comparePluginHealth);
 
-  const failedOutputs = outputs.filter((plugin) => plugin.state === "failed");
+  const failedOutputs = outputs.filter((plugin) => plugin.state === "FAILED");
   summary.innerHTML = failedOutputs.length > 0
     ? `
       <div class="status-banner status-banner-failed">
@@ -470,18 +529,26 @@ function renderOutputsPage() {
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill state-${escapeHtml(pluginStateToAlertState(plugin.state))}">${escapeHtml(plugin.state)}</span></td>
+          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
           <td>${escapeHtml(String(plugin.run_count))}</td>
           <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
           <td title="${escapeHtml(plugin.last_failure_at || "-")}">${escapeHtml(formatDateTime(plugin.last_failure_at))}</td>
           <td>${escapeHtml(plugin.definition_file || "-")}</td>
           <td>${formatPluginError(plugin)}</td>
-          <td class="action-cell"><button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button></td>
+          <td class="action-cell">
+            <div class="plugin-action-group">
+              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button>
+              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button>
+            </div>
+          </td>
         </tr>
       `
     )
     .join("");
 
+  for (const button of tbody.querySelectorAll("[data-apply-plugin]")) {
+    button.addEventListener("click", () => applyPlugin(button.dataset.pluginType, button.dataset.applyPlugin));
+  }
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
   }
@@ -756,9 +823,23 @@ async function submitAdminWindowSilence() {
   });
 }
 
-async function reloadEngine() {
-  await runPendingAction("reload-engine", ["admin-reload-button"], async () => {
-    await postJson("/reload", {});
+async function reloadDirtyPlugins() {
+  await runPendingAction("reload-dirty", ["admin-reload-dirty-button"], async () => {
+    await postJson("/reload", { dirty: true });
+    await refreshAll();
+  });
+}
+
+async function reloadAllPlugins() {
+  await runPendingAction("reload-all", ["admin-reload-all-button"], async () => {
+    await postJson("/reload", { all: true });
+    await refreshAll();
+  });
+}
+
+async function applyPlugin(pluginType, pluginId) {
+  await runPendingAction(`apply-${pluginType}-${pluginId}`, [], async () => {
+    await postJson("/reload", { [pluginType]: pluginId });
     await refreshAll();
   });
 }
@@ -856,6 +937,35 @@ function matchesSilenceFilter(silence) {
   ], state.silenceFilter);
 }
 
+function formatRulePluginContext(plugin) {
+  if (plugin.type !== "rule") {
+    return "";
+  }
+  const inputs = (plugin.inputs || []).join(", ");
+  const resolvedSources = (plugin.resolved_sources || []).join(", ");
+  if (!inputs && !resolvedSources) {
+    return "";
+  }
+  const parts = [];
+  if (inputs) {
+    parts.push(`
+      <div class="plugin-context-row">
+        <div class="plugin-context-label">Inputs</div>
+        <div class="plugin-context-value">${escapeHtml(inputs)}</div>
+      </div>
+    `);
+  }
+  if (resolvedSources) {
+    parts.push(`
+      <div class="plugin-context-row">
+        <div class="plugin-context-label">Sources</div>
+        <div class="plugin-context-value">${escapeHtml(resolvedSources)}</div>
+      </div>
+    `);
+  }
+  return `<div class="plugin-context-list muted">${parts.join("")}</div>`;
+}
+
 function historyActionLabel(actionType) {
   return {
     ack: "Acknowledged",
@@ -881,7 +991,6 @@ function historyStateClass(stateName) {
     SILENCED: "silenced",
     SUPPRESSED: "suppressed",
     OK: "ok",
-    RESOLVED: "resolved",
   }[stateName] || "neutral";
 }
 
@@ -895,8 +1004,8 @@ function compareAlerts(left, right) {
 }
 
 function comparePluginHealth(left, right) {
-  const leftFailed = left.state === "failed" ? 0 : 1;
-  const rightFailed = right.state === "failed" ? 0 : 1;
+  const leftFailed = left.state === "FAILED" ? 0 : 1;
+  const rightFailed = right.state === "FAILED" ? 0 : 1;
   if (leftFailed !== rightFailed) {
     return leftFailed - rightFailed;
   }
@@ -910,7 +1019,6 @@ function alertPriority(alert) {
     SILENCED: 2,
     SUPPRESSED: 3,
     OK: 4,
-    RESOLVED: 5,
   }[alert.state] ?? 10;
 }
 
@@ -1101,19 +1209,13 @@ function severityLabel(value) {
   return { 10: "INFO", 20: "WARN", 30: "ERROR", 40: "CRITICAL" }[value] || String(value);
 }
 
-function pluginStateToAlertState(stateName) {
-  if (stateName === "failed") return "FIRING";
-  if (stateName === "ready") return "OK";
-  return "SUPPRESSED";
-}
-
 function pluginTableRowClass(plugin) {
-  return plugin.state === "failed" ? "table-row-failed" : "";
+  return plugin.state === "FAILED" ? "table-row-failed" : "";
 }
 
 function formatPluginError(plugin) {
   const errorText = plugin.last_error || "-";
-  if (plugin.state !== "failed") {
+  if (plugin.state !== "FAILED") {
     return escapeHtml(errorText);
   }
   const isExpanded = state.expandedPluginErrors.has(plugin.plugin_id);
@@ -1247,7 +1349,8 @@ function syncActionButtonState() {
     { actionKey: "detail-silence-window", buttonId: "silence-window-button" },
     { actionKey: "admin-silence-duration", buttonId: "admin-duration-button" },
     { actionKey: "admin-silence-window", buttonId: "admin-window-button" },
-    { actionKey: "reload-engine", buttonId: "admin-reload-button" },
+    { actionKey: "reload-dirty", buttonId: "admin-reload-dirty-button" },
+    { actionKey: "reload-all", buttonId: "admin-reload-all-button" },
   ];
   for (const mapping of pendingMappings) {
     const button = document.getElementById(mapping.buttonId);

@@ -21,16 +21,17 @@ Use `--api-host` and `--api-port` to change the bind address.
 - `GET /export-alerts`
   Returns alerts in a stable format intended for remote alert import.
 - `GET /history/{rule_id}`
-  Returns alert events and operator actions for one rule.
+  Returns alert events, output dispatch summaries, and operator actions for one rule.
 - `GET /silences`
   Returns active, scheduled, and cancelled silences.
   The raw API does not add a separate `EXPIRED` state. The Web viewer and `kanaryctl` may derive `EXPIRED` locally for silences whose window has already ended.
 - `GET /plugins`
   Returns current status for sources, rules, and outputs.
+  Plugin rows may be `DISCOVERED`, `DIRTY`, `PENDING_REMOVE`, `READY`, `RELOADING`, or `FAILED`.
 - `GET /viewer`
   Serves the built-in Web viewer.
 - `GET /plugins/{type}/{plugin_id}/source`
-  Returns read-only source code for one loaded plugin.
+  Returns read-only source code for one loaded or discovered plugin.
 
 ### Write Endpoints
 
@@ -45,13 +46,30 @@ Use `--api-host` and `--api-port` to change the bind address.
 - `POST /silences/{silence_id}/cancel`
   Cancels an existing silence.
 - `POST /reload`
-  Triggers a manual reload of the watched rule directories.
+  Applies discovered plugin changes.
+  The JSON body must contain exactly one target:
+  - `{"rule":"postgres.*"}`
+  - `{"source":"postgres*"}`
+  - `{"output":"discord*"}`
+  - `{"dirty":true}`
+  - `{"all":true}`
+  For legacy compatibility, an empty body is still accepted and behaves like `{"all":true}`.
+- `POST /test-poll/{source_id}`
+  Polls one source and returns the normalized source payload.
+- `POST /test-evaluate/{rule_id}`
+  Dry-runs one rule against an explicit payload and returns the normalized evaluation result.
+  This payload uses an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`. Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
+- `GET /test-evaluate-template/{rule_id}`
+  Returns a canonical `inputs` payload template for one rule. Single-input rules may also include a shorthand template.
+- `POST /test-fire/{rule_id}`
+  Sends a synthetic state change through the output pipeline without changing the live alert state.
 
 ## Design Notes
 
 - The Web viewer and `kanaryctl` use the same API.
 - History is only persisted when SQLite storage is enabled.
-- `GET /plugins/{type}/{plugin_id}/source` returns source code only for loaded plugins.
+- `GET /plugins/{type}/{plugin_id}/source` returns source code for loaded and discovered plugins.
+- `dirty` is a practical reload hint, not a complete dependency proof. Kanary tracks plugin definition changes and watched-root static imports, but it does not guarantee detection of every same-file helper change or dynamic dependency.
 - Raw file paths are not accepted.
 - `GET /export-alerts` is the stable endpoint for remote alert import.
 - `GET /export-alerts` includes `origin_node_id`, `origin_rule_id`, and `mirror_path`.
@@ -59,6 +77,8 @@ Use `--api-host` and `--api-port` to change the bind address.
 ## kanaryctl
 
 `kanaryctl` is a thin client for the HTTP API.
+
+In the main `kanary` CLI, `run` is optional. For example, `kanary ./plugins` means the same thing as `kanary run ./plugins`. `lint` must still be written explicitly.
 
 Main subcommands:
 
@@ -70,6 +90,7 @@ Main subcommands:
 - `history`
   Shows stored history for one rule.
   `--since` and `--limit` are applied client-side after fetching the history payload.
+  When SQLite persistence is enabled, history includes output dispatch summaries.
 - `plugins`
   Shows source, rule, and output plugin status.
   `--filter` supports text and glob matching.
@@ -88,7 +109,16 @@ Main subcommands:
 - `unsilence`
   Cancels one silence.
 - `reload`
-  Triggers a manual reload.
+  Applies discovered plugin changes.
+  Use exactly one of `--rule`, `--source`, `--output`, `--dirty`, or `--all`.
+  For legacy compatibility, `POST /reload` with an empty body still behaves like `--all`.
+- `test-poll`
+  Polls one source and prints the normalized payload as JSON.
+- `test-evaluate`
+  Dry-runs one rule against a payload from `--payload-json`, `--payload-file`, or `--payload-stdin`.
+  Use `--print-template` first if you want a canonical inputs-based payload skeleton.
+- `test-fire`
+  Sends a synthetic alert event through the output pipeline and prints the dispatch summary as JSON.
 
 Common argument:
 
@@ -99,8 +129,18 @@ Examples:
 
 ```bash
 kanaryctl alerts
+kanaryctl test-poll sqlite
+kanaryctl test-evaluate sqlite.value1.range --print-template
+kanaryctl test-evaluate sqlite.value1.range --payload-json '{"inputs":{"sqlite:value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
-kanaryctl reload
+kanaryctl reload --rule 'sqlite.*'
+kanaryctl reload --dirty
 ```
+
+Additional HTTP endpoint:
+
+- `GET /test-evaluate-template/{rule_id}`
+  Returns a canonical `inputs` payload template plus, when possible, a single-input shorthand template.

@@ -17,7 +17,7 @@ from .registry import (
     get_source_registry,
     replace_registries,
 )
-from .validation import ValidationReport, validate_registries
+from .validation import ValidationReport, validate_plugin_files, validate_registries
 
 
 @dataclass(slots=True)
@@ -53,9 +53,9 @@ class RuleDirectoryLoader:
         previous_outputs = get_output_registry()
         clear_registries()
         self._generation += 1
-
+        files = self._iter_rule_files()
         try:
-            for index, path in enumerate(self._iter_rule_files()):
+            for index, path in enumerate(files):
                 module_name = f"_kanary_rules_{self._generation}_{index}"
                 self._load_file(module_name, path)
 
@@ -74,6 +74,7 @@ class RuleDirectoryLoader:
                 duplicate_source_ids=get_source_duplicates(),
                 duplicate_output_ids=get_output_duplicates(),
             )
+            report.extend(validate_plugin_files(files))
             return snapshot, report
         except Exception:
             replace_registries(
@@ -88,6 +89,10 @@ class RuleDirectoryLoader:
         for rule_directory in self.rule_directories:
             if not rule_directory.exists():
                 continue
+            if rule_directory.is_file():
+                if rule_directory.suffix == ".py":
+                    files.append(rule_directory)
+                continue
             files.extend(
                 path for path in rule_directory.rglob("*.py") if path.is_file()
             )
@@ -100,7 +105,12 @@ class RuleDirectoryLoader:
 
         module = module_from_spec(spec)
         sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to load plugin file '{path}': {type(exc).__name__}: {exc}"
+            ) from exc
         return module
 
 

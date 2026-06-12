@@ -20,6 +20,8 @@ class RestoredState:
 
 class NullStore:
     enabled = False
+    schema_version = 0
+    target_schema_version = 1
 
     def initialize(self) -> None:
         return None
@@ -31,6 +33,18 @@ class NullStore:
         return RestoredState()
 
     def append_alert_event(self, event: AlertEvent, *, definition_file: str | None, matched_outputs: list[str]) -> None:
+        return None
+
+    def append_output_dispatch(
+        self,
+        *,
+        event: AlertEvent,
+        matched_outputs: list[str],
+        delivered_outputs: list[str],
+        filtered_outputs: list[str],
+        uninitialized_outputs: list[str],
+        failed_outputs: list[str],
+    ) -> None:
         return None
 
     def record_acknowledgement(self, acknowledgement: Acknowledgement) -> None:
@@ -46,6 +60,21 @@ class NullStore:
     ) -> None:
         return None
 
+    def record_rule_removed(
+        self,
+        *,
+        rule_id: str,
+        definition_file: str | None,
+        previous_state: str,
+        previous_severity: int,
+        operator: str,
+        reason: str,
+        created_at: datetime,
+        had_ack: bool,
+        active_silence_ids: list[str],
+    ) -> None:
+        return None
+
     def create_silence(self, silence: Silence) -> None:
         return None
 
@@ -56,17 +85,21 @@ class NullStore:
         return {
             "enabled": False,
             "alert_events": [],
+            "output_dispatches": [],
             "operator_actions": [],
         }
 
 
 class SQLiteStore:
     enabled = True
+    SCHEMA_VERSION = 1
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
+        self.schema_version = 0
+        self.target_schema_version = self.SCHEMA_VERSION
 
     def initialize(self) -> None:
         with self._lock:
@@ -77,79 +110,149 @@ class SQLiteStore:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS alert_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    rule_id TEXT NOT NULL,
-                    previous_state TEXT,
-                    current_state TEXT NOT NULL,
-                    severity INTEGER NOT NULL,
-                    owner TEXT,
-                    message TEXT,
-                    payload_json TEXT NOT NULL,
-                    tags_json TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    definition_file TEXT,
-                    matched_outputs_json TEXT NOT NULL DEFAULT '[]'
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_alert_events_rule_time
-                    ON alert_events (rule_id, occurred_at DESC, id DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_alert_events_time
-                    ON alert_events (occurred_at DESC, id DESC);
-
-                CREATE TABLE IF NOT EXISTS operator_actions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    action_type TEXT NOT NULL,
-                    rule_id TEXT,
-                    silence_id TEXT,
-                    operator TEXT NOT NULL,
-                    reason TEXT,
-                    details_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_operator_actions_rule_time
-                    ON operator_actions (rule_id, created_at DESC, id DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_operator_actions_silence_time
-                    ON operator_actions (silence_id, created_at DESC, id DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_operator_actions_time
-                    ON operator_actions (created_at DESC, id DESC);
-
-                CREATE TABLE IF NOT EXISTS silences (
-                    silence_id TEXT PRIMARY KEY,
-                    created_by TEXT NOT NULL,
-                    reason TEXT,
-                    created_at TEXT NOT NULL,
-                    start_at TEXT NOT NULL,
-                    end_at TEXT NOT NULL,
-                    rule_patterns_json TEXT NOT NULL DEFAULT '[]',
-                    tags_json TEXT NOT NULL DEFAULT '[]',
-                    remote_silence_refs_json TEXT NOT NULL DEFAULT '[]',
-                    cancelled_at TEXT,
-                    cancelled_by TEXT,
-                    cancel_reason TEXT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_silences_window
-                    ON silences (start_at, end_at);
-
-                CREATE INDEX IF NOT EXISTS idx_silences_cancelled
-                    ON silences (cancelled_at);
-                """
-            )
-            try:
-                conn.execute(
-                    "ALTER TABLE silences ADD COLUMN remote_silence_refs_json TEXT NOT NULL DEFAULT '[]'"
-                )
-            except sqlite3.OperationalError:
-                pass
+            self._ensure_schema(conn)
             conn.commit()
             self._conn = conn
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version == 0:
+            if self._has_user_tables(conn):
+                raise RuntimeError(
+                    "unsupported legacy state DB schema (user_version=0); create a fresh state DB for this Kanary version"
+                )
+            self._create_schema_v1(conn)
+            conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
+            self.schema_version = self.SCHEMA_VERSION
+            return
+        if version != self.SCHEMA_VERSION:
+            raise RuntimeError(
+                f"unsupported state DB schema version {version}; expected {self.SCHEMA_VERSION}"
+            )
+        self._assert_schema_v1_tables(conn)
+        self.schema_version = version
+
+    def _has_user_tables(self, conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchone()
+        return bool(row[0])
+
+    def _assert_schema_v1_tables(self, conn: sqlite3.Connection) -> None:
+        required = {
+            "alert_events",
+            "output_dispatches",
+            "operator_actions",
+            "silences",
+        }
+        found = {
+            row["name"]
+            for row in conn.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                """
+            )
+        }
+        missing = sorted(required - found)
+        if missing:
+            raise RuntimeError(
+                f"state DB schema version {self.SCHEMA_VERSION} is incomplete; missing tables: {', '.join(missing)}"
+            )
+
+    def _create_schema_v1(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE alert_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id TEXT NOT NULL,
+                previous_state TEXT,
+                current_state TEXT NOT NULL,
+                previous_severity INTEGER,
+                current_severity INTEGER,
+                transition TEXT,
+                severity INTEGER NOT NULL,
+                owner TEXT,
+                message TEXT,
+                payload_json TEXT NOT NULL,
+                tags_json TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                definition_file TEXT,
+                matched_outputs_json TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE INDEX idx_alert_events_rule_time
+                ON alert_events (rule_id, occurred_at DESC, id DESC);
+
+            CREATE INDEX idx_alert_events_time
+                ON alert_events (occurred_at DESC, id DESC);
+
+            CREATE TABLE output_dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id TEXT NOT NULL,
+                previous_state TEXT,
+                current_state TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                matched_outputs_json TEXT NOT NULL DEFAULT '[]',
+                delivered_outputs_json TEXT NOT NULL DEFAULT '[]',
+                filtered_outputs_json TEXT NOT NULL DEFAULT '[]',
+                uninitialized_outputs_json TEXT NOT NULL DEFAULT '[]',
+                failed_outputs_json TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE INDEX idx_output_dispatches_rule_time
+                ON output_dispatches (rule_id, occurred_at DESC, id DESC);
+
+            CREATE INDEX idx_output_dispatches_time
+                ON output_dispatches (occurred_at DESC, id DESC);
+
+            CREATE TABLE operator_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_type TEXT NOT NULL,
+                rule_id TEXT,
+                silence_id TEXT,
+                operator TEXT NOT NULL,
+                reason TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_operator_actions_rule_time
+                ON operator_actions (rule_id, created_at DESC, id DESC);
+
+            CREATE INDEX idx_operator_actions_silence_time
+                ON operator_actions (silence_id, created_at DESC, id DESC);
+
+            CREATE INDEX idx_operator_actions_time
+                ON operator_actions (created_at DESC, id DESC);
+
+            CREATE TABLE silences (
+                silence_id TEXT PRIMARY KEY,
+                created_by TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL,
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                rule_patterns_json TEXT NOT NULL DEFAULT '[]',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                remote_silence_refs_json TEXT NOT NULL DEFAULT '[]',
+                cancelled_at TEXT,
+                cancelled_by TEXT,
+                cancel_reason TEXT
+            );
+
+            CREATE INDEX idx_silences_window
+                ON silences (start_at, end_at);
+
+            CREATE INDEX idx_silences_cancelled
+                ON silences (cancelled_at);
+            """
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -226,6 +329,9 @@ class SQLiteStore:
                     rule_id,
                     previous_state,
                     current_state,
+                    previous_severity,
+                    current_severity,
+                    transition,
                     severity,
                     owner,
                     message,
@@ -234,12 +340,15 @@ class SQLiteStore:
                     occurred_at,
                     definition_file,
                     matched_outputs_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.rule_id,
                     event.previous_state.value if event.previous_state is not None else None,
                     event.current_state.value,
+                    int(event.previous_severity) if event.previous_severity is not None else None,
+                    int(event.current_severity),
+                    event.transition.value if event.transition is not None else None,
                     int(event.alert.severity),
                     event.alert.owner,
                     event.alert.message,
@@ -248,6 +357,46 @@ class SQLiteStore:
                     event.occurred_at.isoformat(),
                     definition_file,
                     json.dumps(matched_outputs, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
+    def append_output_dispatch(
+        self,
+        *,
+        event: AlertEvent,
+        matched_outputs: list[str],
+        delivered_outputs: list[str],
+        filtered_outputs: list[str],
+        uninitialized_outputs: list[str],
+        failed_outputs: list[str],
+    ) -> None:
+        conn = self._require_conn()
+        with self._lock:
+            conn.execute(
+                """
+                INSERT INTO output_dispatches (
+                    rule_id,
+                    previous_state,
+                    current_state,
+                    occurred_at,
+                    matched_outputs_json,
+                    delivered_outputs_json,
+                    filtered_outputs_json,
+                    uninitialized_outputs_json,
+                    failed_outputs_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.rule_id,
+                    event.previous_state.value if event.previous_state is not None else None,
+                    event.current_state.value,
+                    event.occurred_at.isoformat(),
+                    json.dumps(matched_outputs, ensure_ascii=False),
+                    json.dumps(delivered_outputs, ensure_ascii=False),
+                    json.dumps(filtered_outputs, ensure_ascii=False),
+                    json.dumps(uninitialized_outputs, ensure_ascii=False),
+                    json.dumps(failed_outputs, ensure_ascii=False),
                 ),
             )
             conn.commit()
@@ -278,6 +427,35 @@ class SQLiteStore:
             operator=operator,
             reason=reason,
             details={},
+            created_at=created_at,
+        )
+
+    def record_rule_removed(
+        self,
+        *,
+        rule_id: str,
+        definition_file: str | None,
+        previous_state: str,
+        previous_severity: int,
+        operator: str,
+        reason: str,
+        created_at: datetime,
+        had_ack: bool,
+        active_silence_ids: list[str],
+    ) -> None:
+        self._record_operator_action(
+            action_type="rule_removed",
+            rule_id=rule_id,
+            silence_id=None,
+            operator=operator,
+            reason=reason,
+            details={
+                "definition_file": definition_file,
+                "previous_state": previous_state,
+                "previous_severity": previous_severity,
+                "had_ack": had_ack,
+                "active_silence_ids": list(active_silence_ids),
+            },
             created_at=created_at,
         )
 
@@ -368,6 +546,9 @@ class SQLiteStore:
                     "rule_id": row["rule_id"],
                     "previous_state": row["previous_state"],
                     "current_state": row["current_state"],
+                    "previous_severity": row["previous_severity"],
+                    "current_severity": row["current_severity"] if row["current_severity"] is not None else row["severity"],
+                    "transition": row["transition"],
                     "severity": row["severity"],
                     "owner": row["owner"],
                     "message": row["message"],
@@ -381,6 +562,28 @@ class SQLiteStore:
                     """
                     SELECT *
                     FROM alert_events
+                    WHERE rule_id = ?
+                    ORDER BY occurred_at DESC, id DESC
+                    """,
+                    (rule_id,),
+                )
+            ]
+            output_dispatches = [
+                {
+                    "rule_id": row["rule_id"],
+                    "previous_state": row["previous_state"],
+                    "current_state": row["current_state"],
+                    "occurred_at": row["occurred_at"],
+                    "matched_outputs": json.loads(row["matched_outputs_json"]),
+                    "delivered_outputs": json.loads(row["delivered_outputs_json"]),
+                    "filtered_outputs": json.loads(row["filtered_outputs_json"]),
+                    "uninitialized_outputs": json.loads(row["uninitialized_outputs_json"]),
+                    "failed_outputs": json.loads(row["failed_outputs_json"]),
+                }
+                for row in conn.execute(
+                    """
+                    SELECT *
+                    FROM output_dispatches
                     WHERE rule_id = ?
                     ORDER BY occurred_at DESC, id DESC
                     """,
@@ -423,6 +626,7 @@ class SQLiteStore:
             return {
                 "enabled": True,
                 "alert_events": alert_events,
+                "output_dispatches": output_dispatches,
                 "operator_actions": operator_actions,
             }
 

@@ -2,11 +2,22 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
-import os
-from urllib.error import HTTPError, URLError
+from pathlib import Path
+import tomllib
 from urllib.request import urlopen
 
 import kanary
+
+# Small demo source that reads a fake alarm target over HTTP. HTTP and JSON
+# failures are treated as source plugin failures so the runtime recovery logic
+# can retry/reinit them instead of hiding them as ordinary alert payloads.
+
+CONFIG_PATH = Path(__file__).with_name("fake_alarm_monitoring_config.toml")
+
+
+def load_config() -> dict:
+    with CONFIG_PATH.open("rb") as handle:
+        return tomllib.load(handle)
 
 
 def parse_iso_timestamp(value: str | None) -> datetime:
@@ -20,42 +31,40 @@ def parse_iso_timestamp(value: str | None) -> datetime:
 
 @kanary.source(source_id="fake_alarm", interval=5 * kanary.second)
 class FakeAlarmSource:
-    status_url = os.environ.get("KANARY_FAKE_ALARM_URL", "http://127.0.0.1:18081/status")
-    timeout_seconds = 3.0
+    def init(self, ctx):
+        config = load_config()
+        self.status_url = str(config.get("status_url", "http://127.0.0.1:18081/status"))
+        self.timeout_seconds = float(config.get("timeout_seconds", 3.0))
 
     def poll(self, ctx):
-        try:
-            with urlopen(self.status_url, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (URLError, HTTPError, json.JSONDecodeError) as exc:
-            return kanary.SourceResult(status="error", error=str(exc))
+        with urlopen(self.status_url, timeout=self.timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
 
         active = bool(payload.get("active", False))
         severity = str(payload.get("severity") or "WARN").upper()
         message = str(payload.get("message") or "Manual fake alarm target is idle")
         updated_at = parse_iso_timestamp(payload.get("updated_at"))
 
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(
-                    name="manual_alarm",
-                    value=1 if active else 0,
-                    timestamp=updated_at,
-                    metadata={
+        return kanary.inputs(
+            [
+                (
+                    "manual_alarm",
+                    1 if active else 0,
+                    updated_at,
+                    {
                         "message": message,
                         "severity": severity,
                         "status_url": self.status_url,
                     },
                 ),
             ],
-            status="ok",
             metadata={"status_url": self.status_url},
         )
 
 
 @kanary.rule(
     rule_id="fake_alarm.manual",
-    source="fake_alarm",
+    inputs="fake_alarm:manual_alarm",
     severity=kanary.WARN,
     tags=["fake-alarm", "demo"],
     owner="demo_owner",
@@ -65,37 +74,15 @@ class FakeAlarmRule:
     runbook = "Use curl against the fake alarm target to trigger or clear the alarm."
 
     def evaluate(self, payload, ctx):
-        value = ctx.value("manual_alarm")
-        metadata = ctx.metadata("manual_alarm")
+        value = ctx.value()
+        metadata = ctx.metadata(default={}) or {}
         if value is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="manual_alarm is missing",
-            )
+            return kanary.ok("manual_alarm is missing")
 
         active = bool(value)
         severity_name = str(metadata.get("severity") or "WARN").upper()
-        severity = {
-            "INFO": kanary.INFO,
-            "WARN": kanary.WARN,
-            "ERROR": kanary.ERROR,
-            "CRITICAL": kanary.CRITICAL,
-        }.get(severity_name, kanary.WARN)
         message = str(metadata.get("message") or "Fake alarm target updated")
-
-        if active:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=message,
-                severity=severity,
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=message,
-        )
+        return kanary.fire_if(active, message, severity=severity_name) or kanary.ok(message)
 
 
 @kanary.output(output_id="fake_alarm_console", include_tags=["fake-alarm"])
@@ -107,7 +94,14 @@ class FakeAlarmConsoleOutput:
                     "rule_id": event.rule_id,
                     "previous_state": event.previous_state.value if event.previous_state else None,
                     "current_state": event.current_state.value,
-                    "severity": kanary.severity_label(int(event.alert.severity)),
+                    "previous_severity": (
+                        kanary.severity_label(event.previous_severity)
+                        if event.previous_severity is not None else None
+                    ),
+                    "current_severity": kanary.severity_label(event.current_severity),
+                    "transition": event.transition.value if event.transition else None,
+                    "owner": event.alert.owner,
+                    "tags": list(event.alert.tags),
                     "message": event.alert.message,
                     "occurred_at": event.occurred_at.isoformat(),
                 },

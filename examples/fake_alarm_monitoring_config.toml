@@ -1,0 +1,2 @@
+status_url = "http://127.0.0.1:18081/status"
+timeout_seconds = 3.0

@@ -2,7 +2,7 @@
 
 This guide walks through a small monitoring setup by hand so you can understand the `Source -> Rule -> Output` flow.
 
-The example reads the local machine's load average, fires an alert when it becomes too high, and records state changes to a file.
+The example reads the local machine's load average, fires an alert when it becomes too high, and records alert events to a file.
 
 All code used in this guide is collected in [examples/getting_started.py](../examples/getting_started.py). The easiest way to start is to place that file in a watched directory, run it, and then edit it step by step.
 
@@ -53,24 +53,21 @@ class LocalLoadSource:
     def poll(self, ctx):
         load1, _, _ = os.getloadavg()
         cpu_count = os.cpu_count() or 1
-        return kanary.SourceResult(
-            measurements=[
-                kanary.Measurement(
-                    name="load1_per_cpu",
-                    value=load1 / cpu_count,
-                    timestamp=datetime.now(timezone.utc),
-                    metadata={"raw_load1": load1, "cpu_count": cpu_count},
-                ),
-            ],
-            status="ok",
-        )
+        return kanary.inputs([
+            (
+                "load1_per_cpu",
+                load1 / cpu_count,
+                datetime.now(timezone.utc),
+                {"raw_load1": load1, "cpu_count": cpu_count},
+            ),
+        ])
 ```
 
 The minimum source interface is:
 
 - `@kanary.source(source_id="...")`
 - `poll(self, ctx)`
-- return `kanary.SourceResult(...)`
+- usually return `kanary.inputs(...)`
 
 `interval` controls how often the source is polled. If you omit it, the default
 is 60 seconds. If you prefer wall-clock timing, you can use `schedule` with a
@@ -85,46 +82,37 @@ Add a rule that fires when the load becomes high.
 ```python
 @kanary.rule(
     rule_id="local_load.busy",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusy:
     description = "Alert when the 1-minute load average per CPU is high."
     runbook = "Run `uptime` or `top` on the monitored host."
 
     def evaluate(self, payload, ctx):
-        load = ctx.value("load1_per_cpu")
+        load = ctx.value()
         threshold = 0.50
         if load is None:
-            return kanary.Evaluation(
-                state=kanary.AlertState.OK,
-                payload=payload,
-                message="load1_per_cpu is missing",
-            )
-        if load > threshold:
-            return kanary.Evaluation(
-                state=kanary.AlertState.FIRING,
-                payload=payload,
-                message=f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
-            )
-        return kanary.Evaluation(
-            state=kanary.AlertState.OK,
-            payload=payload,
-            message=f"load1_per_cpu={load:.2f} is within the normal range",
+            return kanary.ok("load1_per_cpu is missing")
+        return kanary.error_if(
+            load > threshold,
+            f"load1_per_cpu={load:.2f} is over {threshold:.2f}",
+        ) or kanary.ok(
+            f"load1_per_cpu={load:.2f} is within the normal range",
         )
 ```
 
 The minimum rule interface is:
 
-- `@kanary.rule(rule_id="...", source="...")`
+- `@kanary.rule(rule_id="...", inputs="source_id:input_name")`
 - `severity`
 - `tags`
 - `evaluate(self, payload, ctx)`
-- return `kanary.Evaluation(...)`
+- usually return `kanary.ok(...)` or `kanary.firing(...)`
+- `owner`, `description`, and `runbook` are optional metadata
 
-High-level accessors such as `ctx.value("load1_per_cpu")` are usually enough.
+High-level accessors such as `ctx.value()` for a single input or `ctx.inputs()` for multiple inputs are usually enough.
 
 ## 5. Use Rule Helper Classes
 
@@ -134,13 +122,11 @@ For example, here is a `ThresholdRule`:
 ```python
 @kanary.rule(
     rule_id="local_load.busy_threshold",
-    source="local_load",
+    inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusyThreshold(kanary.ThresholdRule):
-    measurement = "load1_per_cpu"
     direction = "high"
     thresholds = [
         (0.50, kanary.WARN),
@@ -152,7 +138,7 @@ With helper classes, you usually do not write `evaluate()`. Instead, you configu
 
 For `ThresholdRule`, you typically edit:
 
-- `measurement`
+- `inputs`
 - `direction`
 - `thresholds`
 - `hysteresis` when you want to reduce chattering near a boundary
@@ -160,11 +146,11 @@ For `ThresholdRule`, you typically edit:
 Other common helper-class settings:
 
 - `StaleRule`
-  - `measurement`, `timeout`
+  - `inputs`, `timeout`
 - `RangeRule`
-  - `measurement`, `low`, `high`, `hysteresis`
+  - `inputs`, `low`, `high`, `hysteresis`
 - `RateRule`
-  - `measurement`, `per_seconds`, `high`, `low`
+  - `inputs`, `per_seconds`, `high`, `low`
 
 Use a custom rule only when a helper class no longer matches the monitoring logic cleanly.
 
@@ -172,7 +158,7 @@ If your environment is safe, you can test the alarm with the such command `opens
 
 ## 6. Write An Output
 
-Outputs define where state changes go.
+Outputs define where alert events go.
 For a first example, a JSONL file is easy to understand.
 
 ```python
@@ -195,7 +181,14 @@ class FileOutput:
             "rule_id": event.rule_id,
             "previous_state": event.previous_state.value if event.previous_state else None,
             "current_state": event.current_state.value,
-            "severity": kanary.severity_label(int(event.alert.severity)),
+            "previous_severity": (
+                kanary.severity_label(event.previous_severity)
+                if event.previous_severity is not None else None
+            ),
+            "current_severity": kanary.severity_label(event.current_severity),
+            "transition": event.transition.value if event.transition else None,
+            "owner": event.alert.owner,
+            "tags": list(event.alert.tags),
             "message": event.alert.message,
             "occurred_at": event.occurred_at.isoformat(),
         }
@@ -207,16 +200,23 @@ This output only records alerts tagged with `getting-started`.
 
 ## 7. What Happens Next
 
-Once you save the file, Kanary reloads the plugin definitions automatically.
+Once you save the file, Kanary detects the file change and marks the plugin as dirty.
+With the default `--auto-reload off`, apply the change explicitly:
+
+```bash
+kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
+```
+
+If you start Kanary with `--auto-reload dirty` or `--auto-reload all`, the runtime applies changes automatically.
 In the viewer, you should see:
 
 - a `local_load` source on the Plugins page
 - `local_load.busy` and `local_load.busy_threshold` on the Alerts page
 - a `file` output on the Outputs page
 
-Each state change appends one line to `getting_started_alerts.jsonl`.
+Each alert event appends one line to `getting_started_alerts.jsonl`.
 
-Changes to plugin files reload automatically. Changes to `src/kanary` require a process restart.
+Changes to plugin files are detected automatically. Applying them is controlled by `--auto-reload` or by explicit `kanaryctl reload ...` commands. Changes to `src/kanary` still require a process restart.
 
 You can also inspect alerts with the CLI:
 
@@ -225,6 +225,18 @@ kanaryctl --base-url http://127.0.0.1:8000 alerts
 ```
 
 The Web viewer and `kanaryctl` use the same API.
+
+For quick diagnostics, the CLI also supports:
+
+```bash
+kanaryctl --base-url http://127.0.0.1:8000 test-poll local_load
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --print-template
+kanaryctl --base-url http://127.0.0.1:8000 test-evaluate local_load.busy --payload-json '{"inputs":{"local_load:load1_per_cpu":{"value":0.95,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
+kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIRING --reason "mail output check"
+kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
+```
+
+`test-evaluate` accepts an `inputs` map keyed by fully-qualified input names. Normal rule code should continue to use `ctx.value()`, `ctx.inputs()`, and related accessors.
 
 ## 8. More Features
 
@@ -258,6 +270,8 @@ Remote alert import uses `origin_node_id` and `mirror_path` to avoid import loop
 For local testing, Mailpit is much easier than a real SMTP server.
 
 ```python
+import json
+
 @kanary.output(output_id="mail", include_tags=["getting-started"])
 class MailAlert(kanary.MailOutput):
     smtp_host = "127.0.0.1"
@@ -265,6 +279,40 @@ class MailAlert(kanary.MailOutput):
     use_starttls = False
     sender = "kanary@example.test"
     recipients = ["operator@example.test"]
+    subject_prefix = "[KANARY getting-started]"
+
+    def _subject(self, event):
+        marker = event.transition.value if event.transition is not None else event.current_state.value
+        return (
+            f"{self.subject_prefix} "
+            f"{marker} {kanary.severity_label(event.effective_severity)} {event.rule_id}"
+        )
+
+    def _body(self, event):
+        lines = [
+            f"Rule: {event.rule_id}",
+            f"Occurred At: {event.occurred_at.isoformat()}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
+            f"State: {event.current_state.value}",
+            (
+                "Previous Severity: "
+                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
+            ),
+            f"Severity: {kanary.severity_label(event.current_severity)}",
+            f"Transition: {event.transition.value if event.transition else '-'}",
+            f"Owner: {event.alert.owner or '-'}",
+            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
+            f"Message: {event.alert.message or '-'}",
+        ]
+        if event.alert.payload:
+            lines.extend(
+                [
+                    "",
+                    "Payload:",
+                    json.dumps(event.alert.payload, ensure_ascii=False, indent=2, sort_keys=True),
+                ]
+            )
+        return "\n".join(lines)
 ```
 
 Start Mailpit with:

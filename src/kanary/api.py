@@ -13,6 +13,7 @@ from typing import Callable
 from urllib.parse import unquote
 
 from .engine import Engine
+from .constants import AlertState
 
 WEB_ROOT = Path(__file__).with_name("web")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,12 +25,14 @@ class ControlAPI:
         *,
         engine_getter: Callable[[], Engine | None],
         reload_callback: Callable[[], bool],
+        meta_getter: Callable[[], dict[str, object]] | None = None,
         host: str = "0.0.0.0",
         port: int = 8000,
         enable_default_viewer: bool = True,
     ) -> None:
         self._engine_getter = engine_getter
         self._reload_callback = reload_callback
+        self._meta_getter = meta_getter or (lambda: {})
         self._enable_default_viewer = enable_default_viewer
         self.host = host
         self.port = port
@@ -96,6 +99,23 @@ class ControlAPI:
                     self._write_json(HTTPStatus.OK, payload)
                     return
 
+                if request_path.startswith("/test-evaluate-template/"):
+                    engine = engine_getter()
+                    if engine is None:
+                        self._write_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"status": "starting"},
+                        )
+                        return
+                    rule_id = unquote(request_path[len("/test-evaluate-template/") :]).strip("/")
+                    try:
+                        payload = engine.test_evaluate_template(rule_id)
+                    except KeyError:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "rule not found"})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+
                 if request_path == "/health":
                     engine = engine_getter()
                     if engine is None:
@@ -117,7 +137,7 @@ class ControlAPI:
                     return
 
                 if request_path == "/meta":
-                    self._write_json(HTTPStatus.OK, _installation_metadata())
+                    self._write_json(HTTPStatus.OK, _installation_metadata(engine_getter(), self.server.control_api._meta_getter()))
                     return
 
                 if request_path == "/peer-status":
@@ -229,7 +249,9 @@ class ControlAPI:
                                 "type": status.plugin_type,
                                 "plugin_id": status.plugin_id,
                                 "state": status.state,
+                                "loaded": status.loaded,
                                 "init_ok": status.init_ok,
+                                "dirty_reason": status.dirty_reason,
                                 "last_error": status.last_error,
                                 "last_error_detail": status.last_error_detail,
                                 "run_count": status.run_count,
@@ -237,7 +259,9 @@ class ControlAPI:
                                 "last_success_at": status.last_success_at,
                                 "last_failure_at": status.last_failure_at,
                                 "last_updated_at": status.last_updated_at,
-                                "definition_file": getattr(plugin.__class__, "__kanary_definition_file__", None) if plugin is not None else None,
+                                "definition_file": status.definition_file or (getattr(plugin.__class__, "__kanary_definition_file__", None) if plugin is not None and not isinstance(plugin, type) else getattr(plugin, "__kanary_definition_file__", None) if plugin is not None else None),
+                                "inputs": list(getattr(plugin, "inputs", [])) if status.plugin_type == "rule" and plugin is not None else [],
+                                "resolved_sources": list(getattr(plugin, "resolved_sources", [])) if status.plugin_type == "rule" and plugin is not None else [],
                             }
                         )
                     plugins.sort(key=lambda row: (row["type"], row["plugin_id"]))
@@ -250,9 +274,21 @@ class ControlAPI:
                 engine = engine_getter()
 
                 if self.path == "/reload":
-                    reloaded = reload_callback()
-                    status = HTTPStatus.OK if reloaded else HTTPStatus.INTERNAL_SERVER_ERROR
-                    payload = {"status": "reloaded" if reloaded else "reload_failed"}
+                    payload = self._read_json_body(allow_empty=True)
+                    try:
+                        try:
+                            result = reload_callback(payload)
+                        except TypeError:
+                            result = reload_callback()
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    if isinstance(result, bool):
+                        status = HTTPStatus.OK if result else HTTPStatus.INTERNAL_SERVER_ERROR
+                        payload = {"status": "reloaded" if result else "reload_failed"}
+                    else:
+                        payload = result
+                        status = HTTPStatus.OK if payload.get("status") == "reloaded" else HTTPStatus.INTERNAL_SERVER_ERROR
                     self._write_json(status, payload)
                     return
 
@@ -261,6 +297,57 @@ class ControlAPI:
                         HTTPStatus.SERVICE_UNAVAILABLE,
                         {"status": "starting"},
                     )
+                    return
+
+                if self.path.startswith("/test-poll/"):
+                    source_id = unquote(self.path[len("/test-poll/") :]).strip("/")
+                    try:
+                        payload = engine.test_poll(source_id)
+                    except KeyError:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "source not found"})
+                        return
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+
+                if self.path.startswith("/test-evaluate/"):
+                    rule_id = unquote(self.path[len("/test-evaluate/") :]).strip("/")
+                    body = self._read_json_body()
+                    try:
+                        payload = engine.test_evaluate(
+                            rule_id,
+                            body["payload"],
+                            now=_parse_datetime(body["now"]) if body.get("now") else None,
+                        )
+                    except KeyError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
+                        return
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
+
+                if self.path.startswith("/test-fire/"):
+                    rule_id = unquote(self.path[len("/test-fire/") :]).strip("/")
+                    body = self._read_json_body()
+                    try:
+                        payload = engine.test_fire(
+                            rule_id,
+                            state=_parse_alert_state(body["state"]),
+                            message=body.get("message"),
+                            reason=body.get("reason"),
+                            now=_parse_datetime(body["now"]) if body.get("now") else None,
+                        )
+                    except KeyError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
+                        return
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
                     return
 
                 if self.path.startswith("/alerts/") and self.path.endswith("/ack"):
@@ -398,7 +485,7 @@ class ControlAPI:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _read_json_body(self) -> dict:
+            def _read_json_body(self, allow_empty: bool = False) -> dict:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0:
                     return {}
@@ -418,6 +505,13 @@ def _parse_datetime(value: str):
     return _json_datetime_fromisoformat(value)
 
 
+def _parse_alert_state(value: str) -> AlertState:
+    try:
+        return AlertState(str(value))
+    except ValueError as exc:
+        raise ValueError(f"invalid alert state: {value}") from exc
+
+
 def _json_datetime_fromisoformat(value: str):
     from datetime import datetime
 
@@ -432,15 +526,19 @@ def _duration_to_timedelta_minutes(duration_minutes: float):
 
 def _resolve_plugin(engine: Engine, plugin_type: str, plugin_id: str) -> object | None:
     if plugin_type == "source":
-        return engine.sources.get(plugin_id)
-    if plugin_type == "rule":
-        return engine.rules.get(plugin_id)
-    if plugin_type == "output":
-        return engine.outputs.get(plugin_id)
-    return None
+        plugin = engine.sources.get(plugin_id)
+    elif plugin_type == "rule":
+        plugin = engine.rules.get(plugin_id)
+    elif plugin_type == "output":
+        plugin = engine.outputs.get(plugin_id)
+    else:
+        plugin = None
+    if plugin is not None:
+        return plugin
+    return getattr(engine, "runtime_discovered_plugin_classes", {}).get((plugin_type, plugin_id))
 
 
-def _installation_metadata() -> dict[str, object]:
+def _installation_metadata(engine: Engine | None = None, extra: dict[str, object] | None = None) -> dict[str, object]:
     result = {
         "package_name": "kanary",
         "version": None,
@@ -449,7 +547,12 @@ def _installation_metadata() -> dict[str, object]:
         "repository_url": None,
         "documentation_url": None,
         "issues_url": None,
+        "state_db_enabled": bool(getattr(getattr(engine, "store", None), "enabled", False)),
+        "state_db_schema_version": getattr(getattr(engine, "store", None), "schema_version", 0) if engine is not None else 0,
+        "state_db_target_schema_version": getattr(getattr(engine, "store", None), "target_schema_version", 1) if engine is not None else 1,
     }
+    if extra:
+        result.update(extra)
     try:
         dist_metadata = importlib_metadata.metadata("kanary")
         result["version"] = importlib_metadata.version("kanary")
@@ -570,7 +673,7 @@ def _plugin_source_payload(engine: Engine, plugin_type: str, plugin_id: str) -> 
     if plugin is None:
         raise KeyError(plugin_id)
 
-    plugin_class = plugin.__class__
+    plugin_class = plugin if isinstance(plugin, type) else plugin.__class__
     definition_file = getattr(plugin_class, "__kanary_definition_file__", None)
     if not definition_file:
         raise FileNotFoundError(plugin_id)

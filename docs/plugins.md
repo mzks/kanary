@@ -9,7 +9,7 @@ This document first explains the minimum interface a user needs to implement, an
 Required:
 
 - `source_id`
-- `poll(ctx) -> kanary.SourceResult`
+- `poll(ctx)`
 
 Optional:
 
@@ -17,6 +17,8 @@ Optional:
 - `schedule`
 - `init(ctx)`
 - `terminate(ctx)`
+- `max_retry`
+- `max_reinit`
 
 If you omit both `interval` and `schedule`, Kanary uses `interval = 60.0`.
 If you use `schedule`, do not set `interval` at the same time.
@@ -41,19 +43,60 @@ class SqliteSource:
         ...
 ```
 
-### SourceResult
+Failure recovery defaults:
 
-`SourceResult` can return multiple `Measurement` objects.
+- `max_retry = 1`
+- `max_reinit = 1`
+
+If `poll()` raises, Kanary retries in-process before marking the source as failed.
+Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
+
+1. waits 1 second and retries `poll()`
+2. waits 4 seconds, runs `terminate() -> init()`, and retries `poll()`
+
+If all attempts fail, the source stays `FAILED` until the next scheduled poll or an explicit reload.
+
+### Returning inputs
+
+The usual public API is `kanary.inputs(...)`.
+
+Tuple/list style:
 
 ```python
-kanary.SourceResult(
-    measurements=[
-        kanary.Measurement(name="temperature", value=..., timestamp=...),
-        kanary.Measurement(name="humidity", value=..., timestamp=...),
+return kanary.inputs(
+    [
+        ("temperature", 23.4, observed_at, {"unit": "C"}),
+        ("humidity", 40.0),
     ],
-    status="ok",
+    metadata={"table": "env_samples_wide"},
 )
 ```
+
+Mapping style is also accepted:
+
+```python
+return kanary.inputs(
+    {
+        "temperature": (23.4, observed_at, {"unit": "C"}),
+        "humidity": 40.0,
+    }
+)
+```
+
+Rules:
+
+- `(name, value)`, `(name, value, timestamp)`, and `(name, value, timestamp, metadata)` are accepted
+- if the item timestamp is omitted or `None`, Kanary uses the outer `timestamp=` if present, otherwise the server's current time
+- outer `metadata=` becomes `SourceResult.metadata`
+- `kanary.no_data(reason=..., metadata=...)` means the poll succeeded but produced no usable inputs
+- raising an exception means source/plugin failure and triggers the runtime retry/reinit policy
+
+`kanary.SourceResult(...)` remains available as an advanced form.
+
+Plugins are also free to read local files from their own directory when they need site-specific configuration.
+A common pattern is to place `*_config.toml` next to the plugin script and read it with `Path(__file__).with_name(...)`.
+Those local config files are not part of auto-reload detection, so after editing them you should run an explicit
+`kanaryctl reload ...`.
 
 ## 2. Rule
 
@@ -62,13 +105,24 @@ kanary.SourceResult(
 Required:
 
 - `rule_id`
-- `source`
+- `inputs`
 - `severity`
 - `tags`
-- `evaluate(payload, ctx) -> kanary.Evaluation`
+- `evaluate(payload, ctx)`
+
+`source="postgres"` remains available as a shorthand for `inputs="postgres:*"` when you want to depend on everything exposed by one source.
+
+`inputs` may be:
+
+- one exact input, such as `inputs="postgres:temperature"`
+- a list, such as `inputs=["primary:temperature", "secondary:temperature"]`
+- a glob on the source side, the input side, or both, such as `inputs="postgres:*"` or `inputs="kernel_*:temperature"`
+
+Internally, `inputs="postgres:temperature"` is normalized to `["postgres:temperature"]`.
+Kanary resolves `resolved_sources` from these selectors at load/reload time and reevaluates the rule whenever one of those sources updates.
 
 `severity` is required. It acts as the default or fallback severity.
-If you return `kanary.Evaluation(severity=...)`, that specific evaluation overrides the class-level severity.
+If you return `kanary.firing(..., severity=...)` or `kanary.Evaluation(severity=...)`, that specific evaluation overrides the class-level severity.
 
 Optional metadata:
 
@@ -80,19 +134,69 @@ These appear in the alert API and in the viewer detail panel.
 
 ### RuleContext
 
-High-level accessors:
+Use input-based accessors:
 
-- `ctx.measurement(name)`
-- `ctx.value(name)`
-- `ctx.timestamp(name)`
-- `ctx.metadata(name)`
+- `ctx.inputs(selector=None, previous=False)`
+- `ctx.value(selector=None, previous=False)`
+- `ctx.timestamp(selector=None, previous=False)`
+- `ctx.metadata(selector=None, previous=False)`
+- `ctx.prev_value(selector=None)`
+- `ctx.prev_timestamp(selector=None)`
+- `ctx.prev_metadata(selector=None)`
+- `ctx.names(selector=None, previous=False)`
+- `ctx.values(selector=None, previous=False)`
+- `ctx.timestamps(selector=None, previous=False)`
+- `ctx.metadatas(selector=None, previous=False)`
 
-If you need to access the previous polled value, add `previous=True` in the argument.
+`ctx.inputs()` returns `InputView` items sorted by fully-qualified input name and removes duplicates when multiple selectors match the same input.
 
-Low-level accessors:
+Each `InputView` has:
 
-- `ctx.get_current(path)`
-- `ctx.get_previous(path)`
+- `name`
+- `source_id`
+- `input_name`
+- `value`
+- `timestamp`
+- `metadata`
+
+For a single resolved input, you can omit the selector and call `ctx.value()` directly. Multi-input rules should usually iterate over `ctx.inputs()`.
+If the selector would match more than one input, `ctx.value()` and the other scalar helpers raise an error instead of guessing.
+For multi-source rules, the `payload` argument still corresponds to the source that triggered the current evaluation. Use `ctx.inputs()` for cross-source data access.
+
+### Returning evaluations
+
+The usual public API is one of:
+
+- `kanary.ok(message, extra=...)`
+- `kanary.firing(message, severity=..., extra=...)`
+- `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)`
+- `kanary.fire_if(...)`, `kanary.warn_if(...)`, `kanary.error_if(...)`, `kanary.critical_if(...)`
+
+Example:
+
+```python
+def evaluate(self, payload, ctx):
+    value = ctx.value()
+    if value is None:
+        return kanary.ok("temperature is missing")
+    return kanary.error_if(
+        value > self.threshold,
+        f"temperature={value} is higher than {self.threshold}",
+    ) or kanary.ok(
+        f"temperature={value} is within limit",
+    )
+```
+
+Accepted shorthand forms:
+
+- `None` means `OK`
+- `True` means `FIRING`, `False` means `OK`
+- `(severity, message)` means `FIRING` with that severity
+- `(None, message)` means `OK`
+- `severity` may be a constant such as `kanary.ERROR` or a string such as `"ERROR"`
+
+If you do not specify a payload explicitly, Kanary automatically inherits the current source payload. Use `extra={...}` to merge additional fields into that payload.
+`kanary.Evaluation(...)` remains available as an advanced form.
 
 ## 3. Output
 
@@ -109,20 +213,79 @@ Optional:
 - `terminate(ctx)`
 - `include_tags`
 - `exclude_tags`
-- `include_states`
 - `exclude_states`
+- `exclude_transitions`
+- `minimum_severity`
+- `max_retry`
+- `max_reinit`
+
+The built-in SMTP output is an exception to the "prefer local plugin config" style used by the examples in this repository.
+It still reads `KANARY_SMTP_*` environment variables for convenience.
 
 `include_tags` and `exclude_tags` support glob patterns.  
 For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.
 
+`exclude_states` starts from "allow all states" and removes the listed ones.  
+`exclude_transitions` also starts empty. 
+
+Common values for `exclude_states`:
+
+- `OK`
+  Recovery events.
+- `FIRING`
+  Active alert events.
+- `ACKED`
+  Operator acknowledgement events (`FIRING -> ACKED`).
+- `SILENCED`
+  A firing alert that is currently covered by an active silence.
+- `SUPPRESSED`
+  A firing alert suppressed by another rule via `suppressed_by`.
+
+Common values for `exclude_transitions`:
+
+- `UNACK`
+  Derived transition for `ACKED -> FIRING`.
+- `ESCALATED`
+  Same-state severity increase, such as `FIRING(WARN) -> FIRING(ERROR)`.
+- `DEESCALATED`
+  Same-state severity decrease, such as `FIRING(CRITICAL) -> FIRING(ERROR)`.
+
+Each output `event` includes:
+
+- `previous_state`
+- `current_state`
+- `previous_severity`
+- `current_severity`
+- `transition`
+
+`transition` is `None` for ordinary state changes, and one of `UNACK`, `ESCALATED`, `DEESCALATED` for derived transitions.
+
 Example:
 
 ```python
-@kanary.output(output_id="discord", include_tags=["sqlite"])
+@kanary.output(
+    output_id="discord",
+    include_tags=["sqlite"],
+    exclude_states=["SUPPRESSED"],
+    minimum_severity="ERROR",
+)
 class DiscordOutput:
     def emit(self, event, ctx):
         ...
 ```
+
+Failure recovery defaults:
+
+- `max_retry = 1`
+- `max_reinit = 1`
+
+If `emit()` raises, Kanary retries delivery in-process before leaving the output in `FAILED`.
+Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
+
+1. waits 1 second and retries `emit()`
+2. waits 4 seconds, runs `terminate() -> init()`, and retries `emit()`
+
+If all attempts fail, the output remains `FAILED` until the next alert event or an explicit reload.
 
 ## 4. Built-In Helper Classes
 
@@ -150,14 +313,17 @@ Available helpers:
 - single severity
 - `lower_inclusive` and `upper_inclusive` define `[]` vs `()`
 - `hysteresis` shifts the clear boundary slightly after a firing condition
+- when multiple inputs are matched, each input is evaluated independently and any out-of-range input fires the rule
 
 #### StaleRule
 
 - checks measurement age via its timestamp
+- when multiple inputs are matched, any stale or timestamp-missing input fires the rule
 
 #### RateRule
 
 - computes a rate from current and previous snapshots and evaluates it as a range
+- when multiple inputs are matched, each input rate is evaluated independently
 
 #### ThresholdRule
 
@@ -165,18 +331,18 @@ Available helpers:
 - `direction = "high" | "low"`
 - `thresholds = [(value, severity), ...]`
 - `hysteresis` adds a return margin when severity drops
+- when multiple inputs are matched, the rule fires if any input matches and uses the highest matched severity
 
 Example:
 
 ```python
 @kanary.rule(
     rule_id="sqlite.value1.threshold",
-    source="sqlite",
+    inputs="sqlite:value1",
     severity=kanary.WARN,
     tags=["sqlite", "value1"],
 )
 class Value1Threshold(kanary.ThresholdRule):
-    measurement = "value1"
     direction = "high"
     hysteresis = 1.0
     thresholds = [
@@ -232,6 +398,25 @@ Example:
 class MailAlert(kanary.MailOutput):
     sender = "kanary@example.com"
     recipients = ["operator@example.com"]
+    subject_prefix = "[KANARY production]"
+
+    def _body(self, event):
+        lines = [
+            f"Rule: {event.rule_id}",
+            f"Occurred At: {event.occurred_at.isoformat()}",
+            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
+            f"State: {event.current_state.value}",
+            (
+                "Previous Severity: "
+                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
+            ),
+            f"Severity: {kanary.severity_label(event.current_severity)}",
+            f"Transition: {event.transition.value if event.transition else '-'}",
+            f"Owner: {event.alert.owner or '-'}",
+            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
+            f"Message: {event.alert.message or '-'}",
+        ]
+        return "\n".join(lines)
 ```
 
 ## 5. User-Defined Factories
@@ -258,6 +443,17 @@ That example includes:
 
 - `make_constant_source(...)`
   Generates a simple source class from a measurement dictionary.
+
+## 6. Self-Monitoring Pattern
+
+Kanary can also monitor its own runtime through the HTTP API.
+One practical pattern is:
+
+- a `Source` that reads `GET /plugins` from the local Kanary node
+- one or more `Rule` classes that turn failed source/rule/output plugins into ordinary alerts
+
+See [examples/self_plugin_monitoring.py](../examples/self_plugin_monitoring.py) for a compact example.
+That example keeps the rule IDs coarse, such as `kanary.source.failure`, and puts the concrete failure summary into the alert message and metadata.
 - `make_threshold_rule(...)`
   Generates one `ThresholdRule`-based rule class.
 
@@ -277,8 +473,26 @@ Rule relationships:
 Alert states:
 
 - `OK`
+  The rule currently evaluates as healthy.
 - `FIRING`
+  The rule currently evaluates as abnormal.
 - `ACKED`
+  The alert is still abnormal, but an operator acknowledged it.
 - `SILENCED`
+  The alert would be firing, but an active silence currently masks it.
 - `SUPPRESSED`
-- `RESOLVED`
+  The alert would be firing, but another rule listed in `suppressed_by` is active.
+
+Derived transitions:
+
+- `UNACK`
+  Emitted when an acknowledged alert is reopened (`ACKED -> FIRING`).
+- `ESCALATED`
+  Emitted when severity rises while the state stays the same.
+- `DEESCALATED`
+  Emitted when severity drops while the state stays the same.
+
+In practice:
+
+- `SILENCED` is useful if you want outputs or viewers to show that an alert is muted on purpose.
+- Rule removals during reload are not represented as an alert state. They are recorded in history as an operator action with `action_type = "rule_removed"`.

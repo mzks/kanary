@@ -31,7 +31,6 @@ uv run python -m kanary lint ./examples --exclude console
   - `tags`
   - `evaluate()`
 - `tags = []` warning
-- owner 未設定 warning
 - source 参照の整合
 - plugin ID 重複
 - `StaleRule.timeout` の妥当性
@@ -39,18 +38,18 @@ uv run python -m kanary lint ./examples --exclude console
 
 ## Reload
 
-plugin directory は継続監視され、変更時に自動 reload されます。
+plugin directory は継続監視され、変更は自動検知されます。default の `--auto-reload off` では、反映は `kanaryctl reload ...` で明示的に行います。
 
 ```text
-file change
+file change detected
   ↓
-load rules
+mark plugins dirty
+  ↓
+explicit reload or auto-reload
   ↓
 validation
   ↓
-build registry
-  ↓
-atomic swap
+targeted replace
 ```
 
 reload 失敗時は旧 registry を維持します。

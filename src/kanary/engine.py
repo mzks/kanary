@@ -3,20 +3,27 @@ from datetime import datetime, timezone
 from fnmatch import fnmatch
 import logging
 import socket
+import time
 import traceback
 from uuid import uuid4
 import threading
 from typing import Callable
 
-from .constants import AlertState
+from .constants import AlertState, DEESCALATED, ESCALATED, TransitionKind, UNACK
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
 from .output import Output
 from .registry import get_output_registry, get_rule_registry, get_source_registry
-from .rule import Rule, RuleContext
+from .rule import Rule, RuleContext, normalize_rule_inputs, resolve_rule_sources
 from .store import NullStore
-from .source import Source
+from .source import Source, normalize_source_output
 
 logger = logging.getLogger("kanary.engine")
+
+
+def _coerce_test_timestamp(value: object) -> object:
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return value
 
 
 class Engine:
@@ -48,7 +55,6 @@ class Engine:
         self.alerts: dict[str, Alert] = {}
         self.acknowledgements: dict[str, Acknowledgement] = {}
         self.silences: dict[str, Silence] = {}
-        self._suppress_next_notification_for_rules: set[str] = set()
         self.source_states: dict[str, SourceState] = {
             source_id: SourceState(source_id=source_id)
             for source_id in self.sources
@@ -59,15 +65,50 @@ class Engine:
             self.plugin_states[self._plugin_key("rule", rule_id)] = PluginStatus("rule", rule_id)
         for output_id in self.outputs:
             self.plugin_states[self._plugin_key("output", output_id)] = PluginStatus("output", output_id)
+        self._sync_plugin_definition_files()
 
     def _instantiate_sources(self) -> dict[str, Source]:
         return {source_id: cls() for source_id, cls in self._source_registry.items()}
 
     def _instantiate_rules(self) -> dict[str, Rule]:
-        return {rule_id: cls() for rule_id, cls in self._rule_registry.items()}
+        rules: dict[str, Rule] = {}
+        for rule_id, cls in self._rule_registry.items():
+            rule = cls()
+            self._configure_rule(rule)
+            rules[rule_id] = rule
+        return rules
 
     def _instantiate_outputs(self) -> dict[str, Output]:
         return {output_id: cls() for output_id, cls in self._output_registry.items()}
+
+    def _configure_rule(self, rule: Rule) -> None:
+        rule.inputs = normalize_rule_inputs(
+            getattr(rule, "inputs", None),
+            source=getattr(rule, "source", None),
+        )
+        rule.resolved_sources = resolve_rule_sources(rule.inputs, self.sources.keys())
+
+    def _refresh_rule_resolutions(self) -> None:
+        for rule in self.rules.values():
+            self._configure_rule(rule)
+
+    def _refresh_rule_plugin_resolution_status(self) -> None:
+        now = self._now_fn()
+        for rule_id, rule in self.rules.items():
+            status = self._plugin_status("rule", rule_id)
+            if getattr(rule, "resolved_sources", []):
+                if status.state == "FAILED" and status.last_error == "rule resolved zero sources or inputs":
+                    self._set_plugin_ready(status)
+                    status.last_error = None
+                    status.last_error_detail = None
+                    status.last_updated_at = now
+                continue
+            self._set_plugin_failed(status)
+            status.init_ok = True
+            status.last_error = "rule resolved zero sources or inputs"
+            status.last_error_detail = None
+            status.last_failure_at = now
+            status.last_updated_at = now
 
     def start(self) -> None:
         with self._lock:
@@ -80,9 +121,13 @@ class Engine:
             }
             self.silences = restored.silences
             for source in self.sources.values():
-                self._initialize_source(source)
+                try:
+                    self._initialize_source(source)
+                except Exception:
+                    logger.exception("source '%s' init failed during startup", source.source_id)
             for output_id, output in self.outputs.items():
                 self._initialize_output(output_id, output)
+            self._refresh_rule_plugin_resolution_status()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -91,14 +136,6 @@ class Engine:
             for output_id, output in self.outputs.items():
                 self._terminate_output(output_id, output)
             self.store.close()
-
-    def evaluate_once(self) -> dict[str, Alert]:
-        now = self._now_fn()
-        with self._lock:
-            payloads = self._poll_sources(now)
-            for source_id, payload in payloads.items():
-                self.evaluate_source(source_id, payload, now=now)
-            return dict(self.alerts)
 
     def evaluate_source(
         self,
@@ -116,7 +153,7 @@ class Engine:
                 observed_at=current_time,
             )
             for rule in self.rules.values():
-                if rule.source != source_id:
+                if source_id not in getattr(rule, "resolved_sources", []):
                     continue
                 if self._is_rule_excluded(rule.rule_id):
                     continue
@@ -131,10 +168,12 @@ class Engine:
         output_registry: dict[str, type[Output]] | None = None,
     ) -> None:
         with self._lock:
-            self._suppress_next_notification_for_rules = set(self.alerts)
             old_rule_ids = set(self.rules)
+            old_rules = self.rules
             old_sources = self.sources
             old_outputs = self.outputs
+            old_source_ids = set(self.sources)
+            old_output_ids = set(self.outputs)
 
             if source_registry is not None:
                 self._source_registry = source_registry
@@ -145,6 +184,7 @@ class Engine:
                     source_id: self.source_states.get(source_id, SourceState(source_id=source_id))
                     for source_id in self.sources
                 }
+                self._refresh_rule_resolutions()
                 self._rebuild_plugin_states()
                 for source in self.sources.values():
                     self._initialize_source(source)
@@ -166,13 +206,136 @@ class Engine:
             removed_rule_ids = old_rule_ids - set(self.rules)
             now = self._now_fn()
             self.last_reload_at = now
+            logger.info(
+                "reload applied: sources=%d (%+d), rules=%d (%+d), outputs=%d (%+d), active_alerts=%d",
+                len(self.sources),
+                len(self.sources) - len(old_source_ids),
+                len(self.rules),
+                len(self.rules) - len(old_rule_ids),
+                len(self.outputs),
+                len(self.outputs) - len(old_output_ids),
+                len(self.alerts),
+            )
             for rule_id in removed_rule_ids:
                 alert = self.alerts.get(rule_id)
                 if alert is None:
                     continue
-                alert.state = AlertState.RESOLVED
-                alert.resolved_at = now
-                alert.last_evaluated_at = now
+                self.store.record_rule_removed(
+                    rule_id=rule_id,
+                    definition_file=getattr(old_rules.get(rule_id, None).__class__, "__kanary_definition_file__", None)
+                    if old_rules.get(rule_id, None) is not None else None,
+                    previous_state=alert.state.value,
+                    previous_severity=int(alert.severity),
+                    operator="system",
+                    reason="rule removed during reload",
+                    created_at=now,
+                    had_ack=rule_id in self.acknowledgements,
+                    active_silence_ids=list(alert.active_silence_ids),
+                )
+                self.alerts.pop(rule_id, None)
+                self.acknowledgements.pop(rule_id, None)
+            self._refresh_rule_resolutions()
+            self._sync_plugin_definition_files()
+            self._refresh_rule_plugin_resolution_status()
+
+    def reload_rule_plugins(
+        self,
+        *,
+        replacements: dict[str, type[Rule]],
+        removed_rule_ids: set[str] | None = None,
+    ) -> None:
+        with self._lock:
+            old_rules = dict(self.rules)
+            removed_rule_ids = set(removed_rule_ids or ())
+            now = self._now_fn()
+            for rule_id in removed_rule_ids:
+                if rule_id not in self.rules:
+                    continue
+                old_rule = old_rules.get(rule_id)
+                alert = self.alerts.get(rule_id)
+                if alert is not None:
+                    self.store.record_rule_removed(
+                        rule_id=rule_id,
+                        definition_file=getattr(old_rule.__class__, "__kanary_definition_file__", None)
+                        if old_rule is not None else None,
+                        previous_state=alert.state.value,
+                        previous_severity=int(alert.severity),
+                        operator="system",
+                        reason="rule removed during reload",
+                        created_at=now,
+                        had_ack=rule_id in self.acknowledgements,
+                        active_silence_ids=list(alert.active_silence_ids),
+                    )
+                self.alerts.pop(rule_id, None)
+                self.acknowledgements.pop(rule_id, None)
+                self.rules.pop(rule_id, None)
+                self._rule_registry.pop(rule_id, None)
+
+            for rule_id, rule_cls in replacements.items():
+                self._rule_registry[rule_id] = rule_cls
+                rule = rule_cls()
+                self._configure_rule(rule)
+                self.rules[rule_id] = rule
+
+            self._rebuild_plugin_states()
+            self._sync_plugin_definition_files()
+            self._refresh_rule_plugin_resolution_status()
+
+    def reload_output_plugins(
+        self,
+        *,
+        replacements: dict[str, type[Output]],
+        removed_output_ids: set[str] | None = None,
+    ) -> None:
+        with self._lock:
+            removed_output_ids = set(removed_output_ids or ())
+            for output_id in removed_output_ids:
+                output = self.outputs.pop(output_id, None)
+                self._output_registry.pop(output_id, None)
+                if output is not None:
+                    self._terminate_output(output_id, output)
+
+            for output_id, output_cls in replacements.items():
+                existing = self.outputs.get(output_id)
+                if existing is not None:
+                    self._terminate_output(output_id, existing)
+                self._output_registry[output_id] = output_cls
+                output = output_cls()
+                self.outputs[output_id] = output
+                self._initialize_output(output_id, output)
+
+            self._rebuild_plugin_states()
+            self._sync_plugin_definition_files()
+
+    def reload_source_plugins(
+        self,
+        *,
+        replacements: dict[str, type[Source]],
+        removed_source_ids: set[str] | None = None,
+    ) -> None:
+        with self._lock:
+            removed_source_ids = set(removed_source_ids or ())
+            for source_id in removed_source_ids:
+                source = self.sources.pop(source_id, None)
+                self._source_registry.pop(source_id, None)
+                self.source_states.pop(source_id, None)
+                if source is not None:
+                    self._terminate_source(source)
+
+            for source_id, source_cls in replacements.items():
+                existing = self.sources.get(source_id)
+                if existing is not None:
+                    self._terminate_source(existing)
+                self._source_registry[source_id] = source_cls
+                source = source_cls()
+                self.sources[source_id] = source
+                self.source_states.setdefault(source_id, SourceState(source_id=source_id))
+                self._initialize_source(source)
+
+            self._refresh_rule_resolutions()
+            self._rebuild_plugin_states()
+            self._sync_plugin_definition_files()
+            self._refresh_rule_plugin_resolution_status()
 
     def acknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
         with self._lock:
@@ -195,15 +358,28 @@ class Engine:
             alert.ack_reason = reason
             alert.last_evaluated_at = now
             self.store.append_alert_event(
-                AlertEvent(
-                    rule_id=rule_id,
-                    previous_state=previous_state,
-                    current_state=AlertState.ACKED,
+                self._make_alert_event(
                     alert=alert,
                     occurred_at=now,
+                    previous_state=previous_state,
+                    previous_severity=alert.severity,
+                    current_state=AlertState.ACKED,
+                    current_severity=alert.severity,
+                    transition=None,
                 ),
                 definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
                 matched_outputs=list(getattr(rule, "matched_outputs", [])),
+            )
+            self._emit_alert_event(
+                self._make_alert_event(
+                    alert=alert,
+                    occurred_at=now,
+                    previous_state=previous_state,
+                    previous_severity=alert.severity,
+                    current_state=AlertState.ACKED,
+                    current_severity=alert.severity,
+                    transition=None,
+                )
             )
             return alert
 
@@ -231,15 +407,28 @@ class Engine:
                 alert.ack_reason = None
                 alert.last_evaluated_at = now
                 self.store.append_alert_event(
-                    AlertEvent(
-                        rule_id=rule_id,
-                        previous_state=previous_state,
-                        current_state=AlertState.FIRING,
+                    self._make_alert_event(
                         alert=alert,
                         occurred_at=now,
+                        previous_state=previous_state,
+                        previous_severity=alert.severity,
+                        current_state=AlertState.FIRING,
+                        current_severity=alert.severity,
+                        transition=UNACK,
                     ),
                     definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
                     matched_outputs=list(getattr(rule, "matched_outputs", [])),
+                )
+                self._emit_alert_event(
+                    self._make_alert_event(
+                        alert=alert,
+                        occurred_at=now,
+                        previous_state=previous_state,
+                        previous_severity=alert.severity,
+                        current_state=AlertState.FIRING,
+                        current_severity=alert.severity,
+                        transition=UNACK,
+                    )
                 )
             return alert
 
@@ -333,6 +522,165 @@ class Engine:
             rule = self.rules.get(rule_id)
             return self.store.get_rule_history(rule_id, list(getattr(rule, "tags", [])) if rule is not None else [])
 
+    def test_poll(self, source_id: str) -> dict[str, object]:
+        with self._lock:
+            source = self.sources[source_id]
+            current_time = self._now_fn()
+            result = source.poll({"engine": self, "now": current_time})
+            normalized = self._normalize_source_result(result, now=current_time)
+            return normalized
+
+    def test_evaluate(
+        self,
+        rule_id: str,
+        payload: Mapping[str, object] | SourceResult,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        with self._lock:
+            rule = self.rules[rule_id]
+            current_time = now or self._now_fn()
+            preview_states = self._build_test_evaluate_source_states(rule, payload, current_time)
+            trigger_source_id = next(iter(getattr(rule, "resolved_sources", []) or [getattr(rule, "source", "")]), "")
+            source_state = preview_states.get(trigger_source_id, SourceState(source_id=trigger_source_id))
+            original_source_states = self.source_states
+            self.source_states = preview_states
+            try:
+                alert = self._evaluate_rule_preview(rule, source_state.current.payload, source_state, current_time)
+            finally:
+                self.source_states = original_source_states
+            event = AlertEvent(
+                rule_id=rule.rule_id,
+                previous_state=None,
+                current_state=alert.state,
+                previous_severity=None,
+                current_severity=alert.severity,
+                transition=None,
+                alert=alert,
+                occurred_at=current_time,
+            )
+            matched_outputs = list(getattr(rule, "matched_outputs", []))
+            would_emit_outputs = [output_id for output_id, output in self.outputs.items() if output.matches(event)]
+            return {
+                "rule_id": rule.rule_id,
+                "state": alert.state.value,
+                "severity": int(alert.severity),
+                "owner": alert.owner,
+                "tags": list(alert.tags),
+                "message": alert.message,
+                "payload": alert.payload,
+                "occurred_at": current_time,
+                "inputs": list(getattr(rule, "inputs", [])),
+                "resolved_sources": list(getattr(rule, "resolved_sources", [])),
+                "matched_outputs": matched_outputs,
+                "would_emit_outputs": would_emit_outputs,
+            }
+
+    def test_evaluate_template(self, rule_id: str) -> dict[str, object]:
+        with self._lock:
+            rule = self.rules[rule_id]
+            now = self._now_fn()
+            ctx = RuleContext(
+                now=now,
+                source_states=self.source_states,
+                declared_inputs=tuple(getattr(rule, "inputs", [])),
+                resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
+            )
+
+            template_inputs: dict[str, dict[str, object]] = {}
+            unresolved_selectors: list[str] = []
+            for selector in getattr(rule, "inputs", []):
+                matched_names = ctx.names(selector)
+                if matched_names:
+                    for name in matched_names:
+                        template_inputs.setdefault(
+                            name,
+                            {
+                                "value": None,
+                                "timestamp": now.isoformat(),
+                            },
+                        )
+                    continue
+                if ":" in selector and "*" not in selector:
+                    template_inputs.setdefault(
+                        selector,
+                        {
+                            "value": None,
+                            "timestamp": now.isoformat(),
+                        },
+                    )
+                    continue
+                unresolved_selectors.append(selector)
+
+            result: dict[str, object] = {
+                "rule_id": rule.rule_id,
+                "inputs": list(getattr(rule, "inputs", [])),
+                "resolved_sources": list(getattr(rule, "resolved_sources", [])),
+                "payload": {
+                    "inputs": template_inputs,
+                    "status": "ok",
+                },
+            }
+            if len(template_inputs) == 1:
+                result["single_input_shorthand"] = {
+                    "value": None,
+                    "timestamp": now.isoformat(),
+                    "prev_value": None,
+                    "prev_timestamp": now.isoformat(),
+                }
+            if unresolved_selectors:
+                result["unresolved_selectors"] = unresolved_selectors
+            return result
+
+    def test_fire(
+        self,
+        rule_id: str,
+        *,
+        state: AlertState,
+        message: str | None = None,
+        reason: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        with self._lock:
+            rule = self.rules[rule_id]
+            current_time = now or self._now_fn()
+            previous_alert = self.alerts.get(rule_id)
+            base_message = message or f"synthetic {state.value} notification test"
+            synthetic_message = f"[TEST-FIRE] {base_message}"
+            synthetic_payload: dict[str, object] = {
+                "synthetic": True,
+                "test_fire": {
+                    "reason": reason,
+                    "created_at": current_time.isoformat(),
+                },
+            }
+            alert = Alert(
+                rule_id=rule.rule_id,
+                state=state,
+                severity=rule.severity,
+                owner=rule.owner,
+                tags=tuple(rule.tags),
+                payload=synthetic_payload,
+                message=synthetic_message,
+                last_evaluated_at=current_time,
+            )
+            event = AlertEvent(
+                rule_id=rule.rule_id,
+                previous_state=previous_alert.state if previous_alert is not None else None,
+                current_state=state,
+                previous_severity=previous_alert.severity if previous_alert is not None else None,
+                current_severity=alert.severity,
+                transition=None,
+                alert=alert,
+                occurred_at=current_time,
+            )
+            logger.info("test fire requested: rule=%s state=%s reason=%s", rule.rule_id, state.value, reason or "-")
+            summary = self._emit_alert_event(event)
+            summary["synthetic"] = True
+            summary["message"] = synthetic_message
+            summary["reason"] = reason
+            return summary
+
     def peer_status(self) -> dict[str, object]:
         with self._lock:
             now = self._now_fn()
@@ -341,7 +689,7 @@ class Engine:
                 for state in AlertState
             }
             failed_plugin_count = sum(
-                1 for status in self.plugin_states.values() if status.state == "failed"
+                1 for status in self.plugin_states.values() if status.state == "FAILED"
             )
             latest_activity_candidates = [
                 alert.last_evaluated_at for alert in self.alerts.values() if alert.last_evaluated_at is not None
@@ -366,8 +714,17 @@ class Engine:
                     "outputs": len(self.outputs),
                     "alerts": len(self.alerts),
                     "failed_plugins": failed_plugin_count,
+                    "dirty_plugins": sum(
+                        1
+                        for status in self.plugin_states.values()
+                        if status.state in {"DISCOVERED", "DIRTY", "PENDING_REMOVE"}
+                    ),
+                    "untracked_files": len(getattr(self, "runtime_untracked_files", [])),
                 },
                 "alert_states": alert_state_counts,
+                "reload": {
+                    "untracked_files": list(getattr(self, "runtime_untracked_files", [])),
+                },
             }
 
     def _poll_sources(self, now: datetime) -> dict[str, dict]:
@@ -380,8 +737,8 @@ class Engine:
         status = self._plugin_status("source", source_id)
         try:
             result = source.poll({"engine": self, "now": now})
-            payload = self._normalize_source_result(result)
-            status.state = "ready"
+            payload = self._normalize_source_result(result, now=now)
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
@@ -391,7 +748,7 @@ class Engine:
             status.last_updated_at = now
             return payload
         except Exception as exc:
-            status.state = "failed"
+            self._set_plugin_failed(status)
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
             status.run_count += 1
@@ -400,9 +757,10 @@ class Engine:
             status.last_updated_at = now
             raise
 
-    def _normalize_source_result(self, result: SourceResult) -> dict[str, object]:
+    def _normalize_source_result(self, result: object, *, now: datetime | None = None) -> dict[str, object]:
+        normalized_result = normalize_source_output(result, now=now)
         channels: dict[str, dict[str, object]] = {}
-        for measurement in result.measurements:
+        for measurement in normalized_result.measurements:
             channels[measurement.name] = {
                 "value": measurement.value,
                 "timestamp": measurement.timestamp,
@@ -411,12 +769,14 @@ class Engine:
 
         payload: dict[str, object] = {
             "channels": channels,
-            "status": result.status,
+            "status": normalized_result.status,
         }
-        if result.error is not None:
-            payload["error"] = result.error
-        if result.metadata:
-            payload["metadata"] = result.metadata
+        if normalized_result.error is not None:
+            payload["error"] = normalized_result.error
+        if normalized_result.reason is not None:
+            payload["reason"] = normalized_result.reason
+        if normalized_result.metadata:
+            payload["metadata"] = normalized_result.metadata
         return payload
 
     def _normalize_source_input(
@@ -426,8 +786,8 @@ class Engine:
         now: datetime,
     ) -> dict[str, object]:
         status = self._plugin_status("source", source_id)
-        normalized = self._normalize_source_result(payload) if isinstance(payload, SourceResult) else dict(payload)
-        status.state = "ready"
+        normalized = self._normalize_source_result(payload, now=now)
+        self._set_plugin_ready(status)
         status.init_ok = True
         status.last_error = None
         status.last_error_detail = None
@@ -436,6 +796,123 @@ class Engine:
         status.last_success_at = now
         status.last_updated_at = now
         return normalized
+
+    def _build_test_evaluate_source_states(
+        self,
+        rule: Rule,
+        payload: Mapping[str, object] | SourceResult,
+        now: datetime,
+    ) -> dict[str, SourceState]:
+        if isinstance(payload, SourceResult):
+            resolved_sources = list(getattr(rule, "resolved_sources", []))
+            if len(resolved_sources) != 1:
+                raise ValueError("SourceResult test payload requires rule with exactly one resolved source")
+            normalized = self._normalize_source_result(payload, now=now)
+            return self._overlay_test_source_payloads(
+                rule,
+                {
+                    resolved_sources[0]: {
+                        "current": normalized,
+                    }
+                },
+                now,
+            )
+
+        normalized_payload = dict(payload)
+        if "inputs" in normalized_payload:
+            return self._overlay_test_source_payloads(
+                rule,
+                self._normalize_test_input_map_payload(normalized_payload),
+                now,
+            )
+
+        shorthand_keys = {"value", "timestamp", "metadata", "prev_value", "prev_timestamp", "prev_metadata"}
+        if shorthand_keys.intersection(normalized_payload):
+            normalized_inputs = list(getattr(rule, "inputs", []))
+            if len(normalized_inputs) != 1 or ":" not in normalized_inputs[0] or "*" in normalized_inputs[0]:
+                raise ValueError("single-input shorthand requires exactly one explicit input selector")
+            return self._overlay_test_source_payloads(
+                rule,
+                self._normalize_test_input_map_payload(
+                    {
+                        "inputs": {
+                            normalized_inputs[0]: normalized_payload,
+                        }
+                    }
+                ),
+                now,
+            )
+
+        raise ValueError(
+            "test payload must contain 'inputs' or the single-input shorthand fields "
+            "('value', 'timestamp', 'metadata', 'prev_value', 'prev_timestamp', 'prev_metadata')"
+        )
+
+    def _overlay_test_source_payloads(
+        self,
+        rule: Rule,
+        source_payloads: dict[str, dict[str, dict[str, object]]],
+        now: datetime,
+    ) -> dict[str, SourceState]:
+        preview_states: dict[str, SourceState] = {}
+        all_source_ids = sorted(set(getattr(rule, "resolved_sources", [])) | set(source_payloads))
+        for source_id in all_source_ids:
+            existing_state = self.source_states.get(source_id, SourceState(source_id=source_id))
+            payloads = source_payloads.get(source_id, {})
+            current_payload = dict(payloads.get("current", existing_state.current.payload))
+            previous_payload = dict(payloads.get("previous", existing_state.current.payload))
+            preview_states[source_id] = SourceState(
+                source_id=source_id,
+                current=SourceSnapshot(payload=current_payload, observed_at=now),
+                previous=SourceSnapshot(payload=previous_payload, observed_at=existing_state.current.observed_at),
+                updated_at=now,
+                poll_count=existing_state.poll_count,
+            )
+        return preview_states
+
+    def _normalize_test_input_map_payload(
+        self,
+        payload: Mapping[str, object],
+    ) -> dict[str, dict[str, dict[str, object]]]:
+        raw_inputs = payload.get("inputs", {})
+        if not isinstance(raw_inputs, Mapping):
+            raise ValueError("payload.inputs must be an object")
+        status = payload.get("status", "ok")
+        error = payload.get("error")
+        top_metadata = payload.get("metadata")
+        if top_metadata is not None and not isinstance(top_metadata, Mapping):
+            raise ValueError("payload.metadata must be an object when set")
+        grouped: dict[str, dict[str, dict[str, object]]] = {}
+        for full_name, raw in raw_inputs.items():
+            if not isinstance(full_name, str) or ":" not in full_name:
+                raise ValueError("input names must be '<source_id>:<input_name>'")
+            if not isinstance(raw, Mapping):
+                raise ValueError(f"input '{full_name}' must be an object")
+            source_id, input_name = full_name.split(":", 1)
+            current_channels = grouped.setdefault(source_id, {}).setdefault("current", {}).setdefault("channels", {})
+            previous_channels = grouped.setdefault(source_id, {}).setdefault("previous", {}).setdefault("channels", {})
+            current_channels[input_name] = {
+                "value": raw.get("value"),
+                "timestamp": _coerce_test_timestamp(raw.get("timestamp")),
+                "metadata": dict(raw.get("metadata", {})) if isinstance(raw.get("metadata", {}), Mapping) else {},
+            }
+            if "prev_value" in raw or "prev_timestamp" in raw or "prev_metadata" in raw:
+                previous_channels[input_name] = {
+                    "value": raw.get("prev_value"),
+                    "timestamp": _coerce_test_timestamp(raw.get("prev_timestamp")),
+                    "metadata": dict(raw.get("prev_metadata", {})) if isinstance(raw.get("prev_metadata", {}), Mapping) else {},
+                }
+        for source_id, payloads in grouped.items():
+            current_payload = payloads.setdefault("current", {})
+            current_payload.setdefault("channels", {})
+            current_payload["status"] = status
+            if error is not None:
+                current_payload["error"] = error
+            if isinstance(top_metadata, Mapping) and top_metadata:
+                current_payload["metadata"] = dict(top_metadata)
+            previous_payload = payloads.setdefault("previous", {})
+            previous_payload.setdefault("channels", {})
+        return grouped
 
     def _update_source_state(
         self,
@@ -466,14 +943,12 @@ class Engine:
         acked_at = acknowledgement.created_at if acknowledgement and state == AlertState.ACKED else None
         acked_by = acknowledgement.operator if acknowledgement and state == AlertState.ACKED else None
         ack_reason = acknowledgement.reason if acknowledgement and state == AlertState.ACKED else None
-        resolved_at = now if state == AlertState.RESOLVED else None
         previous_state = previous.state if previous else None
         active_silence_ids = tuple(silence.silence_id for silence in self._matching_active_silences(rule, now))
 
         if state == AlertState.FIRING and active_since is None:
             active_since = now
         if state == AlertState.OK:
-            resolved_at = None
             active_since = None
             acked_at = None
             acked_by = None
@@ -490,7 +965,6 @@ class Engine:
             message=message,
             active_since=active_since,
             last_evaluated_at=now,
-            resolved_at=resolved_at,
             acked_at=acked_at,
             acked_by=acked_by,
             ack_reason=ack_reason,
@@ -498,32 +972,21 @@ class Engine:
         )
         self.alerts[rule.rule_id] = alert
 
-        if previous is None or previous.state != state:
+        event = self._derive_alert_event(
+            previous=previous,
+            alert=alert,
+            occurred_at=now,
+        )
+
+        if event is not None:
             self.store.append_alert_event(
-                AlertEvent(
-                    rule_id=rule.rule_id,
-                    previous_state=previous_state,
-                    current_state=state,
-                    alert=alert,
-                    occurred_at=now,
-                ),
+                event,
                 definition_file=getattr(rule.__class__, "__kanary_definition_file__", None),
                 matched_outputs=list(getattr(rule, "matched_outputs", [])),
             )
 
-        if previous is not None and previous.state != state:
-            if rule.rule_id in self._suppress_next_notification_for_rules:
-                self._suppress_next_notification_for_rules.discard(rule.rule_id)
-                return
-            self._emit_alert_event(
-                AlertEvent(
-                    rule_id=rule.rule_id,
-                    previous_state=previous_state,
-                    current_state=state,
-                    alert=alert,
-                    occurred_at=now,
-                )
-            )
+        if event is not None and previous is not None:
+            self._emit_alert_event(event)
 
     def _resolve_dependency_state(
         self,
@@ -637,18 +1100,39 @@ class Engine:
         alert = self.alerts.get(dependency_rule_id)
         if alert is None:
             return False
-        return alert.state not in {AlertState.OK, AlertState.RESOLVED}
+        return alert.state != AlertState.OK
 
-    def _emit_alert_event(self, event: AlertEvent) -> None:
+    def _emit_alert_event(self, event: AlertEvent) -> dict[str, object]:
+        matched_output_ids: list[str] = []
+        initialized_output_ids: list[str] = []
+        delivered_output_ids: list[str] = []
+        filtered_output_ids: list[str] = []
+        uninitialized_output_ids: list[str] = []
+        failed_output_ids: list[str] = []
         for output_id, output in self.outputs.items():
             if not output.matches(event):
+                filtered_output_ids.append(output_id)
+                logger.debug(
+                    "output '%s' skipped for rule '%s': event does not match output filters",
+                    output_id,
+                    event.rule_id,
+                )
                 continue
+            matched_output_ids.append(output_id)
             status = self._plugin_status("output", output_id)
             if not status.init_ok:
+                uninitialized_output_ids.append(output_id)
+                logger.warning(
+                    "output '%s' skipped for rule '%s': output is not initialized",
+                    output_id,
+                    event.rule_id,
+                )
                 continue
+            initialized_output_ids.append(output_id)
             try:
                 output.emit(event, {"engine": self})
-                status.state = "ready"
+                delivered_output_ids.append(output_id)
+                self._set_plugin_ready(status)
                 status.last_error = None
                 status.last_error_detail = None
                 status.run_count += 1
@@ -656,12 +1140,132 @@ class Engine:
                 status.last_success_at = event.occurred_at
                 status.last_updated_at = event.occurred_at
             except Exception as exc:
-                status.state = "failed"
-                status.last_error = str(exc)
-                status.last_error_detail = traceback.format_exc()
-                status.last_failure_at = event.occurred_at
-                status.last_updated_at = event.occurred_at
+                if self._recover_output_emit(output_id, output, event, status, exc):
+                    delivered_output_ids.append(output_id)
+                    continue
+                failed_output_ids.append(output_id)
                 logger.exception("output '%s' failed", output.output_id)
+        logger.info(
+            "alert dispatch summary: rule=%s transition=%s->%s matched=%s delivered=%s filtered=%s uninitialized=%s failed=%s",
+            event.rule_id,
+            event.previous_state.value if event.previous_state is not None else "-",
+            event.current_state.value,
+            ",".join(matched_output_ids) or "-",
+            ",".join(delivered_output_ids) or "-",
+            ",".join(filtered_output_ids) or "-",
+            ",".join(uninitialized_output_ids) or "-",
+            ",".join(failed_output_ids) or "-",
+        )
+        self.store.append_output_dispatch(
+            event=event,
+            matched_outputs=matched_output_ids,
+            delivered_outputs=delivered_output_ids,
+            filtered_outputs=filtered_output_ids,
+            uninitialized_outputs=uninitialized_output_ids,
+            failed_outputs=failed_output_ids,
+        )
+        summary = {
+            "rule_id": event.rule_id,
+            "previous_state": event.previous_state.value if event.previous_state is not None else None,
+            "current_state": event.current_state.value,
+            "occurred_at": event.occurred_at,
+            "matched_outputs": matched_output_ids,
+            "delivered_outputs": delivered_output_ids,
+            "filtered_outputs": filtered_output_ids,
+            "uninitialized_outputs": uninitialized_output_ids,
+            "failed_outputs": failed_output_ids,
+        }
+        if not matched_output_ids:
+            logger.info(
+                "alert event for rule '%s' (%s -> %s) had no matching outputs",
+                event.rule_id,
+                event.previous_state.value if event.previous_state is not None else "-",
+                event.current_state.value,
+            )
+        elif not initialized_output_ids:
+            logger.warning(
+                "alert event for rule '%s' (%s -> %s) had matching outputs but none were initialized",
+                event.rule_id,
+                event.previous_state.value if event.previous_state is not None else "-",
+                event.current_state.value,
+            )
+        return summary
+
+    def _derive_alert_event(
+        self,
+        *,
+        previous: Alert | None,
+        alert: Alert,
+        occurred_at: datetime,
+    ) -> AlertEvent | None:
+        previous_state = previous.state if previous is not None else None
+        previous_severity = previous.severity if previous is not None else None
+        current_state = alert.state
+        current_severity = alert.severity
+
+        if previous is None:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=None,
+                previous_severity=None,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=None,
+            )
+        if previous_state != current_state:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=previous_state,
+                previous_severity=previous_severity,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=None,
+            )
+        if previous_severity is not None and previous_severity < current_severity:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=previous_state,
+                previous_severity=previous_severity,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=ESCALATED,
+            )
+        if previous_severity is not None and previous_severity > current_severity:
+            return self._make_alert_event(
+                alert=alert,
+                occurred_at=occurred_at,
+                previous_state=previous_state,
+                previous_severity=previous_severity,
+                current_state=current_state,
+                current_severity=current_severity,
+                transition=DEESCALATED,
+            )
+        return None
+
+    def _make_alert_event(
+        self,
+        *,
+        alert: Alert,
+        occurred_at: datetime,
+        previous_state: AlertState | None,
+        previous_severity,
+        current_state: AlertState,
+        current_severity,
+        transition: TransitionKind | None,
+    ) -> AlertEvent:
+        return AlertEvent(
+            rule_id=alert.rule_id,
+            previous_state=previous_state,
+            current_state=current_state,
+            previous_severity=previous_severity,
+            current_severity=current_severity,
+            transition=transition,
+            alert=alert,
+            occurred_at=occurred_at,
+        )
 
     def _is_rule_excluded(self, rule_id: str) -> bool:
         return any(fnmatch(rule_id, pattern) for pattern in self._exclude_rule_patterns)
@@ -726,14 +1330,14 @@ class Engine:
         status = self._plugin_status("output", output_id)
         try:
             output.init({"engine": self})
-            status.state = "ready"
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
             status.last_success_at = self._now_fn()
             status.last_updated_at = status.last_success_at
         except Exception as exc:
-            status.state = "failed"
+            self._set_plugin_failed(status)
             status.init_ok = False
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
@@ -746,17 +1350,81 @@ class Engine:
         try:
             output.terminate({"engine": self})
         except Exception as exc:
-            status.state = "failed"
+            self._set_plugin_failed(status)
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
             status.last_updated_at = status.last_failure_at
             logger.exception("output '%s' terminate failed", output_id)
 
+    def _recover_output_emit(
+        self,
+        output_id: str,
+        output: Output,
+        event: AlertEvent,
+        status: PluginStatus,
+        initial_exc: Exception,
+    ) -> bool:
+        last_exc: Exception = initial_exc
+        last_detail = traceback.format_exc()
+        attempt = 0
+
+        for _ in range(getattr(output, "max_retry", 1)):
+            attempt += 1
+            time.sleep(attempt ** 2)
+            try:
+                output.emit(event, {"engine": self})
+                self._set_plugin_ready(status)
+                status.last_error = None
+                status.last_error_detail = None
+                status.run_count += 1
+                status.last_run_at = event.occurred_at
+                status.last_success_at = event.occurred_at
+                status.last_updated_at = event.occurred_at
+                return True
+            except Exception as exc:
+                last_exc = exc
+                last_detail = traceback.format_exc()
+
+        for _ in range(getattr(output, "max_reinit", 1)):
+            attempt += 1
+            time.sleep(attempt ** 2)
+            try:
+                output.terminate({"engine": self})
+            except Exception:
+                last_detail = traceback.format_exc()
+            try:
+                output.init({"engine": self})
+                status.init_ok = True
+            except Exception as exc:
+                last_exc = exc
+                last_detail = traceback.format_exc()
+                continue
+            try:
+                output.emit(event, {"engine": self})
+                self._set_plugin_ready(status)
+                status.last_error = None
+                status.last_error_detail = None
+                status.run_count += 1
+                status.last_run_at = event.occurred_at
+                status.last_success_at = event.occurred_at
+                status.last_updated_at = event.occurred_at
+                return True
+            except Exception as exc:
+                last_exc = exc
+                last_detail = traceback.format_exc()
+
+        self._set_plugin_failed(status)
+        status.last_error = str(last_exc)
+        status.last_error_detail = last_detail
+        status.last_failure_at = event.occurred_at
+        status.last_updated_at = event.occurred_at
+        return False
+
     def record_source_failure(self, source_id: str, error: str, *, now: datetime | None = None) -> None:
         when = now or self._now_fn()
         status = self._plugin_status("source", source_id)
-        status.state = "failed"
+        self._set_plugin_failed(status)
         status.last_error = error
         status.last_error_detail = None
         status.run_count += 1
@@ -768,14 +1436,14 @@ class Engine:
         status = self._plugin_status("source", source.source_id)
         try:
             source.init({"engine": self})
-            status.state = "ready"
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
             status.last_success_at = self._now_fn()
             status.last_updated_at = status.last_success_at
         except Exception as exc:
-            status.state = "failed"
+            self._set_plugin_failed(status)
             status.init_ok = False
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
@@ -788,7 +1456,7 @@ class Engine:
         try:
             source.terminate({"engine": self})
         except Exception as exc:
-            status.state = "failed"
+            self._set_plugin_failed(status)
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
@@ -804,6 +1472,17 @@ class Engine:
     ) -> None:
         status = self._plugin_status("rule", rule.rule_id)
         try:
+            ctx = RuleContext(
+                now=now,
+                source_id=source_state.source_id,
+                source_state=source_state,
+                source_states=self.source_states,
+                declared_inputs=tuple(getattr(rule, "inputs", [])),
+                resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
+                previous_alert=self.alerts.get(rule.rule_id),
+            )
+            if not ctx.inputs():
+                raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
             dependency_state = self._resolve_dependency_state(rule, source_payload)
             if dependency_state is not None:
                 self._apply_evaluation(
@@ -818,12 +1497,7 @@ class Engine:
                 evaluation = rule.normalize_evaluation(
                     rule.evaluate(
                         source_payload,
-                        RuleContext(
-                            now=now,
-                            source_id=rule.source,
-                            source_state=source_state,
-                            previous_alert=self.alerts.get(rule.rule_id),
-                        ),
+                        ctx,
                     ),
                     source_payload,
                 )
@@ -844,7 +1518,7 @@ class Engine:
                         operator_state.severity,
                         now,
                     )
-                    status.state = "ready"
+                    self._set_plugin_ready(status)
                     status.init_ok = True
                     status.last_error = None
                     status.last_error_detail = None
@@ -861,7 +1535,7 @@ class Engine:
                     evaluation.severity or rule.severity,
                     now,
                 )
-            status.state = "ready"
+            self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
             status.last_error_detail = None
@@ -870,7 +1544,7 @@ class Engine:
             status.last_success_at = now
             status.last_updated_at = now
         except Exception as exc:
-            status.state = "failed"
+            self._set_plugin_failed(status)
             status.init_ok = True
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
@@ -880,12 +1554,68 @@ class Engine:
             status.last_updated_at = now
             logger.exception("rule '%s' failed", rule.rule_id)
 
+    def _evaluate_rule_preview(
+        self,
+        rule: Rule,
+        source_payload: dict[str, object],
+        source_state: SourceState,
+        now: datetime,
+    ) -> Alert:
+        ctx = RuleContext(
+            now=now,
+            source_id=source_state.source_id,
+            source_state=source_state,
+            source_states=self.source_states,
+            declared_inputs=tuple(getattr(rule, "inputs", [])),
+            resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
+            previous_alert=self.alerts.get(rule.rule_id),
+        )
+        if not ctx.inputs():
+            raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
+        dependency_state = self._resolve_dependency_state(rule, source_payload)
+        if dependency_state is not None:
+            return dependency_state
+
+        evaluation = rule.normalize_evaluation(
+            rule.evaluate(
+                source_payload,
+                ctx,
+            ),
+            source_payload,
+        )
+        return self._resolve_operator_state(
+            rule,
+            evaluation.state,
+            evaluation.payload,
+            evaluation.message,
+            evaluation.severity or rule.severity,
+            now,
+        ) or Alert(
+            rule_id=rule.rule_id,
+            state=evaluation.state,
+            severity=evaluation.severity or rule.severity,
+            owner=rule.owner,
+            tags=tuple(rule.tags),
+            payload=evaluation.payload,
+            message=evaluation.message,
+        )
+
     def _plugin_key(self, plugin_type: str, plugin_id: str) -> str:
         return f"{plugin_type}:{plugin_id}"
 
     def _plugin_status(self, plugin_type: str, plugin_id: str) -> PluginStatus:
         key = self._plugin_key(plugin_type, plugin_id)
         return self.plugin_states.setdefault(key, PluginStatus(plugin_type, plugin_id))
+
+    def _set_plugin_ready(self, status: PluginStatus) -> None:
+        if status.state in {"DISCOVERED", "DIRTY", "PENDING_REMOVE"}:
+            return
+        status.state = "READY"
+
+    def _set_plugin_failed(self, status: PluginStatus) -> None:
+        if status.state in {"DISCOVERED", "DIRTY", "PENDING_REMOVE"}:
+            return
+        status.state = "FAILED"
 
     def _rebuild_plugin_states(self) -> None:
         next_states: dict[str, PluginStatus] = {}
@@ -899,3 +1629,18 @@ class Engine:
             key = self._plugin_key("output", output_id)
             next_states[key] = self.plugin_states.get(key, PluginStatus("output", output_id))
         self.plugin_states = next_states
+        self._sync_plugin_definition_files()
+
+    def _sync_plugin_definition_files(self) -> None:
+        for source_id, source in self.sources.items():
+            status = self._plugin_status("source", source_id)
+            status.loaded = True
+            status.definition_file = getattr(source.__class__, "__kanary_definition_file__", None)
+        for rule_id, rule in self.rules.items():
+            status = self._plugin_status("rule", rule_id)
+            status.loaded = True
+            status.definition_file = getattr(rule.__class__, "__kanary_definition_file__", None)
+        for output_id, output in self.outputs.items():
+            status = self._plugin_status("output", output_id)
+            status.loaded = True
+            status.definition_file = getattr(output.__class__, "__kanary_definition_file__", None)

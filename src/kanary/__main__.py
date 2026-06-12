@@ -1,15 +1,56 @@
 import argparse
+from importlib import metadata as importlib_metadata
 import logging
 import os
 from pathlib import Path
 import sys
+import tomllib
 
 from .loader import RuleDirectoryLoader
-from .runtime import DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
+from .runtime import AUTO_RELOAD_CHOICES, DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _kanary_version() -> str:
+    try:
+        return importlib_metadata.version("kanary")
+    except importlib_metadata.PackageNotFoundError:
+        try:
+            with (PROJECT_ROOT / "pyproject.toml").open("rb") as handle:
+                project = tomllib.load(handle).get("project", {})
+        except OSError:
+            return "unknown"
+        version = project.get("version")
+        return str(version) if version else "unknown"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run or lint the KANARY engine")
+    parser = argparse.ArgumentParser(
+        description="Run or lint the KANARY engine",
+        epilog=(
+            "Run is the default command, so you can omit it:\n"
+            "  kanary ./plugins\n"
+            "  python -m kanary ./plugins\n"
+            "\n"
+            "Common run options:\n"
+            "  --api-host HOST        Bind the local API and Web viewer host\n"
+            "  --api-port PORT        Bind the local API and Web viewer port\n"
+            "  --state-db PATH        Persist history and actions in SQLite\n"
+            "  --auto-reload MODE     Apply discovered changes automatically (off, dirty, all)\n"
+            "  --exclude GLOB         Exclude matching plugin ids from the runtime\n"
+            "  For the full run option list, use:\n"
+            "  kanary run --help\n"
+            "Lint must be explicit:\n"
+            "  kanary lint ./plugins"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_kanary_version()}",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Run the KANARY engine")
@@ -30,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LOG_LEVEL,
         choices=LOG_LEVEL_CHOICES,
         help="Logging level for engine/runtime logs.",
+    )
+    run_parser.add_argument(
+        "--auto-reload",
+        default="off",
+        choices=AUTO_RELOAD_CHOICES,
+        help="Automatically apply discovered changes: off, dirty, or all. Defaults to off.",
     )
     run_parser.add_argument(
         "--api-host",
@@ -79,7 +126,7 @@ def main() -> int:
     if not argv:
         parser.print_help()
         return 2
-    if argv[0] not in {"run", "lint", "-h", "--help"}:
+    if argv[0] not in {"run", "lint", "-h", "--help", "--version"}:
         argv = ["run", *argv]
     args = parser.parse_args(argv)
 
@@ -111,6 +158,7 @@ def main() -> int:
     runtime = EngineRuntime(
         RuntimeConfig(
             rule_directories=[Path(path) for path in args.plugin_directories],
+            auto_reload=args.auto_reload,
             exclude_plugins=args.exclude,
             log_level=args.log_level,
             api_host=args.api_host,

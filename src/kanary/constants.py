@@ -14,7 +14,12 @@ class AlertState(StrEnum):
     ACKED = "ACKED"
     SILENCED = "SILENCED"
     SUPPRESSED = "SUPPRESSED"
-    RESOLVED = "RESOLVED"
+
+
+class TransitionKind(StrEnum):
+    UNACK = "UNACK"
+    ESCALATED = "ESCALATED"
+    DEESCALATED = "DEESCALATED"
 
 
 def severity_label(value: int | Severity) -> str:
@@ -34,4 +39,7 @@ FIRING = AlertState.FIRING
 ACKED = AlertState.ACKED
 SILENCED = AlertState.SILENCED
 SUPPRESSED = AlertState.SUPPRESSED
-RESOLVED = AlertState.RESOLVED
+
+UNACK = TransitionKind.UNACK
+ESCALATED = TransitionKind.ESCALATED
+DEESCALATED = TransitionKind.DEESCALATED

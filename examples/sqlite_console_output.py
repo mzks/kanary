@@ -15,6 +15,14 @@ class ConsoleOutput:
                         event.previous_state.value if event.previous_state is not None else None
                     ),
                     "current_state": event.current_state.value,
+                    "previous_severity": (
+                        kanary.severity_label(event.previous_severity)
+                        if event.previous_severity is not None else None
+                    ),
+                    "current_severity": kanary.severity_label(event.current_severity),
+                    "transition": event.transition.value if event.transition else None,
+                    "owner": event.alert.owner,
+                    "tags": list(event.alert.tags),
                     "message": event.alert.message,
                     "occurred_at": event.occurred_at.isoformat(),
                 },
