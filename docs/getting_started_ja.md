@@ -40,15 +40,14 @@ class LocalLoadSource:
     def poll(self, ctx):
         load1, _, _ = os.getloadavg()
         cpu_count = os.cpu_count() or 1
-        return kanary.inputs(
-            {
-                "load1_per_cpu": (
-                    load1 / cpu_count,
-                    datetime.now(timezone.utc),
-                    {"raw_load1": load1, "cpu_count": cpu_count},
-                ),
-            }
-        )
+        return kanary.inputs([
+            (
+                "load1_per_cpu",
+                load1 / cpu_count,
+                datetime.now(timezone.utc),
+                {"raw_load1": load1, "cpu_count": cpu_count},
+            ),
+        ])
 ```
 
 最小の source interface は次です。
@@ -72,7 +71,6 @@ class LocalLoadSource:
     inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusy:
     description = "Alert when the 1-minute load average per CPU is high."
@@ -98,6 +96,7 @@ class LocalLoadBusy:
 - `tags`
 - `evaluate(self, payload, ctx)`
 - 通常は `kanary.ok(...)` または `kanary.firing(...)` を返すこと
+- `owner`, `description`, `runbook` は任意 metadata
 
 単一 input なら `ctx.value()`、複数 input なら `ctx.inputs()` を使えます。
 
@@ -111,7 +110,6 @@ class LocalLoadBusy:
     inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusyThreshold(kanary.ThresholdRule):
     direction = "high"

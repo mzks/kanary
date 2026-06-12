@@ -31,7 +31,6 @@ uv run python -m kanary lint ./examples --exclude console
   - `tags`
   - `evaluate()`
 - `tags = []` warning
-- owner 未設定 warning
 - source 参照の整合
 - plugin ID 重複
 - `StaleRule.timeout` の妥当性

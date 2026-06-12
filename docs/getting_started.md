@@ -53,15 +53,14 @@ class LocalLoadSource:
     def poll(self, ctx):
         load1, _, _ = os.getloadavg()
         cpu_count = os.cpu_count() or 1
-        return kanary.inputs(
-            {
-                "load1_per_cpu": (
-                    load1 / cpu_count,
-                    datetime.now(timezone.utc),
-                    {"raw_load1": load1, "cpu_count": cpu_count},
-                ),
-            }
-        )
+        return kanary.inputs([
+            (
+                "load1_per_cpu",
+                load1 / cpu_count,
+                datetime.now(timezone.utc),
+                {"raw_load1": load1, "cpu_count": cpu_count},
+            ),
+        ])
 ```
 
 The minimum source interface is:
@@ -86,7 +85,6 @@ Add a rule that fires when the load becomes high.
     inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusy:
     description = "Alert when the 1-minute load average per CPU is high."
@@ -112,6 +110,7 @@ The minimum rule interface is:
 - `tags`
 - `evaluate(self, payload, ctx)`
 - usually return `kanary.ok(...)` or `kanary.firing(...)`
+- `owner`, `description`, and `runbook` are optional metadata
 
 High-level accessors such as `ctx.value()` for a single input or `ctx.inputs()` for multiple inputs are usually enough.
 
@@ -126,7 +125,6 @@ For example, here is a `ThresholdRule`:
     inputs="local_load:load1_per_cpu",
     severity=kanary.WARN,
     tags=["getting-started", "demo"],
-    owner="demo_owner",
 )
 class LocalLoadBusyThreshold(kanary.ThresholdRule):
     direction = "high"

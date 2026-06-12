@@ -33,7 +33,6 @@ Typical checks:
   - `tags`
   - `evaluate()`
 - warning for `tags = []`
-- warning for missing `owner`
 - source reference validation
 - duplicate plugin IDs
 - `StaleRule.timeout` validation

@@ -67,11 +67,9 @@ import kanary
 @kanary.source(source_id="demo", interval=10.0)
 class DemoSource:
     def poll(self, ctx):
-        return kanary.inputs(
-            {
-                "temperature": (23.4, datetime.now(timezone.utc)),
-            }
-        )
+        return kanary.inputs([
+            ("temperature", 23.4, datetime.now(timezone.utc)),
+        ])
 
 
 @kanary.rule(
@@ -79,7 +77,6 @@ class DemoSource:
     inputs="demo:temperature",
     severity=kanary.WARN,
     tags=["demo"],
-    owner="demo_owner",
 )
 class DemoTemperatureHigh:
     threshold = 25.0
@@ -102,7 +99,7 @@ class ConsoleOutput:
         print(
             event.rule_id,
             event.current_state.value,
-            kanary.severity_label(event.current_severity),
+            event.current_severity.name,
             event.transition.value if event.transition else "-",
             event.alert.message,
         )
