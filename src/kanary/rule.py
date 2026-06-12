@@ -7,6 +7,7 @@ from typing import Any
 
 from .constants import AlertState, Severity, CRITICAL, ERROR, FIRING, INFO, OK, WARN
 from .models import Alert, Evaluation, SourceState
+from .signature_compat import detect_instance_method_style
 from .units import format_rate, format_time, second
 
 
@@ -177,6 +178,26 @@ class RuleContext:
     def prev_metadata(self, name: str | None = None, default: Any = None) -> Any:
         return self.metadata(name, default, previous=True)
 
+    def source_payload(
+        self,
+        source_id: str | None = None,
+        *,
+        previous: bool = False,
+    ) -> dict[str, Any]:
+        target_source_id = source_id
+        if target_source_id is None:
+            if self.source_id is not None:
+                target_source_id = self.source_id
+            elif len(self.resolved_sources) == 1:
+                target_source_id = self.resolved_sources[0]
+            else:
+                raise ValueError("source_payload() is ambiguous; specify source_id")
+        state = (self.source_states or {}).get(target_source_id)
+        if state is None:
+            return {}
+        snapshot = state.previous.payload if previous else state.current.payload
+        return dict(snapshot)
+
     def _single_input_match(self, selector: str | None, *, previous: bool = False) -> InputView | None:
         matches = self.inputs(selector, previous=previous)
         if not matches:
@@ -216,7 +237,7 @@ class Rule:
     depends_on: list[str] = []
     suppressed_by: list[str] = []
 
-    def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+    def evaluate(self, ctx: RuleContext) -> Evaluation:
         raise NotImplementedError
 
     def normalize_evaluation(
@@ -377,7 +398,8 @@ class StaleRule(Rule):
     timeout: float
     timestamp_field: str | None = None
 
-    def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+    def evaluate(self, ctx: RuleContext) -> Evaluation:
+        source_payload = ctx.source_payload()
         selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.timestamp_field is None else []
         if self.timestamp_field is None and selector is None:
@@ -386,7 +408,7 @@ class StaleRule(Rule):
             if not matches:
                 return Evaluation(
                     state=AlertState.FIRING,
-                    payload=dict(payload),
+                    payload=source_payload,
                     message=_missing_field_message(
                         ctx,
                         input_selector=selector,
@@ -405,7 +427,7 @@ class StaleRule(Rule):
                 age_seconds = (ctx.now - observed_at).total_seconds()
                 if age_seconds > self.timeout:
                     stale_inputs.append({"name": item.name, "age_seconds": age_seconds})
-            result_payload = dict(payload)
+            result_payload = dict(source_payload)
             result_payload["stale_inputs"] = stale_inputs
             result_payload["missing_inputs"] = missing_inputs
             if stale_inputs or missing_inputs:
@@ -428,9 +450,9 @@ class StaleRule(Rule):
                 message=f"all inputs are fresh (<= {format_time(self.timeout)})",
             )
 
-        result_payload = dict(payload)
+        result_payload = dict(source_payload)
         timestamp_field = self._timestamp_field()
-        timestamp_value = self._current_timestamp_value(payload, ctx)
+        timestamp_value = self._current_timestamp_value(source_payload, ctx)
         selector_label = _selector_label(self.primary_input_selector())
 
         if timestamp_value is None:
@@ -490,7 +512,8 @@ class RangeRule(Rule):
     lower_inclusive: bool = True
     upper_inclusive: bool = True
 
-    def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+    def evaluate(self, ctx: RuleContext) -> Evaluation:
+        source_payload = ctx.source_payload()
         selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.field is None else []
         if self.field is None and selector is None:
@@ -499,7 +522,7 @@ class RangeRule(Rule):
             if not matches:
                 return Evaluation(
                     state=AlertState.OK,
-                    payload=dict(payload),
+                    payload=source_payload,
                     message=_missing_field_message(
                         ctx,
                         input_selector=selector,
@@ -516,7 +539,7 @@ class RangeRule(Rule):
                     continue
                 if self._is_out_of_range(item.value):
                     matched_inputs.append({"name": item.name, "value": item.value})
-            result_payload = dict(payload)
+            result_payload = dict(source_payload)
             result_payload["matched_inputs"] = matched_inputs
             result_payload["missing_inputs"] = missing_inputs
             if matched_inputs:
@@ -546,8 +569,8 @@ class RangeRule(Rule):
 
         field = self._field()
         field_label = self._field_label()
-        value = self._current_field_value(payload, ctx)
-        result_payload = dict(payload)
+        value = self._current_field_value(source_payload, ctx)
+        result_payload = dict(source_payload)
         selector_label = _selector_label(self.primary_input_selector())
 
         if value is None:
@@ -684,7 +707,8 @@ class ThresholdRule(Rule):
     direction: str = "high"
     hysteresis: float = 0.0
 
-    def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+    def evaluate(self, ctx: RuleContext) -> Evaluation:
+        source_payload = ctx.source_payload()
         selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.field is None else []
         if self.field is None and selector is None:
@@ -693,7 +717,7 @@ class ThresholdRule(Rule):
             if not matches:
                 return Evaluation(
                     state=AlertState.OK,
-                    payload=dict(payload),
+                    payload=source_payload,
                     message=_missing_field_message(
                         ctx,
                         input_selector=selector,
@@ -720,7 +744,7 @@ class ThresholdRule(Rule):
                 )
                 if highest is None or matched_severity > highest:
                     highest = matched_severity
-            result_payload = dict(payload)
+            result_payload = dict(source_payload)
             result_payload["matched_inputs"] = matched_inputs
             result_payload["missing_inputs"] = missing_inputs
             result_payload["matched_severity"] = highest.name if highest is not None else None
@@ -746,8 +770,8 @@ class ThresholdRule(Rule):
 
         field = self._field()
         field_label = self._field_label()
-        value = self._current_field_value(payload, ctx)
-        result_payload = dict(payload)
+        value = self._current_field_value(source_payload, ctx)
+        result_payload = dict(source_payload)
         selector_label = _selector_label(self.primary_input_selector())
 
         if value is None:
@@ -874,7 +898,8 @@ class RateRule(RangeRule):
     previous_timestamp_field: str | None = None
     per_seconds: float = 1.0
 
-    def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+    def evaluate(self, ctx: RuleContext) -> Evaluation:
+        source_payload = ctx.source_payload()
         selector = self.primary_input_selector()
         matches = ctx.inputs(selector) if self.field is None and self.timestamp_field is None and self.previous_field is None and self.previous_timestamp_field is None else []
         if self.field is None and self.timestamp_field is None and self.previous_field is None and self.previous_timestamp_field is None and selector is None:
@@ -883,7 +908,7 @@ class RateRule(RangeRule):
             if not matches:
                 return Evaluation(
                     state=AlertState.OK,
-                    payload=dict(payload),
+                    payload=source_payload,
                     message=_missing_field_message(
                         ctx,
                         input_selector=selector,
@@ -894,7 +919,7 @@ class RateRule(RangeRule):
                 )
             matched_inputs: list[dict[str, Any]] = []
             missing_inputs: list[str] = []
-            result_payload = dict(payload)
+            result_payload = dict(source_payload)
             for item in matches:
                 previous_value = ctx.prev_value(item.name)
                 previous_timestamp = ctx.prev_timestamp(item.name)
@@ -949,11 +974,11 @@ class RateRule(RangeRule):
         previous_field = self._previous_field()
         previous_timestamp_field = self._previous_timestamp_field()
 
-        current_value = self._current_field_value(payload, ctx)
-        current_timestamp = self._current_timestamp_value(payload, ctx)
+        current_value = self._current_field_value(source_payload, ctx)
+        current_timestamp = self._current_timestamp_value(source_payload, ctx)
         previous_value = self._previous_field_value(ctx)
         previous_timestamp = self._previous_timestamp_value(ctx)
-        result_payload = dict(payload)
+        result_payload = dict(source_payload)
         selector_label = _selector_label(self.primary_input_selector())
 
         if current_value is None or current_timestamp is None:
@@ -1269,7 +1294,17 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
 
     evaluate = getattr(cls, "evaluate", None)
     if not callable(evaluate):
-        raise ValueError(f"rule '{rule_id}' must implement evaluate(payload, ctx)")
+        raise ValueError(f"rule '{rule_id}' must implement evaluate(ctx)")
+    try:
+        cls.__kanary_evaluate_style__ = detect_instance_method_style(
+            evaluate,
+            new_arity=1,
+            legacy_arity=2,
+            new_signature="evaluate(self, ctx)",
+            legacy_signature="evaluate(self, payload, ctx)",
+        )
+    except ValueError as exc:
+        raise ValueError(f"rule '{rule_id}' {exc}") from exc
 
     _setdefault(cls, "owner", None)
     _setdefault(cls, "description", None)

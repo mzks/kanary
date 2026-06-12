@@ -6,6 +6,7 @@ from typing import Any
 from .models import AlertEvent
 from .constants import Severity, severity_label
 from .patterns import matches_any_tag, matches_excluded_tag
+from .signature_compat import detect_instance_method_style
 
 
 class Output:
@@ -18,13 +19,13 @@ class Output:
     max_retry: int = 1
     max_reinit: int = 1
 
-    def init(self, ctx: dict[str, Any]) -> None:
+    def init(self) -> None:
         return None
 
-    def emit(self, event: AlertEvent, ctx: dict[str, Any]) -> None:
+    def emit(self, event: AlertEvent) -> None:
         raise NotImplementedError
 
-    def terminate(self, ctx: dict[str, Any]) -> None:
+    def terminate(self) -> None:
         return None
 
     def matches(self, event: AlertEvent) -> bool:
@@ -56,7 +57,7 @@ class MailOutput(Output):
     recipients: list[str] = []
     subject_prefix: str = "[KANARY]"
 
-    def init(self, ctx: dict[str, Any]) -> None:
+    def init(self) -> None:
         self.smtp_host = self.smtp_host or os.environ.get("KANARY_SMTP_HOST")
         self.smtp_port = int(os.environ.get("KANARY_SMTP_PORT", str(self.smtp_port)))
         self.smtp_username = self.smtp_username or os.environ.get("KANARY_SMTP_USER")
@@ -72,7 +73,7 @@ class MailOutput(Output):
         if not self.recipients:
             raise RuntimeError("KANARY_SMTP_RECIPIENTS is not set")
 
-    def emit(self, event: AlertEvent, ctx: dict[str, Any]) -> None:
+    def emit(self, event: AlertEvent) -> None:
         message = EmailMessage()
         message["Subject"] = self._subject(event)
         message["From"] = self.sender or ""
@@ -100,14 +101,14 @@ class MailOutput(Output):
             f"State: {event.current_state.value}",
             f"Previous Severity: {severity_label(event.previous_severity) if event.previous_severity is not None else '-'}",
             f"Severity: {severity_label(event.current_severity)}",
-            f"Message: {event.alert.message or '-'}",
+            f"Message: {event.message or '-'}",
         ]
         if event.transition is not None:
             lines.append(f"Transition: {event.transition.value}")
-        if event.alert.tags:
-            lines.append(f"Tags: {', '.join(event.alert.tags)}")
-        if event.alert.owner:
-            lines.append(f"Owner: {event.alert.owner}")
+        if event.tags:
+            lines.append(f"Tags: {', '.join(event.tags)}")
+        if event.owner:
+            lines.append(f"Owner: {event.owner}")
         return "\n".join(lines)
 
 
@@ -138,7 +139,31 @@ def prepare_output_class(cls: type[Any]) -> type[Any]:
         if not isinstance(value, int) or value < 0:
             raise ValueError(f"output '{output_id}' {attr_name} must be a non-negative integer")
     if not callable(getattr(cls, "emit", None)):
-        raise ValueError(f"output '{output_id}' must implement emit(event, ctx)")
+        raise ValueError(f"output '{output_id}' must implement emit(event)")
+    try:
+        cls.__kanary_init_style__ = detect_instance_method_style(
+            getattr(cls, "init"),
+            new_arity=0,
+            legacy_arity=1,
+            new_signature="init(self)",
+            legacy_signature="init(self, ctx)",
+        )
+        cls.__kanary_emit_style__ = detect_instance_method_style(
+            getattr(cls, "emit"),
+            new_arity=1,
+            legacy_arity=2,
+            new_signature="emit(self, event)",
+            legacy_signature="emit(self, event, ctx)",
+        )
+        cls.__kanary_terminate_style__ = detect_instance_method_style(
+            getattr(cls, "terminate"),
+            new_arity=0,
+            legacy_arity=1,
+            new_signature="terminate(self)",
+            legacy_signature="terminate(self, ctx)",
+        )
+    except ValueError as exc:
+        raise ValueError(f"output '{output_id}' {exc}") from exc
     return cls
 
 

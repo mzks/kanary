@@ -6,7 +6,7 @@ import kanary
 @kanary.output(output_id="console")
 class ConsoleOutput:
 
-    def emit(self, event, ctx):
+    def emit(self, event):
         print(
             json.dumps(
                 {
@@ -21,9 +21,9 @@ class ConsoleOutput:
                     ),
                     "current_severity": kanary.severity_label(event.current_severity),
                     "transition": event.transition.value if event.transition else None,
-                    "owner": event.alert.owner,
-                    "tags": list(event.alert.tags),
-                    "message": event.alert.message,
+                    "owner": event.owner,
+                    "tags": list(event.tags),
+                    "message": event.message,
                     "occurred_at": event.occurred_at.isoformat(),
                 },
                 ensure_ascii=False,

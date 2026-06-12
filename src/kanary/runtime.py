@@ -389,7 +389,7 @@ class EngineRuntime:
         attempt = 0
 
         try:
-            return source.poll({"engine": self.engine, "now": now})
+            return self.engine._call_source_poll(source, now=now)
         except Exception as exc:
             last_exc = exc
 
@@ -398,7 +398,7 @@ class EngineRuntime:
             if stop_event.wait(attempt ** 2) or self._stop_event.is_set():
                 raise RuntimeError("source polling interrupted during recovery")
             try:
-                return source.poll({"engine": self.engine, "now": now})
+                return self.engine._call_source_poll(source, now=now)
             except Exception as exc:
                 last_exc = exc
 
@@ -416,7 +416,7 @@ class EngineRuntime:
                 last_exc = exc
                 continue
             try:
-                return source.poll({"engine": self.engine, "now": now})
+                return self.engine._call_source_poll(source, now=now)
             except Exception as exc:
                 last_exc = exc
 

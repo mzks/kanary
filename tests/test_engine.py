@@ -513,8 +513,8 @@ class EngineTest(unittest.TestCase):
             tags = ["test"]
             high = 21.0
 
-        stale_alert = DottedStale().evaluate(source_state.current.payload, ctx)
-        range_alert = DottedRange().evaluate(source_state.current.payload, ctx)
+        stale_alert = DottedStale().evaluate(ctx)
+        range_alert = DottedRange().evaluate(ctx)
 
         self.assertEqual(stale_alert.state, kanary.AlertState.OK)
         self.assertEqual(range_alert.state, kanary.AlertState.OK)
@@ -640,7 +640,7 @@ class EngineTest(unittest.TestCase):
             tags = ["test"]
             timeout = 60.0
 
-        alert = MissingMeasurementStale().evaluate(source_state.current.payload, ctx)
+        alert = MissingMeasurementStale().evaluate(ctx)
         self.assertEqual(alert.state, kanary.AlertState.FIRING)
         self.assertIn("input 'det1.radon_conc.Bq_m3' is missing", alert.message)
         self.assertIn("closest available input: postgres:det1.radon_conc", alert.message)
@@ -668,7 +668,7 @@ class EngineTest(unittest.TestCase):
             direction = "high"
             thresholds = [(10.0, kanary.WARN)]
 
-        alert = MissingValueThreshold().evaluate(source_state.current.payload, ctx)
+        alert = MissingValueThreshold().evaluate(ctx)
         self.assertEqual(alert.state, kanary.AlertState.OK)
         self.assertEqual(alert.message, "input 'temperature' is present but value is missing")
 
@@ -699,7 +699,7 @@ class EngineTest(unittest.TestCase):
                 (19.5, kanary.CRITICAL),
             ]
 
-        alert = KernelOxygenLevel().evaluate(source_state.current.payload, ctx)
+        alert = KernelOxygenLevel().evaluate(ctx)
         self.assertEqual(alert.state, kanary.OK)
         self.assertEqual(
             alert.message,
@@ -933,11 +933,11 @@ class EngineTest(unittest.TestCase):
 class BufferedSourceTest(unittest.TestCase):
     def test_buffered_source_keeps_history_and_computes_aggregates(self) -> None:
         source = BufferedTemperatureSource()
-        source.init({})
+        source.init()
         try:
-            source.poll({})
-            source.poll({})
-            source.poll({})
+            source.poll()
+            source.poll()
+            source.poll()
             history = source.history("temperature")
             self.assertEqual(len(history), 3)
             self.assertEqual(source.average_value("temperature"), 22.0)
@@ -946,7 +946,7 @@ class BufferedSourceTest(unittest.TestCase):
             self.assertEqual(source.count("temperature"), 3)
             self.assertEqual(source.rate("temperature", per_seconds=60.0), 0.4)
         finally:
-            source.terminate({})
+            source.terminate()
 
 
 class SourceScheduleTest(unittest.TestCase):
@@ -991,7 +991,7 @@ class SourceScheduleTest(unittest.TestCase):
 
                     @kanary.source(source_id="example.source", schedule="bad cron")
                     class ExampleSource:
-                        def poll(self, ctx):
+                        def poll(self):
                             return kanary.SourceResult()
                     """
                 )
@@ -1072,7 +1072,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.source(source_id="example.source", interval=60.0)
                     class ExampleSource:
-                        def poll(self, ctx):
+                        def poll(self):
                             return kanary.SourceResult()
                     """
                 )
@@ -1089,8 +1089,8 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         tags=["example"],
                     )
                     class ExampleRule:
-                        def evaluate(self, payload, ctx):
-                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                        def evaluate(self, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=ctx.source_payload())
                     """
                 )
             )
@@ -1113,7 +1113,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         source_id = "example.source"
                         interval = 60.0
 
-                        def poll(self, ctx):
+                        def poll(self):
                             return kanary.SourceResult()
 
                     @kanary.rule
@@ -1123,15 +1123,15 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         severity = kanary.ERROR
                         tags = []
 
-                        def evaluate(self, payload, ctx):
-                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                        def evaluate(self, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=ctx.source_payload())
 
                     @kanary.output(
                         output_id="example.output",
                         exclude_states=["OK", "FIRING", "ACKED", "SUPPRESSED", "SILENCED"],
                     )
                     class ExampleOutput:
-                        def emit(self, event, ctx):
+                        def emit(self, event):
                             return None
                     """
                 )
@@ -1157,7 +1157,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.source(source_id="example.source", interval=5.0)
                     class ExampleSource:
-                        def poll(self, ctx):
+                        def poll(self):
                             return kanary.SourceResult()
 
                     @kanary.rule(
@@ -1167,8 +1167,8 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         tags=["example"],
                     )
                     class ExampleRule:
-                        def evaluate(self, payload, ctx):
-                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                        def evaluate(self, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=ctx.source_payload())
                     """
                 )
             )
@@ -1177,6 +1177,72 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
         self.assertEqual(report.errors, [])
         self.assertNotIn("rule 'example.rule' has no owner", report.warnings)
+
+    def test_inspect_warns_for_legacy_plugin_signatures(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "rules.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source", interval=5.0)
+                    class ExampleSource:
+                        def init(self, ctx):
+                            return None
+
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+
+                        def terminate(self, ctx):
+                            return None
+
+                    @kanary.rule(
+                        rule_id="example.rule",
+                        inputs="example.source:value",
+                        severity=kanary.ERROR,
+                        tags=["example"],
+                    )
+                    class ExampleRule:
+                        def evaluate(self, payload, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+
+                    @kanary.output(output_id="example.output")
+                    class ExampleOutput:
+                        def init(self, ctx):
+                            return None
+
+                        def emit(self, event, ctx):
+                            return None
+
+                        def terminate(self, ctx):
+                            return None
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(tmp)
+            _, report = loader.inspect()
+
+        self.assertEqual(report.errors, [])
+        self.assertIn("source 'example.source' uses legacy init(ctx); prefer init()", report.warnings)
+        self.assertIn("source 'example.source' uses legacy poll(ctx); prefer poll()", report.warnings)
+        self.assertIn(
+            "source 'example.source' uses legacy terminate(ctx); prefer terminate()",
+            report.warnings,
+        )
+        self.assertIn(
+            "rule 'example.rule' uses legacy evaluate(payload, ctx); prefer evaluate(ctx)",
+            report.warnings,
+        )
+        self.assertIn("output 'example.output' uses legacy init(ctx); prefer init()", report.warnings)
+        self.assertIn(
+            "output 'example.output' uses legacy emit(event, ctx); prefer emit(event)",
+            report.warnings,
+        )
+        self.assertIn(
+            "output 'example.output' uses legacy terminate(ctx); prefer terminate()",
+            report.warnings,
+        )
 
     def test_inspect_warns_for_broad_and_duplicate_input_selectors(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1188,7 +1254,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.source(source_id="alpha", interval=5.0)
                     class AlphaSource:
-                        def poll(self, ctx):
+                        def poll(self):
                             return kanary.SourceResult()
 
                     @kanary.source(source_id="beta", interval=5.0)
@@ -1198,7 +1264,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.output(output_id="example.output")
                     class ExampleOutput:
-                        def emit(self, event, ctx):
+                        def emit(self, event):
                             return None
 
                     @kanary.rule(
@@ -1209,8 +1275,8 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         owner="owner",
                     )
                     class ExampleRule:
-                        def evaluate(self, payload, ctx):
-                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                        def evaluate(self, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=ctx.source_payload())
                     """
                 )
             )
@@ -1412,7 +1478,7 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
                     @kanary.source(source_id="example.source", interval=60.0)
                     class ExampleSource:
-                        def poll(self, ctx):
+                        def poll(self):
                             return kanary.SourceResult()
 
                     @kanary.rule(
@@ -1423,22 +1489,22 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
                         owner="expert",
                     )
                     class ExampleRule:
-                        def evaluate(self, payload, ctx):
-                            return kanary.Evaluation(state=kanary.OK, payload=payload)
+                        def evaluate(self, ctx):
+                            return kanary.Evaluation(state=kanary.OK, payload=ctx.source_payload())
 
                     @kanary.output(output_id="match-by-tag", include_tags=["infra"])
                     class MatchByTag:
-                        def emit(self, event, ctx):
+                        def emit(self, event):
                             return None
 
                     @kanary.output(output_id="match-by-exclusion", exclude_states=["SUPPRESSED"])
                     class MatchByExclusion:
-                        def emit(self, event, ctx):
+                        def emit(self, event):
                             return None
 
                     @kanary.output(output_id="match-all")
                     class MatchAll:
-                        def emit(self, event, ctx):
+                        def emit(self, event):
                             return None
                     """
                 )

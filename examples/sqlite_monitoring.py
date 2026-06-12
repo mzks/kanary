@@ -21,13 +21,13 @@ def load_config() -> dict:
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
 
-    def init(self, ctx):
+    def init(self):
         config = load_config()
         db_path = str(config.get("db_path", "dev_data.db"))
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
-    def poll(self, ctx):
+    def poll(self):
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -55,7 +55,7 @@ class SqliteSource:
             ]
         )
 
-    def terminate(self, ctx):
+    def terminate(self):
         if hasattr(self, "conn"):
             self.conn.close()
 
@@ -71,13 +71,13 @@ class Value1Stale:
     owner = "expert_dev"
     timeout = 1 * kanary.minute
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         timestamp = ctx.timestamp("value1")
         if timestamp is None:
             return kanary.error("value1 timestamp is missing")
 
         age_seconds = (ctx.now - timestamp).total_seconds()
-        result_payload = dict(payload)
+        result_payload = ctx.source_payload()
         result_payload["age_seconds"] = age_seconds
         if age_seconds > self.timeout:
             return kanary.error(
@@ -138,7 +138,7 @@ class Value2Range:
     low = 90.0
     high = 110.0
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         value2 = ctx.value("value2")
         if value2 is None:
             return kanary.ok("value2 is missing")
@@ -161,7 +161,7 @@ class Value3Range:
     lower_inclusive = True
     upper_inclusive = True
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         value = ctx.value("value3")
         if value is None:
             return kanary.ok("value3 is missing")
@@ -184,7 +184,7 @@ class Value3Range:
     owner="expert_dev",
 )
 class ValuesBalance:
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         value1 = ctx.value("value1")
         value2 = ctx.value("value2")
         value3 = ctx.value("value3")
@@ -194,7 +194,7 @@ class ValuesBalance:
 
         expected_value2 = value1 * (4.0 + value3)
         delta = value2 - expected_value2
-        result_payload = dict(payload)
+        result_payload = ctx.source_payload()
         result_payload["expected_value2"] = expected_value2
         result_payload["delta"] = delta
 
@@ -241,7 +241,7 @@ class Value1TemperatureLevels(kanary.ThresholdRule):
     owner="expert_dev",
 )
 class ValuesBalanceLevels:
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         value1 = ctx.value("value1")
         value2 = ctx.value("value2")
         value3 = ctx.value("value3")
@@ -252,7 +252,7 @@ class ValuesBalanceLevels:
         expected_value2 = value1 * (4.0 + value3)
         delta = value2 - expected_value2
         absolute_delta = abs(delta)
-        result_payload = dict(payload)
+        result_payload = ctx.source_payload()
         result_payload["expected_value2"] = expected_value2
         result_payload["delta"] = delta
 

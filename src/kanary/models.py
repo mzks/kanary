@@ -104,6 +104,50 @@ class AlertEvent:
             return self.previous_severity
         return self.current_severity
 
+    @property
+    def state(self) -> AlertState:
+        return self.current_state
+
+    @property
+    def severity(self) -> Severity:
+        return self.current_severity
+
+    @property
+    def message(self) -> str | None:
+        return self.alert.message
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        return self.alert.payload
+
+    @property
+    def owner(self) -> str | None:
+        return self.alert.owner
+
+    @property
+    def tags(self) -> tuple[str, ...]:
+        return self.alert.tags
+
+    @property
+    def active_since(self) -> datetime | None:
+        return self.alert.active_since
+
+    @property
+    def acked_at(self) -> datetime | None:
+        return self.alert.acked_at
+
+    @property
+    def acked_by(self) -> str | None:
+        return self.alert.acked_by
+
+    @property
+    def ack_reason(self) -> str | None:
+        return self.alert.ack_reason
+
+    @property
+    def active_silence_ids(self) -> tuple[str, ...]:
+        return self.alert.active_silence_ids
+
 
 @dataclass(slots=True)
 class PluginStatus:

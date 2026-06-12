@@ -9,19 +9,20 @@ This document first explains the minimum interface a user needs to implement, an
 Required:
 
 - `source_id`
-- `poll(ctx)`
+- `poll()`
 
 Optional:
 
 - `interval`
 - `schedule`
-- `init(ctx)`
-- `terminate(ctx)`
+- `init()`
+- `terminate()`
 - `max_retry`
 - `max_reinit`
 
 If you omit both `interval` and `schedule`, Kanary uses `interval = 60.0`.
 If you use `schedule`, do not set `interval` at the same time.
+The older `poll(ctx)`, `init(ctx)`, and `terminate(ctx)` signatures still work for compatibility, but lint warns and the documentation now treats the argument-less form as the formal API.
 
 `interval` is a polling interval in seconds.
 `schedule` is a Unix cron-compatible 5-field string interpreted in the local time
@@ -39,7 +40,7 @@ Example:
 ```python
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
-    def poll(self, ctx):
+    def poll(self):
         ...
 ```
 
@@ -108,7 +109,7 @@ Required:
 - `inputs`
 - `severity`
 - `tags`
-- `evaluate(payload, ctx)`
+- `evaluate(ctx)`
 
 `source="postgres"` remains available as a shorthand for `inputs="postgres:*"` when you want to depend on everything exposed by one source.
 
@@ -123,6 +124,7 @@ Kanary resolves `resolved_sources` from these selectors at load/reload time and 
 
 `severity` is required. It acts as the default or fallback severity.
 If you return `kanary.firing(..., severity=...)` or `kanary.Evaluation(severity=...)`, that specific evaluation overrides the class-level severity.
+The older `evaluate(payload, ctx)` signature still works for compatibility, but lint warns and the formal API is `evaluate(ctx)`.
 
 Optional metadata:
 
@@ -161,7 +163,7 @@ Each `InputView` has:
 
 For a single resolved input, you can omit the selector and call `ctx.value()` directly. Multi-input rules should usually iterate over `ctx.inputs()`.
 If the selector would match more than one input, `ctx.value()` and the other scalar helpers raise an error instead of guessing.
-For multi-source rules, the `payload` argument still corresponds to the source that triggered the current evaluation. Use `ctx.inputs()` for cross-source data access.
+If you need the normalized payload for the source that triggered the current evaluation, use `ctx.source_payload()`. Use `ctx.inputs()` for cross-source data access.
 
 ### Returning evaluations
 
@@ -175,7 +177,7 @@ The usual public API is one of:
 Example:
 
 ```python
-def evaluate(self, payload, ctx):
+def evaluate(self, ctx):
     value = ctx.value()
     if value is None:
         return kanary.ok("temperature is missing")
@@ -205,12 +207,12 @@ If you do not specify a payload explicitly, Kanary automatically inherits the cu
 Required:
 
 - `output_id`
-- `emit(event, ctx)`
+- `emit(event)`
 
 Optional:
 
-- `init(ctx)`
-- `terminate(ctx)`
+- `init()`
+- `terminate()`
 - `include_tags`
 - `exclude_tags`
 - `exclude_states`
@@ -221,6 +223,7 @@ Optional:
 
 The built-in SMTP output is an exception to the "prefer local plugin config" style used by the examples in this repository.
 It still reads `KANARY_SMTP_*` environment variables for convenience.
+The older `emit(event, ctx)`, `init(ctx)`, and `terminate(ctx)` signatures still work for compatibility, but lint warns and the formal API omits `ctx`.
 
 `include_tags` and `exclude_tags` support glob patterns.  
 For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.
@@ -270,7 +273,7 @@ Example:
     minimum_severity="ERROR",
 )
 class DiscordOutput:
-    def emit(self, event, ctx):
+    def emit(self, event):
         ...
 ```
 
@@ -294,6 +297,7 @@ If all attempts fail, the output remains `FAILED` until the next alert event or 
 #### BufferedSource
 
 `kanary.BufferedSource` keeps a short in-memory history inside the source plugin.
+Implement `fetch(self)` and return normal source data from there. `BufferedSource.poll()` records that result automatically.
 
 Available helpers:
 
@@ -412,9 +416,9 @@ class MailAlert(kanary.MailOutput):
             ),
             f"Severity: {kanary.severity_label(event.current_severity)}",
             f"Transition: {event.transition.value if event.transition else '-'}",
-            f"Owner: {event.alert.owner or '-'}",
-            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
-            f"Message: {event.alert.message or '-'}",
+            f"Owner: {event.owner or '-'}",
+            f"Tags: {', '.join(event.tags) if event.tags else '-'}",
+            f"Message: {event.message or '-'}",
         ]
         return "\n".join(lines)
 ```

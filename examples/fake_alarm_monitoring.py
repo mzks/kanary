@@ -31,12 +31,12 @@ def parse_iso_timestamp(value: str | None) -> datetime:
 
 @kanary.source(source_id="fake_alarm", interval=5 * kanary.second)
 class FakeAlarmSource:
-    def init(self, ctx):
+    def init(self):
         config = load_config()
         self.status_url = str(config.get("status_url", "http://127.0.0.1:18081/status"))
         self.timeout_seconds = float(config.get("timeout_seconds", 3.0))
 
-    def poll(self, ctx):
+    def poll(self):
         with urlopen(self.status_url, timeout=self.timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
 
@@ -73,7 +73,7 @@ class FakeAlarmRule:
     description = "Manual fake alarm that can be triggered and cleared through a small HTTP target."
     runbook = "Use curl against the fake alarm target to trigger or clear the alarm."
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         value = ctx.value()
         metadata = ctx.metadata(default={}) or {}
         if value is None:
@@ -87,7 +87,7 @@ class FakeAlarmRule:
 
 @kanary.output(output_id="fake_alarm_console", include_tags=["fake-alarm"])
 class FakeAlarmConsoleOutput:
-    def emit(self, event, ctx):
+    def emit(self, event):
         print(
             json.dumps(
                 {
@@ -100,9 +100,9 @@ class FakeAlarmConsoleOutput:
                     ),
                     "current_severity": kanary.severity_label(event.current_severity),
                     "transition": event.transition.value if event.transition else None,
-                    "owner": event.alert.owner,
-                    "tags": list(event.alert.tags),
-                    "message": event.alert.message,
+                    "owner": event.owner,
+                    "tags": list(event.tags),
+                    "message": event.message,
                     "occurred_at": event.occurred_at.isoformat(),
                 },
                 ensure_ascii=False,

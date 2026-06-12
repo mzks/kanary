@@ -66,7 +66,7 @@ import kanary
 
 @kanary.source(source_id="demo", interval=10.0)
 class DemoSource:
-    def poll(self, ctx):
+    def poll(self):
         return kanary.inputs([
             ("temperature", 23.4, datetime.now(timezone.utc)),
         ])
@@ -81,7 +81,7 @@ class DemoSource:
 class DemoTemperatureHigh:
     threshold = 25.0
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         temperature = ctx.value()
         if temperature is None:
             return kanary.ok("temperature is missing")
@@ -95,13 +95,13 @@ class DemoTemperatureHigh:
 
 @kanary.output(output_id="console")
 class ConsoleOutput:
-    def emit(self, event, ctx):
+    def emit(self, event):
         print(
             event.rule_id,
             event.current_state.value,
             event.current_severity.name,
             event.transition.value if event.transition else "-",
-            event.alert.message,
+            event.message,
         )
 ```
 
