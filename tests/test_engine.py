@@ -1922,6 +1922,79 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
                 runtime.api._server.server_close()
                 runtime.engine.shutdown()
 
+    def test_reload_dirty_loads_discovered_source_before_rule(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_plugins(root)
+            runtime = self._bootstrap_runtime(root)
+            try:
+                (root / "new_source.py").write_text(
+                    textwrap.dedent(
+                        """
+                        import kanary
+
+                        @kanary.source(source_id="example.extra_source", interval=60.0)
+                        class ExtraSource:
+                            def poll(self, ctx):
+                                return kanary.SourceResult(
+                                    measurements=[
+                                        kanary.Measurement(
+                                            name="value",
+                                            value=7,
+                                            timestamp=ctx["now"],
+                                        )
+                                    ]
+                                )
+                        """
+                    )
+                )
+                (root / "new_rule.py").write_text(
+                    textwrap.dedent(
+                        """
+                        import kanary
+
+                        @kanary.rule(
+                            rule_id="example.extra_rule",
+                            inputs="example.extra_source:value",
+                            severity=kanary.ERROR,
+                            tags=["example"],
+                            owner="expert",
+                        )
+                        class ExtraRule(kanary.RangeRule):
+                            high = 5
+                        """
+                    )
+                )
+
+                runtime.reload_now_if_changed()
+
+                self.assertEqual(
+                    runtime.engine._plugin_status("source", "example.extra_source").state,
+                    "DISCOVERED",
+                )
+                self.assertEqual(
+                    runtime.engine._plugin_status("rule", "example.extra_rule").state,
+                    "DISCOVERED",
+                )
+
+                summary = runtime.reload_now({"dirty": True})
+
+                self.assertEqual(summary["sources"]["reloaded"], ["example.extra_source"])
+                self.assertEqual(summary["rules"]["reloaded"], ["example.extra_rule"])
+                self.assertIn("example.extra_source", runtime.engine.sources)
+                self.assertIn("example.extra_rule", runtime.engine.rules)
+                self.assertEqual(
+                    runtime.engine.rules["example.extra_rule"].resolved_sources,
+                    ["example.extra_source"],
+                )
+                self.assertNotEqual(
+                    runtime.engine._plugin_status("rule", "example.extra_rule").last_error,
+                    "rule resolved zero sources or inputs",
+                )
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
     def test_reload_rule_replaces_only_matching_rule(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
