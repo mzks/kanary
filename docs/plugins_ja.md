@@ -105,7 +105,27 @@ return kanary.inputs(
 - warm-up や maintenance などの明示的な no-op にだけ `kanary.skip(...)` を使います。`skip` では stale 判定も進みません
 
 plugin は、site-specific な設定が必要な場合に自分の directory 内の local file を自由に読んで構いません。  
-よくある形は、plugin script の隣に `*_config.toml` を置き、`Path(__file__).with_name(...)` で読むやり方です。  
+Kanary にはそのための小さな helper があります。
+
+```python
+import kanary
+
+config = kanary.load_toml()
+dsn = kanary.load_toml("dsn")
+role_id = kanary.load_toml("mention.role_id", filename="discord_config.toml")
+plugin_root = kanary.plugin_dir()
+```
+
+- `kanary.load_toml()` の既定 file 名は `config.toml` です
+- `kanary.load_json()` の既定 file 名は `config.json` です
+- 相対 `filename=` は、その helper を呼んだ script file の directory 基準で解決されます
+- 絶対 path もそのまま使えます
+- `key` を省略すると file 全体の辞書を返します
+- `"mention.role_id"` のような dotted key で nested な TOML table / JSON object を辿れます
+- file が無い時や key が無い時は `RuntimeError` を送出します
+- JSON file には同じ仕様の `kanary.load_json(...)` が使えます
+
+`Path(__file__).with_name(...)` を直接使う書き方も、細かく制御したい時には引き続き有効です。  
 これらの local config file は auto-reload の検知対象ではないため、変更後は `kanaryctl reload ...` を明示的に実行してください。
 
 ## 2. Rule

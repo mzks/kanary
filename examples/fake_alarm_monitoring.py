@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
-from pathlib import Path
-import tomllib
 from urllib.request import urlopen
 
 import kanary
@@ -11,14 +9,6 @@ import kanary
 # Small demo source that reads a fake alarm target over HTTP. HTTP and JSON
 # failures are treated as source plugin failures so the runtime recovery logic
 # can retry/reinit them instead of hiding them as ordinary alert payloads.
-
-CONFIG_PATH = Path(__file__).with_name("fake_alarm_monitoring_config.toml")
-
-
-def load_config() -> dict:
-    with CONFIG_PATH.open("rb") as handle:
-        return tomllib.load(handle)
-
 
 def parse_iso_timestamp(value: str | None) -> datetime:
     if not value:
@@ -32,7 +22,7 @@ def parse_iso_timestamp(value: str | None) -> datetime:
 @kanary.source(source_id="fake_alarm", interval=5 * kanary.second)
 class FakeAlarmSource:
     def init(self):
-        config = load_config()
+        config = kanary.load_toml(filename="fake_alarm_monitoring_config.toml")
         self.status_url = str(config.get("status_url", "http://127.0.0.1:18081/status"))
         self.timeout_seconds = float(config.get("timeout_seconds", 3.0))
 

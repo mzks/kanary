@@ -1389,9 +1389,90 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
 
         self.assertEqual(report.errors, [])
         self.assertIn(
-            "file 'rules.py' uses open('config.toml') with a cwd-relative path; prefer Path(__file__).with_name(...)",
+            "file 'rules.py' uses open('config.toml') with a cwd-relative path; prefer kanary.plugin_dir() / ... or Path(__file__).with_name(...)",
             report.warnings,
         )
+
+    def test_plugin_file_helpers_resolve_relative_files_and_nested_keys(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "config.toml").write_text(
+                textwrap.dedent(
+                    """
+                    dsn = "postgresql://example"
+
+                    [mention]
+                    role_id = 42
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (tmp_path / "config.json").write_text(
+                json.dumps({"webhook": {"url": "https://example.invalid/hook"}}),
+                encoding="utf-8",
+            )
+            plugin_file = tmp_path / "plugin.py"
+            plugin_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    def read_config():
+                        return {
+                            "plugin_dir": kanary.plugin_dir().name,
+                            "dsn": kanary.load_toml("dsn"),
+                            "role_id": kanary.load_toml("mention.role_id"),
+                            "all_toml": kanary.load_toml(),
+                            "json_url": kanary.load_json("webhook.url"),
+                        }
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            spec = importlib.util.spec_from_file_location("temp_plugin_helpers", plugin_file)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            result = module.read_config()
+
+        self.assertEqual(result["plugin_dir"], tmp_path.name)
+        self.assertEqual(result["dsn"], "postgresql://example")
+        self.assertEqual(result["role_id"], 42)
+        self.assertEqual(result["all_toml"]["mention"]["role_id"], 42)
+        self.assertEqual(result["json_url"], "https://example.invalid/hook")
+
+    def test_plugin_file_helpers_raise_runtime_error_for_missing_file_and_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "config.toml").write_text("dsn = 'postgresql://example'\n", encoding="utf-8")
+            plugin_file = tmp_path / "plugin.py"
+            plugin_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    def missing_file():
+                        return kanary.load_json(filename="config.json")
+
+                    def missing_key():
+                        return kanary.load_toml("mention.role_id")
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            spec = importlib.util.spec_from_file_location("temp_plugin_helper_errors", plugin_file)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            with self.assertRaisesRegex(RuntimeError, r"plugin config file not found: .*config\.json"):
+                module.missing_file()
+            with self.assertRaisesRegex(RuntimeError, r"config key 'mention\.role_id' not found in .*config\.toml"):
+                module.missing_key()
 
     def test_loader_accepts_single_plugin_file_path(self) -> None:
         with TemporaryDirectory() as tmp:

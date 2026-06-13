@@ -207,7 +207,7 @@ Kanary 本体に必須の環境変数はありません。必要に応じて次�
 
 `KANARY_*` という prefix は、基本的には Kanary engine/runtime 側の設定に使います。  
 この repository の example plugin は、接続情報を追加の `KANARY_*` 変数に置く代わりに、plugin script の隣に置いた `*_config.toml`
-のような local file を読む形を主に使います。  
+のような local file を読む形を主に使います。相対 path を plugin script 基準で解決する `kanary.load_toml(...)` を推奨します。  
 これらの local config file は auto-reload の監視対象ではないので、変更後は `kanaryctl reload ...` を明示的に実行してください。
 
 ## Demo と Examples

@@ -1,6 +1,4 @@
 import json
-from pathlib import Path
-import tomllib
 from datetime import datetime, timezone
 from urllib.request import urlopen
 
@@ -10,19 +8,11 @@ import kanary
 # ordinary alerts. Transport failures while reading /plugins are treated as
 # source plugin failures and handled by the runtime recovery policy.
 
-CONFIG_PATH = Path(__file__).with_name("self_plugin_monitoring_config.toml")
-
-
-def load_config() -> dict:
-    with CONFIG_PATH.open("rb") as handle:
-        return tomllib.load(handle)
-
-
 @kanary.source(source_id="kanary.plugins", interval=30.0)
 class KanaryPluginSource:
 
     def init(self):
-        config = load_config()
+        config = kanary.load_toml(filename="self_plugin_monitoring_config.toml")
         base_url = str(config.get("api_base_url", "http://127.0.0.1:8000")).rstrip("/")
         self.plugins_url = f"{base_url}/plugins"
         self.timeout_seconds = float(config.get("timeout_seconds", 5.0))

@@ -10,20 +10,10 @@
 # - remember that changing the TOML requires an explicit reload because only
 #   Python files are watched automatically
 
-from pathlib import Path
-import tomllib
-
 import psycopg
 from psycopg.rows import dict_row
 
 import kanary
-
-CONFIG_PATH = Path(__file__).with_name("postgres_long_format_config.toml")
-
-
-def load_config() -> dict:
-    with CONFIG_PATH.open("rb") as handle:
-        return tomllib.load(handle)
 
 INPUT_NAME_MAP = {
     "plant.room_a.temperature_c": "room_a.temperature",
@@ -36,10 +26,10 @@ INPUT_NAME_MAP = {
 class LongEnvironmentSource:
 
     def init(self):
-        config = load_config()
+        config = kanary.load_toml(filename="postgres_long_format_config.toml")
         dsn = str(config.get("dsn") or "").strip()
         if not dsn:
-            raise RuntimeError(f"{CONFIG_PATH.name} must define dsn")
+            raise RuntimeError("postgres_long_format_config.toml must define dsn")
         connect_timeout = int(config.get("connect_timeout_seconds", 5))
         statement_timeout_ms = int(config.get("statement_timeout_ms", 5000))
         self.conn = psycopg.connect(

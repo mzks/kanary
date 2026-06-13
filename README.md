@@ -217,6 +217,7 @@ You can use these when needed:
 The `KANARY_*` prefix is primarily reserved for Kanary engine/runtime settings.
 Example plugins in this repository usually read connection details from local files such as
 `*_config.toml` next to the plugin script instead of relying on additional `KANARY_*` variables.
+The recommended helper is `kanary.load_toml(...)`, which resolves relative paths against the caller script's directory.
 Those local config files are not watched for auto-reload, so after editing them you should run an explicit
 `kanaryctl reload ...`.
 

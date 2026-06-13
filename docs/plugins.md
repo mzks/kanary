@@ -104,8 +104,28 @@ Typical guidance:
 - use `kanary.skip(...)` only for explicit no-op cases such as warm-up or maintenance windows, because stale detection does not advance
 
 Plugins are also free to read local files from their own directory when they need site-specific configuration.
-A common pattern is to place `*_config.toml` next to the plugin script and read it with `Path(__file__).with_name(...)`.
-Those local config files are not part of auto-reload detection, so after editing them you should run an explicit
+Kanary provides small helpers for this:
+
+```python
+import kanary
+
+config = kanary.load_toml()
+dsn = kanary.load_toml("dsn")
+role_id = kanary.load_toml("mention.role_id", filename="discord_config.toml")
+plugin_root = kanary.plugin_dir()
+```
+
+- `kanary.load_toml()` defaults to `config.toml`
+- `kanary.load_json()` defaults to `config.json`
+- relative `filename=` paths are resolved against the caller script's directory
+- absolute paths are accepted as-is
+- if `key` is omitted, the whole mapping is returned
+- dotted keys such as `"mention.role_id"` walk nested TOML/JSON tables and objects
+- missing files or missing keys raise `RuntimeError`
+- `kanary.load_json(...)` works the same way for JSON files
+
+Using `Path(__file__).with_name(...)` directly is still fine when you want full manual control.
+These local config files are not part of auto-reload detection, so after editing them you should run an explicit
 `kanaryctl reload ...`.
 
 ## 2. Rule

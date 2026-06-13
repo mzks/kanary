@@ -288,7 +288,7 @@ def _validate_plugin_file(path: Path) -> ValidationReport:
         if _is_absolute_or_explicit_relative(file_name):
             continue
         report.warnings.append(
-            f"file '{path.name}' uses open('{file_name}') with a cwd-relative path; prefer Path(__file__).with_name(...)"
+            f"file '{path.name}' uses open('{file_name}') with a cwd-relative path; prefer kanary.plugin_dir() / ... or Path(__file__).with_name(...)"
         )
 
     return report

@@ -5,6 +5,7 @@ from .engine import Engine
 from .loader import RuleDirectoryLoader
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
 from .output import MailOutput, Output
+from .plugin_files import load_json, load_toml, plugin_dir
 from .remote import RemoteAlarm, RemoteKanarySource, import_remote_alarms
 from .registry import (
     clear_registries,
@@ -93,6 +94,9 @@ __all__ = [
     "NullStore",
     "no_data",
     "no_update",
+    "load_json",
+    "load_toml",
+    "plugin_dir",
     "RangeRule",
     "RateRule",
     "RemoteAlarm",

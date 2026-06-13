@@ -12,30 +12,20 @@
 # Pair this with examples/self_plugin_monitoring.py if you want alerts when the
 # source plugin itself enters FAILED.
 
-from pathlib import Path
-import tomllib
-
 import psycopg
 from psycopg.rows import dict_row
 
 import kanary
-
-CONFIG_PATH = Path(__file__).with_name("postgres_wide_format_config.toml")
-
-
-def load_config() -> dict:
-    with CONFIG_PATH.open("rb") as handle:
-        return tomllib.load(handle)
 
 
 @kanary.source(source_id="postgres.wide", interval=30.0)
 class WideEnvironmentSource:
 
     def init(self):
-        config = load_config()
+        config = kanary.load_toml(filename="postgres_wide_format_config.toml")
         dsn = str(config.get("dsn") or "").strip()
         if not dsn:
-            raise RuntimeError(f"{CONFIG_PATH.name} must define dsn")
+            raise RuntimeError("postgres_wide_format_config.toml must define dsn")
         connect_timeout = int(config.get("connect_timeout_seconds", 5))
         statement_timeout_ms = int(config.get("statement_timeout_ms", 5000))
         self.conn = psycopg.connect(
