@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import AlertState, Severity
-from .output import Output, prepare_output_class
+from .output import Output, _coerce_minimum_severity, prepare_output_class
 from .patterns import matches_any_tag, matches_excluded_tag
 from .rule import Rule, normalize_rule_inputs, prepare_rule_class, resolve_rule_sources
 from .source import BufferedSource, Source, prepare_source_class
@@ -153,16 +153,24 @@ def validate_registries(
 
 def _matching_outputs(rule_cls: type[Any], outputs: dict[str, type[Output]]) -> list[str]:
     rule_tags = set(getattr(rule_cls, "tags", []))
+    rule_severity = getattr(rule_cls, "severity", None)
     matched: list[str] = []
     possible_states = {state.value for state in AlertState}
     for output_id, output_cls in outputs.items():
         include_tags = list(getattr(output_cls, "include_tags", []))
         exclude_tags = list(getattr(output_cls, "exclude_tags", []))
         exclude_states = set(getattr(output_cls, "exclude_states", []))
+        minimum_severity = _coerce_minimum_severity(getattr(output_cls, "minimum_severity", None))
 
         if include_tags and not matches_any_tag(rule_tags, include_tags):
             continue
         if exclude_tags and matches_excluded_tag(rule_tags, exclude_tags):
+            continue
+        if (
+            minimum_severity is not None
+            and isinstance(rule_severity, Severity)
+            and rule_severity < minimum_severity
+        ):
             continue
 
         allowed_states = set(possible_states)

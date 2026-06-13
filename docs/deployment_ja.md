@@ -310,7 +310,7 @@ sudo -u kanary -H sh -lc 'command -v kanary'
 ここで確認した absolute path を書きます。
 
 4. 環境変数 file を置く  
-必要なら `/etc/kanary/kanary.env` を作ります。
+必要なら `/etc/kanary/kanary.env` を作ります 
 
 ```bash
 sudo tee /etc/kanary/kanary.env >/dev/null <<'EOF'

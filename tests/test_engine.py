@@ -1619,6 +1619,47 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
         self.assertEqual(report.errors, [])
         self.assertIn("match-glob", snapshot.rules["example.rule"].matched_outputs)
 
+    def test_inspect_matches_outputs_with_minimum_severity_against_declared_rule_severity(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "rules.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source", interval=60.0)
+                    class ExampleSource:
+                        def poll(self, ctx):
+                            return kanary.SourceResult()
+
+                    @kanary.rule(
+                        rule_id="example.rule",
+                        source="example.source",
+                        severity=kanary.WARN,
+                        tags=["threshold"],
+                        owner="expert",
+                    )
+                    class ExampleRule:
+                        def evaluate(self, ctx):
+                            return kanary.critical("runtime escalation")
+
+                    @kanary.output(output_id="critical-only", include_tags=["threshold"], minimum_severity="CRITICAL")
+                    class CriticalOnly:
+                        def emit(self, event):
+                            return None
+
+                    @kanary.output(output_id="warn-and-up", include_tags=["threshold"], minimum_severity="WARN")
+                    class WarnAndUp:
+                        def emit(self, event):
+                            return None
+                    """
+                )
+            )
+            loader = kanary.RuleDirectoryLoader(tmp)
+            snapshot, report = loader.inspect()
+        self.assertEqual(report.errors, [])
+        self.assertEqual(snapshot.rules["example.rule"].matched_outputs, ["warn-and-up"])
+
     def test_inspect_rejects_plugin_id_collisions_across_types(self) -> None:
         with TemporaryDirectory() as tmp:
             rule_file = Path(tmp) / "rules.py"
@@ -3572,6 +3613,43 @@ class ControlAPITest(unittest.TestCase):
         with urlopen(f"{self.base_url}/alerts") as response:
             body = json.loads(response.read().decode())
         self.assertEqual(len(body["alerts"]), 8)
+
+    def test_alerts_endpoint_uses_declared_rule_severity_for_matched_outputs(self) -> None:
+        class CriticalOnlyOutput(kanary.Output):
+            output_id = "critical-only"
+            include_tags = ["threshold"]
+            minimum_severity = "CRITICAL"
+
+            def emit(self, event, ctx):
+                return None
+
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"critical-only": CriticalOnlyOutput},
+        )
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            source = engine.sources["postgres"]
+            source.temperature = 25
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            with urlopen(f"http://127.0.0.1:{api._server.server_address[1]}/alerts") as response:
+                body = json.loads(response.read().decode())
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+
+        alert = next(item for item in body["alerts"] if item["rule_id"] == "postgres.temperature.threshold")
+        self.assertEqual(alert["severity"], kanary.ERROR.value)
+        self.assertEqual(alert["matched_outputs"], [])
 
     def test_reload_endpoint_returns_reloaded(self) -> None:
         request = Request(f"{self.base_url}/reload", method="POST")
