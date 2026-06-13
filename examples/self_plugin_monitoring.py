@@ -21,13 +21,13 @@ def load_config() -> dict:
 @kanary.source(source_id="kanary.plugins", interval=30.0)
 class KanaryPluginSource:
 
-    def init(self, ctx):
+    def init(self):
         config = load_config()
         base_url = str(config.get("api_base_url", "http://127.0.0.1:8000")).rstrip("/")
         self.plugins_url = f"{base_url}/plugins"
         self.timeout_seconds = float(config.get("timeout_seconds", 5.0))
 
-    def poll(self, ctx):
+    def poll(self):
         with urlopen(self.plugins_url, timeout=self.timeout_seconds) as response:
             payload = json.loads(response.read().decode())
 
@@ -90,7 +90,7 @@ def make_plugin_type_failure_rule(
     rule_id = f"kanary.{plugin_type}.failure"
     cls_name = f"Kanary{plugin_type.title()}Failure"
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         count = ctx.value()
         metadata = ctx.metadata(default={}) or {}
         failed_plugins = metadata.get("failed_plugins", [])

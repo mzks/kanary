@@ -5,6 +5,7 @@ from typing import Any
 
 from .models import Measurement, SourceResult
 from .schedule import CronSchedule, parse_schedule
+from .signature_compat import detect_instance_method_style, invoke_compat
 
 
 class Source:
@@ -14,13 +15,13 @@ class Source:
     max_retry: int = 1
     max_reinit: int = 1
 
-    def init(self, ctx: dict[str, Any]) -> None:
+    def init(self) -> None:
         return None
 
-    def poll(self, ctx: dict[str, Any]) -> SourceResult:
+    def poll(self) -> SourceResult:
         raise NotImplementedError
 
-    def terminate(self, ctx: dict[str, Any]) -> None:
+    def terminate(self) -> None:
         return None
 
 
@@ -28,14 +29,19 @@ class BufferedSource(Source):
     history_limit: int = 1024
     history_window_seconds: float | None = None
 
-    def init(self, ctx: dict[str, Any]) -> None:
+    def init(self) -> None:
         self._measurement_history: dict[str, deque[Measurement]] = {}
 
-    def fetch(self, ctx: dict[str, Any]) -> SourceResult:
+    def fetch(self) -> SourceResult:
         raise NotImplementedError
 
-    def poll(self, ctx: dict[str, Any]) -> SourceResult:
-        result = self.fetch(ctx)
+    def poll(self) -> SourceResult:
+        result = invoke_compat(
+            self.fetch,
+            style=getattr(self.__class__, "__kanary_fetch_style__", "new"),
+            new_args=(),
+            legacy_args=({"engine": getattr(self, "_kanary_engine", None), "now": getattr(self, "_kanary_poll_now", None)},),
+        )
         self.record_result(result)
         return result
 
@@ -128,6 +134,32 @@ def no_data(
     return SourceResult(
         measurements=[],
         status="empty",
+        reason=reason,
+        metadata=dict(metadata or {}),
+    )
+
+
+def no_update(
+    *,
+    reason: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> SourceResult:
+    return SourceResult(
+        measurements=[],
+        status="no_update",
+        reason=reason,
+        metadata=dict(metadata or {}),
+    )
+
+
+def skip(
+    *,
+    reason: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> SourceResult:
+    return SourceResult(
+        measurements=[],
+        status="skip",
         reason=reason,
         metadata=dict(metadata or {}),
     )
@@ -284,7 +316,54 @@ def prepare_source_class(cls: type[Any]) -> type[Any]:
     if not isinstance(source_id, str) or not source_id:
         raise ValueError(f"source '{cls.__name__}' must define non-empty string source_id")
     if not callable(getattr(cls, "poll", None)):
-        raise ValueError(f"source '{source_id}' must implement poll(ctx)")
+        raise ValueError(f"source '{source_id}' must implement poll()")
+
+    try:
+        init_style = detect_instance_method_style(
+            getattr(cls, "init"),
+            new_arity=0,
+            legacy_arity=1,
+            new_signature="init(self)",
+            legacy_signature="init(self, ctx)",
+        )
+    except ValueError as exc:
+        raise ValueError(f"source '{source_id}' {exc}") from exc
+    try:
+        poll_style = detect_instance_method_style(
+            getattr(cls, "poll"),
+            new_arity=0,
+            legacy_arity=1,
+            new_signature="poll(self)",
+            legacy_signature="poll(self, ctx)",
+        )
+    except ValueError as exc:
+        raise ValueError(f"source '{source_id}' {exc}") from exc
+    try:
+        terminate_style = detect_instance_method_style(
+            getattr(cls, "terminate"),
+            new_arity=0,
+            legacy_arity=1,
+            new_signature="terminate(self)",
+            legacy_signature="terminate(self, ctx)",
+        )
+    except ValueError as exc:
+        raise ValueError(f"source '{source_id}' {exc}") from exc
+    cls.__kanary_init_style__ = init_style
+    cls.__kanary_poll_style__ = poll_style
+    cls.__kanary_terminate_style__ = terminate_style
+
+    if issubclass(cls, BufferedSource):
+        try:
+            fetch_style = detect_instance_method_style(
+                getattr(cls, "fetch"),
+                new_arity=0,
+                legacy_arity=1,
+                new_signature="fetch(self)",
+                legacy_signature="fetch(self, ctx)",
+            )
+        except ValueError as exc:
+            raise ValueError(f"source '{source_id}' {exc}") from exc
+        cls.__kanary_fetch_style__ = fetch_style
 
     interval = getattr(cls, "interval", None)
     schedule = getattr(cls, "schedule", None)

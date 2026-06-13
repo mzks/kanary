@@ -11,11 +11,12 @@ from typing import Callable
 
 from .constants import AlertState, DEESCALATED, ESCALATED, TransitionKind, UNACK
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
-from .output import Output
+from .output import Output, prepare_output_class
 from .registry import get_output_registry, get_rule_registry, get_source_registry
-from .rule import Rule, RuleContext, normalize_rule_inputs, resolve_rule_sources
+from .rule import Rule, RuleContext, normalize_rule_inputs, prepare_rule_class, resolve_rule_sources
+from .signature_compat import invoke_compat
 from .store import NullStore
-from .source import Source, normalize_source_output
+from .source import Source, normalize_source_output, prepare_source_class
 
 logger = logging.getLogger("kanary.engine")
 
@@ -68,18 +69,24 @@ class Engine:
         self._sync_plugin_definition_files()
 
     def _instantiate_sources(self) -> dict[str, Source]:
-        return {source_id: cls() for source_id, cls in self._source_registry.items()}
+        return {
+            source_id: prepare_source_class(cls)()
+            for source_id, cls in self._source_registry.items()
+        }
 
     def _instantiate_rules(self) -> dict[str, Rule]:
         rules: dict[str, Rule] = {}
         for rule_id, cls in self._rule_registry.items():
-            rule = cls()
+            rule = prepare_rule_class(cls)()
             self._configure_rule(rule)
             rules[rule_id] = rule
         return rules
 
     def _instantiate_outputs(self) -> dict[str, Output]:
-        return {output_id: cls() for output_id, cls in self._output_registry.items()}
+        return {
+            output_id: prepare_output_class(cls)()
+            for output_id, cls in self._output_registry.items()
+        }
 
     def _configure_rule(self, rule: Rule) -> None:
         rule.inputs = normalize_rule_inputs(
@@ -87,6 +94,83 @@ class Engine:
             source=getattr(rule, "source", None),
         )
         rule.resolved_sources = resolve_rule_sources(rule.inputs, self.sources.keys())
+
+    def _source_runtime_ctx(self, now: datetime | None = None) -> dict[str, object]:
+        ctx: dict[str, object] = {"engine": self}
+        if now is not None:
+            ctx["now"] = now
+        return ctx
+
+    def _call_source_init(self, source: Source) -> None:
+        source._kanary_engine = self
+        invoke_compat(
+            source.init,
+            style=getattr(source.__class__, "__kanary_init_style__", "new"),
+            new_args=(),
+            legacy_args=(self._source_runtime_ctx(),),
+        )
+
+    def _call_source_poll(self, source: Source, *, now: datetime) -> object:
+        source._kanary_engine = self
+        source._kanary_poll_now = now
+        return invoke_compat(
+            source.poll,
+            style=getattr(source.__class__, "__kanary_poll_style__", "new"),
+            new_args=(),
+            legacy_args=(self._source_runtime_ctx(now),),
+        )
+
+    def _call_source_terminate(self, source: Source) -> None:
+        source._kanary_engine = self
+        invoke_compat(
+            source.terminate,
+            style=getattr(source.__class__, "__kanary_terminate_style__", "new"),
+            new_args=(),
+            legacy_args=(self._source_runtime_ctx(),),
+        )
+
+    def _call_rule_evaluate(
+        self,
+        rule: Rule,
+        source_payload: dict[str, object],
+        ctx: RuleContext,
+    ) -> object:
+        return invoke_compat(
+            rule.evaluate,
+            style=getattr(rule.__class__, "__kanary_evaluate_style__", "new"),
+            new_args=(ctx,),
+            legacy_args=(source_payload, ctx),
+        )
+
+    def _output_runtime_ctx(self) -> dict[str, object]:
+        return {"engine": self}
+
+    def _call_output_init(self, output: Output) -> None:
+        output._kanary_engine = self
+        invoke_compat(
+            output.init,
+            style=getattr(output.__class__, "__kanary_init_style__", "new"),
+            new_args=(),
+            legacy_args=(self._output_runtime_ctx(),),
+        )
+
+    def _call_output_emit(self, output: Output, event: AlertEvent) -> None:
+        output._kanary_engine = self
+        invoke_compat(
+            output.emit,
+            style=getattr(output.__class__, "__kanary_emit_style__", "new"),
+            new_args=(event,),
+            legacy_args=(event, self._output_runtime_ctx()),
+        )
+
+    def _call_output_terminate(self, output: Output) -> None:
+        output._kanary_engine = self
+        invoke_compat(
+            output.terminate,
+            style=getattr(output.__class__, "__kanary_terminate_style__", "new"),
+            new_args=(),
+            legacy_args=(self._output_runtime_ctx(),),
+        )
 
     def _refresh_rule_resolutions(self) -> None:
         for rule in self.rules.values():
@@ -146,12 +230,14 @@ class Engine:
     ) -> dict[str, Alert]:
         with self._lock:
             current_time = now or self._now_fn()
-            source_payload = self._normalize_source_input(source_id, payload, current_time)
-            source_state = self._update_source_state(
+            normalized_payload = self._normalize_source_input(source_id, payload, current_time)
+            source_payload, source_state = self._apply_source_result(
                 source_id,
-                source_payload,
+                normalized_payload,
                 observed_at=current_time,
             )
+            if source_payload is None or source_state is None:
+                return dict(self.alerts)
             for rule in self.rules.values():
                 if source_id not in getattr(rule, "resolved_sources", []):
                     continue
@@ -526,7 +612,7 @@ class Engine:
         with self._lock:
             source = self.sources[source_id]
             current_time = self._now_fn()
-            result = source.poll({"engine": self, "now": current_time})
+            result = self._call_source_poll(source, now=current_time)
             normalized = self._normalize_source_result(result, now=current_time)
             return normalized
 
@@ -736,7 +822,7 @@ class Engine:
     def _poll_source(self, source_id: str, source: Source, now: datetime) -> dict[str, object]:
         status = self._plugin_status("source", source_id)
         try:
-            result = source.poll({"engine": self, "now": now})
+            result = self._call_source_poll(source, now=now)
             payload = self._normalize_source_result(result, now=now)
             self._set_plugin_ready(status)
             status.init_ok = True
@@ -759,6 +845,10 @@ class Engine:
 
     def _normalize_source_result(self, result: object, *, now: datetime | None = None) -> dict[str, object]:
         normalized_result = normalize_source_output(result, now=now)
+        if normalized_result.status not in {"ok", "empty", "no_update", "skip"}:
+            raise ValueError(
+                "source result status must be one of 'ok', 'empty', 'no_update', or 'skip'"
+            )
         channels: dict[str, dict[str, object]] = {}
         for measurement in normalized_result.measurements:
             channels[measurement.name] = {
@@ -796,6 +886,28 @@ class Engine:
         status.last_success_at = now
         status.last_updated_at = now
         return normalized
+
+    def _apply_source_result(
+        self,
+        source_id: str,
+        payload: dict[str, object],
+        *,
+        observed_at: datetime,
+    ) -> tuple[dict[str, object] | None, SourceState | None]:
+        status = payload.get("status", "ok")
+        if not isinstance(status, str):
+            raise ValueError("source result status must be a string")
+        if status == "skip":
+            return None, None
+        if status == "no_update":
+            state = self.source_states.setdefault(source_id, SourceState(source_id=source_id))
+            return dict(state.current.payload), state
+        state = self._update_source_state(
+            source_id,
+            payload,
+            observed_at=observed_at,
+        )
+        return dict(state.current.payload), state
 
     def _build_test_evaluate_source_states(
         self,
@@ -1130,7 +1242,7 @@ class Engine:
                 continue
             initialized_output_ids.append(output_id)
             try:
-                output.emit(event, {"engine": self})
+                self._call_output_emit(output, event)
                 delivered_output_ids.append(output_id)
                 self._set_plugin_ready(status)
                 status.last_error = None
@@ -1329,7 +1441,7 @@ class Engine:
     def _initialize_output(self, output_id: str, output: Output) -> None:
         status = self._plugin_status("output", output_id)
         try:
-            output.init({"engine": self})
+            self._call_output_init(output)
             self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
@@ -1348,7 +1460,7 @@ class Engine:
     def _terminate_output(self, output_id: str, output: Output) -> None:
         status = self._plugin_status("output", output_id)
         try:
-            output.terminate({"engine": self})
+            self._call_output_terminate(output)
         except Exception as exc:
             self._set_plugin_failed(status)
             status.last_error = str(exc)
@@ -1373,7 +1485,7 @@ class Engine:
             attempt += 1
             time.sleep(attempt ** 2)
             try:
-                output.emit(event, {"engine": self})
+                self._call_output_emit(output, event)
                 self._set_plugin_ready(status)
                 status.last_error = None
                 status.last_error_detail = None
@@ -1390,18 +1502,18 @@ class Engine:
             attempt += 1
             time.sleep(attempt ** 2)
             try:
-                output.terminate({"engine": self})
+                self._call_output_terminate(output)
             except Exception:
                 last_detail = traceback.format_exc()
             try:
-                output.init({"engine": self})
+                self._call_output_init(output)
                 status.init_ok = True
             except Exception as exc:
                 last_exc = exc
                 last_detail = traceback.format_exc()
                 continue
             try:
-                output.emit(event, {"engine": self})
+                self._call_output_emit(output, event)
                 self._set_plugin_ready(status)
                 status.last_error = None
                 status.last_error_detail = None
@@ -1435,7 +1547,7 @@ class Engine:
     def _initialize_source(self, source: Source) -> None:
         status = self._plugin_status("source", source.source_id)
         try:
-            source.init({"engine": self})
+            self._call_source_init(source)
             self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
@@ -1454,7 +1566,7 @@ class Engine:
     def _terminate_source(self, source: Source) -> None:
         status = self._plugin_status("source", source.source_id)
         try:
-            source.terminate({"engine": self})
+            self._call_source_terminate(source)
         except Exception as exc:
             self._set_plugin_failed(status)
             status.last_error = str(exc)
@@ -1481,8 +1593,6 @@ class Engine:
                 resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
                 previous_alert=self.alerts.get(rule.rule_id),
             )
-            if not ctx.inputs():
-                raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
             dependency_state = self._resolve_dependency_state(rule, source_payload)
             if dependency_state is not None:
                 self._apply_evaluation(
@@ -1495,10 +1605,7 @@ class Engine:
                 )
             else:
                 evaluation = rule.normalize_evaluation(
-                    rule.evaluate(
-                        source_payload,
-                        ctx,
-                    ),
+                    self._call_rule_evaluate(rule, source_payload, ctx),
                     source_payload,
                 )
                 operator_state = self._resolve_operator_state(
@@ -1570,17 +1677,12 @@ class Engine:
             resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
             previous_alert=self.alerts.get(rule.rule_id),
         )
-        if not ctx.inputs():
-            raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
         dependency_state = self._resolve_dependency_state(rule, source_payload)
         if dependency_state is not None:
             return dependency_state
 
         evaluation = rule.normalize_evaluation(
-            rule.evaluate(
-                source_payload,
-                ctx,
-            ),
+            self._call_rule_evaluate(rule, source_payload, ctx),
             source_payload,
         )
         return self._resolve_operator_state(

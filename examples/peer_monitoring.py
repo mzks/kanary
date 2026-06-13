@@ -22,12 +22,12 @@ def load_config() -> dict:
 @kanary.source(source_id="kanary.peer", interval=30.0)
 class KanaryPeerSource:
 
-    def init(self, ctx):
+    def init(self):
         config = load_config()
         self.peer_url = str(config.get("peer_url", "http://127.0.0.1:8000/peer-status"))
         self.timeout_seconds = float(config.get("timeout_seconds", 5.0))
 
-    def poll(self, ctx):
+    def poll(self):
         started = time.monotonic()
         with urlopen(self.peer_url, timeout=self.timeout_seconds) as response:
             payload = json.loads(response.read().decode())

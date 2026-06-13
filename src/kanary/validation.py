@@ -8,7 +8,7 @@ from .constants import AlertState, Severity
 from .output import Output, prepare_output_class
 from .patterns import matches_any_tag, matches_excluded_tag
 from .rule import Rule, normalize_rule_inputs, prepare_rule_class, resolve_rule_sources
-from .source import Source, prepare_source_class
+from .source import BufferedSource, Source, prepare_source_class
 
 
 @dataclass(slots=True)
@@ -36,6 +36,10 @@ def validate_rule_class(rule_id: str, rule_cls: type[Any]) -> ValidationReport:
     tags = getattr(rule_cls, "tags", None)
     if tags == []:
         report.warnings.append(f"rule '{rule_id}' has no tags")
+    if getattr(rule_cls, "__kanary_evaluate_style__", "new") == "legacy":
+        report.warnings.append(
+            f"rule '{rule_id}' uses legacy evaluate(payload, ctx); prefer evaluate(ctx)"
+        )
     return report
 
 
@@ -45,6 +49,23 @@ def validate_source_class(source_id: str, source_cls: type[Any]) -> ValidationRe
         prepare_source_class(source_cls)
     except Exception as exc:
         report.errors.append(str(exc))
+        return report
+    if getattr(source_cls, "__kanary_init_style__", "new") == "legacy":
+        report.warnings.append(
+            f"source '{source_id}' uses legacy init(ctx); prefer init()"
+        )
+    if getattr(source_cls, "__kanary_poll_style__", "new") == "legacy":
+        report.warnings.append(
+            f"source '{source_id}' uses legacy poll(ctx); prefer poll()"
+        )
+    if getattr(source_cls, "__kanary_terminate_style__", "new") == "legacy":
+        report.warnings.append(
+            f"source '{source_id}' uses legacy terminate(ctx); prefer terminate()"
+        )
+    if issubclass(source_cls, BufferedSource) and getattr(source_cls, "__kanary_fetch_style__", "new") == "legacy":
+        report.warnings.append(
+            f"source '{source_id}' uses legacy fetch(ctx); prefer fetch()"
+        )
     return report
 
 
@@ -54,6 +75,19 @@ def validate_output_class(output_id: str, output_cls: type[Any]) -> ValidationRe
         prepare_output_class(output_cls)
     except Exception as exc:
         report.errors.append(str(exc))
+        return report
+    if getattr(output_cls, "__kanary_init_style__", "new") == "legacy":
+        report.warnings.append(
+            f"output '{output_id}' uses legacy init(ctx); prefer init()"
+        )
+    if getattr(output_cls, "__kanary_emit_style__", "new") == "legacy":
+        report.warnings.append(
+            f"output '{output_id}' uses legacy emit(event, ctx); prefer emit(event)"
+        )
+    if getattr(output_cls, "__kanary_terminate_style__", "new") == "legacy":
+        report.warnings.append(
+            f"output '{output_id}' uses legacy terminate(ctx); prefer terminate()"
+        )
     return report
 
 

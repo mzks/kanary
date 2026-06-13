@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from fnmatch import fnmatch
 import json
 import re
@@ -24,15 +25,20 @@ class RemoteKanarySource(Source):
     silence_window_path: str = "/silences/window"
     unsilence_path_template: str = "/silences/{silence_id}/cancel"
 
-    def poll(self, ctx: dict[str, Any]) -> SourceResult:
+    def poll(self) -> SourceResult:
         alerts = self.fetch_remote_alerts()
-        local_node_id = getattr(ctx.get("engine"), "node_id", None)
+        engine = getattr(self, "_kanary_engine", None)
+        local_node_id = getattr(engine, "node_id", None)
         measurements: list[Measurement] = []
         for alert in alerts:
             mirror_path = [str(node_id) for node_id in list(alert.get("mirror_path") or [])]
             if local_node_id is not None and local_node_id in mirror_path:
                 continue
-            timestamp = _parse_remote_datetime(alert.get("last_evaluated_at")) or ctx["engine"]._now_fn()
+            timestamp = (
+                _parse_remote_datetime(alert.get("last_evaluated_at"))
+                or getattr(self, "_kanary_poll_now", None)
+                or datetime.now(timezone.utc)
+            )
             state = str(alert.get("state", OK.value))
             measurements.append(
                 Measurement(
@@ -120,18 +126,19 @@ class RemoteAlarm(Rule):
     propagate_ack: bool = False
     propagate_silence: bool = False
 
-    def evaluate(self, payload: dict[str, Any], ctx: RuleContext) -> Evaluation:
+    def evaluate(self, ctx: RuleContext) -> Evaluation:
+        source_payload = ctx.source_payload()
         metadata = ctx.metadata(self.remote_alarm_id, default={}) or {}
         if not ctx.inputs(self.remote_alarm_id) or not isinstance(metadata, dict):
             return Evaluation(
                 state=AlertState.OK,
-                payload=payload,
+                payload=source_payload,
                 message=f"remote alarm {self.remote_alarm_id} is missing",
             )
 
         remote_state = _coerce_alert_state(metadata.get("state"))
         remote_severity = _coerce_severity(metadata.get("severity")) or self.severity
-        result_payload = dict(payload)
+        result_payload = dict(source_payload)
         result_payload["remote_alarm"] = dict(metadata)
         return Evaluation(
             state=remote_state,
@@ -261,8 +268,6 @@ def _join_url(base_url: str, path: str) -> str:
 
 
 def _parse_remote_datetime(value: Any):
-    from datetime import datetime
-
     if not isinstance(value, str) or not value:
         return None
     return datetime.fromisoformat(value)

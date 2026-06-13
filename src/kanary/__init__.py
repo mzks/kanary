@@ -40,7 +40,7 @@ from .rule import (
     warn_if,
 )
 from .runtime import EngineRuntime, RuntimeConfig
-from .source import BufferedSource, Source, inputs, no_data
+from .source import BufferedSource, Source, inputs, no_data, no_update, skip
 from .store import NullStore, SQLiteStore, build_store
 from .units import Hz, MHz, cps, day, format_rate, format_time, hour, kHz, microsecond, millisecond, minute, nanosecond, second
 
@@ -92,6 +92,7 @@ __all__ = [
     "nanosecond",
     "NullStore",
     "no_data",
+    "no_update",
     "RangeRule",
     "RateRule",
     "RemoteAlarm",
@@ -128,6 +129,7 @@ __all__ = [
     "register_source",
     "rule",
     "source",
+    "skip",
     "import_remote_alarms",
     "severity_label",
 ]

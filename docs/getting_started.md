@@ -50,7 +50,7 @@ import kanary
 
 @kanary.source(source_id="local_load", interval=10 * kanary.second)
 class LocalLoadSource:
-    def poll(self, ctx):
+    def poll(self):
         load1, _, _ = os.getloadavg()
         cpu_count = os.cpu_count() or 1
         return kanary.inputs([
@@ -66,14 +66,15 @@ class LocalLoadSource:
 The minimum source interface is:
 
 - `@kanary.source(source_id="...")`
-- `poll(self, ctx)`
+- `poll(self)`
 - usually return `kanary.inputs(...)`
+- use `kanary.no_data(...)` for a real empty snapshot, `kanary.no_update(...)` to re-evaluate rules against the last snapshot, and `kanary.skip(...)` for an explicit no-op
 
 `interval` controls how often the source is polled. If you omit it, the default
 is 60 seconds. If you prefer wall-clock timing, you can use `schedule` with a
 Unix cron-compatible 5-field expression such as `*/5 * * * *`. Do not set both
 at the same time.
-You can also implement `init(self, ctx)` and `terminate(self, ctx)`.
+You can also implement `init(self)` and `terminate(self)`.
 
 ## 4. Write A Rule
 
@@ -90,7 +91,7 @@ class LocalLoadBusy:
     description = "Alert when the 1-minute load average per CPU is high."
     runbook = "Run `uptime` or `top` on the monitored host."
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         load = ctx.value()
         threshold = 0.50
         if load is None:
@@ -108,7 +109,7 @@ The minimum rule interface is:
 - `@kanary.rule(rule_id="...", inputs="source_id:input_name")`
 - `severity`
 - `tags`
-- `evaluate(self, payload, ctx)`
+- `evaluate(self, ctx)`
 - usually return `kanary.ok(...)` or `kanary.firing(...)`
 - `owner`, `description`, and `runbook` are optional metadata
 
@@ -172,11 +173,11 @@ import kanary
 class FileOutput:
     output_path = Path("getting_started_alerts.jsonl")
 
-    def init(self, ctx):
+    def init(self):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.output_path.touch(exist_ok=True)
 
-    def emit(self, event, ctx):
+    def emit(self, event):
         record = {
             "rule_id": event.rule_id,
             "previous_state": event.previous_state.value if event.previous_state else None,
@@ -187,9 +188,9 @@ class FileOutput:
             ),
             "current_severity": kanary.severity_label(event.current_severity),
             "transition": event.transition.value if event.transition else None,
-            "owner": event.alert.owner,
-            "tags": list(event.alert.tags),
-            "message": event.alert.message,
+            "owner": event.owner,
+            "tags": list(event.tags),
+            "message": event.message,
             "occurred_at": event.occurred_at.isoformat(),
         }
         with self.output_path.open("a", encoding="utf-8") as handle:
@@ -300,16 +301,16 @@ class MailAlert(kanary.MailOutput):
             ),
             f"Severity: {kanary.severity_label(event.current_severity)}",
             f"Transition: {event.transition.value if event.transition else '-'}",
-            f"Owner: {event.alert.owner or '-'}",
-            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
-            f"Message: {event.alert.message or '-'}",
+            f"Owner: {event.owner or '-'}",
+            f"Tags: {', '.join(event.tags) if event.tags else '-'}",
+            f"Message: {event.message or '-'}",
         ]
-        if event.alert.payload:
+        if event.payload:
             lines.extend(
                 [
                     "",
                     "Payload:",
-                    json.dumps(event.alert.payload, ensure_ascii=False, indent=2, sort_keys=True),
+                    json.dumps(event.payload, ensure_ascii=False, indent=2, sort_keys=True),
                 ]
             )
         return "\n".join(lines)

@@ -22,13 +22,13 @@ def load_config() -> dict:
 )
 class DiscordOutput:
 
-    def init(self, ctx):
+    def init(self):
         config = load_config()
         self.webhook_url = str(config.get("webhook_url") or "").strip()
         if not self.webhook_url:
             raise RuntimeError(f"{CONFIG_PATH.name} must define webhook_url")
 
-    def emit(self, event, ctx):
+    def emit(self, event):
         color = alert_color(event.current_state.value, int(event.effective_severity))
         transition = event.transition.value if event.transition else None
         title = event.rule_id if transition is None else f"{event.rule_id}: {transition}"
@@ -43,7 +43,7 @@ class DiscordOutput:
             "embeds": [
                 {
                     "title": f"{title}: {event.current_state.value}",
-                    "description": event.alert.message or "",
+                    "description": event.message or "",
                     "color": color,
                     "fields": [
                         {
@@ -58,7 +58,7 @@ class DiscordOutput:
                         },
                         {
                             "name": "Tags",
-                            "value": ", ".join(event.alert.tags) or "-",
+                            "value": ", ".join(event.tags) or "-",
                             "inline": True,
                         },
                     ],

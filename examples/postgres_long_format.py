@@ -35,7 +35,7 @@ INPUT_NAME_MAP = {
 @kanary.source(source_id="postgres.long", interval=30.0)
 class LongEnvironmentSource:
 
-    def init(self, ctx):
+    def init(self):
         config = load_config()
         dsn = str(config.get("dsn") or "").strip()
         if not dsn:
@@ -49,7 +49,7 @@ class LongEnvironmentSource:
             options=f"-c statement_timeout={statement_timeout_ms}",
         )
 
-    def poll(self, ctx):
+    def poll(self):
         upstream_names = tuple(INPUT_NAME_MAP)
         with self.conn.cursor() as cur:
             cur.execute(
@@ -84,7 +84,7 @@ class LongEnvironmentSource:
             metadata={"table": "env_samples_long"},
         )
 
-    def terminate(self, ctx):
+    def terminate(self):
         if hasattr(self, "conn"):
             self.conn.close()
 
@@ -122,14 +122,14 @@ class LongRoomAHumidityStale(kanary.StaleRule):
 class LongRoomTemperatureDelta:
     max_delta = 3.0
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         matched_inputs = ctx.inputs()
         if len(matched_inputs) < 2:
             return kanary.ok("room temperature delta requires at least two matched inputs")
 
         values = {item.name: item.value for item in matched_inputs}
         delta = max(values.values()) - min(values.values())
-        result_payload = dict(payload)
+        result_payload = ctx.source_payload()
         result_payload["matched_inputs"] = values
         result_payload["delta"] = delta
 
@@ -154,13 +154,13 @@ class LongRoomTemperatureDelta:
 )
 class LongRoomTemperatureAverageLevels:
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         values = ctx.values()
         if not values:
             return kanary.ok("no room temperatures are available")
 
         average = sum(values) / len(values)
-        result_payload = dict(payload)
+        result_payload = ctx.source_payload()
         result_payload["average_temperature"] = average
         result_payload["matched_inputs"] = {
             item.name: item.value for item in ctx.inputs()

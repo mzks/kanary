@@ -9,7 +9,7 @@ def make_constant_source(
     interval: float,
     inputs: dict[str, float],
 ):
-    def poll(self, ctx):
+    def poll(self):
         now = datetime.now(timezone.utc)
         return kanary.inputs(inputs, timestamp=now)
 

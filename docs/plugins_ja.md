@@ -9,20 +9,21 @@
 必須:
 
 - `source_id`
-- `poll(ctx)`
+- `poll()`
 
 任意:
 
 - `interval`
 - `schedule`
-- `init(ctx)`
-- `terminate(ctx)`
+- `init()`
+- `terminate()`
 - `max_retry`
 - `max_reinit`
 
 `interval` と `schedule` を両方省略した場合は、Kanary は
 `interval = 60.0` を使います。  
 `schedule` を使う場合は `interval` を同時に指定しないでください。
+旧来の `poll(ctx)`, `init(ctx)`, `terminate(ctx)` も互換のため引き続き動きますが、lint では warning を出し、文書上の正式 API は引数なしの形に統一します。
 
 `interval` は秒単位の polling 間隔です。  
 `schedule` は Unix cron 互換の 5-field 文字列で、Kanary server の local time
@@ -40,7 +41,7 @@
 ```python
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
-    def poll(self, ctx):
+    def poll(self):
         ...
 ```
 
@@ -59,7 +60,7 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 
 ### input を返す
 
-通常の public API は `kanary.inputs(...)` です。
+通常の public API は `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` です。
 
 tuple/list 形式:
 
@@ -89,10 +90,19 @@ return kanary.inputs(
 - `(name, value)`, `(name, value, timestamp)`, `(name, value, timestamp, metadata)` を受け付けます
 - item 側の timestamp が省略または `None` の場合、outer `timestamp=` があればそれを使い、無ければ Kanary server の current time を使います
 - outer `metadata=` は `SourceResult.metadata` になります
-- `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功したが usable な input が 0 件だったことを表します
+- `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功し、結果として空の snapshot を返すことを表します。source snapshot は更新され、rule も評価されます
+- `kanary.no_update(reason=..., metadata=...)` は poll 自体は成功したが新しい snapshot は無いことを表します。直前の snapshot を保持したまま、その snapshot に対して rule を再評価します
+- `kanary.skip(reason=..., metadata=...)` は今回の poll を完全に無視したい時に使います。source snapshot は更新されず、rule も評価されません
 - 例外を送出した場合は source/plugin failure として扱われ、runtime の retry/reinit policy に入ります
 
 `kanary.SourceResult(...)` も advanced な書き方として引き続き使えます。
+
+典型的な使い分け:
+
+- 通常の成功時は `kanary.inputs(...)`
+- 「空であること自体が正しい現在値」の時は `kanary.no_data(...)`
+- `StaleRule` などに最後の有効 snapshot を見せ続けたい時は `kanary.no_update(...)`
+- warm-up や maintenance などの明示的な no-op にだけ `kanary.skip(...)` を使います。`skip` では stale 判定も進みません
 
 plugin は、site-specific な設定が必要な場合に自分の directory 内の local file を自由に読んで構いません。  
 よくある形は、plugin script の隣に `*_config.toml` を置き、`Path(__file__).with_name(...)` で読むやり方です。  
@@ -108,7 +118,7 @@ plugin は、site-specific な設定が必要な場合に自分の directory 内
 - `inputs`
 - `severity`
 - `tags`
-- `evaluate(payload, ctx)`
+- `evaluate(ctx)`
 
 `source="postgres"` も、`inputs="postgres:*"` の短縮として引き続き使えます。1つの source が公開する全 input に依存したい時の sugar です。
 
@@ -132,6 +142,7 @@ Kanary は load/reload 時にこれらの selector から `resolved_sources` を
 
 `severity` は default / fallback severity として使われます。  
 `kanary.firing(..., severity=...)` または `kanary.Evaluation(severity=...)` を返すと、その評価だけ上書きできます。
+旧来の `evaluate(payload, ctx)` も互換のため引き続き動きますが、lint では warning を出し、正式 API は `evaluate(ctx)` です。
 
 ### RuleContext
 
@@ -162,7 +173,7 @@ input を扱う accessor を使います:
 
 単一 input に解決される rule では `ctx.value()` のように selector を省略できます。複数 input を扱う rule では通常 `ctx.inputs()` を反復します。  
 selector が複数 input に一致しうる場合、`ctx.value()` などの scalar helper は推測せず error にします。  
-複数 source に依存する rule でも、`payload` 引数は「今回の評価を trigger した source の payload」です。cross-source の参照は `ctx.inputs()` を使ってください。
+今回の評価を trigger した source の normalized payload が必要な時は `ctx.source_payload()` を使います。cross-source の参照は `ctx.inputs()` を使ってください。
 
 ### 評価結果を返す
 
@@ -176,7 +187,7 @@ selector が複数 input に一致しうる場合、`ctx.value()` などの scal
 例:
 
 ```python
-def evaluate(self, payload, ctx):
+def evaluate(self, ctx):
     value = ctx.value()
     if value is None:
         return kanary.ok("temperature is missing")
@@ -206,12 +217,12 @@ payload を明示しない場合、Kanary は current source payload を自動�
 必須:
 
 - `output_id`
-- `emit(event, ctx)`
+- `emit(event)`
 
 任意:
 
-- `init(ctx)`
-- `terminate(ctx)`
+- `init()`
+- `terminate()`
 - `include_tags`
 - `exclude_tags`
 - `exclude_states`
@@ -222,6 +233,7 @@ payload を明示しない場合、Kanary は current source payload を自動�
 
 この repository の example が主に使う「local plugin config を読む」流儀に対して、組み込み SMTP output は例外です。  
 SMTP output は利便性のために、引き続き `KANARY_SMTP_*` 環境変数を読みます。
+旧来の `emit(event, ctx)`, `init(ctx)`, `terminate(ctx)` も互換のため引き続き動きますが、lint では warning を出し、正式 API では `ctx` を省きます。
 
 `include_tags` と `exclude_tags` は glob pattern を使えます。  
 たとえば `include_tags=["expert_*"]` とすると、`expert_db` や `expert_shift` のような tag に一致します。
@@ -271,7 +283,7 @@ SMTP output は利便性のために、引き続き `KANARY_SMTP_*` 環境変数
     minimum_severity="ERROR",
 )
 class DiscordOutput:
-    def emit(self, event, ctx):
+    def emit(self, event):
         ...
 ```
 
@@ -295,6 +307,7 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 #### BufferedSource
 
 `kanary.BufferedSource` は source 側で短い履歴を持つ helper です。
+`fetch(self)` を実装し、そこから通常の source data を返します。`BufferedSource.poll()` がその結果を自動で記録します。
 
 使える helper:
 
@@ -397,9 +410,9 @@ class MailAlert(kanary.MailOutput):
             ),
             f"Severity: {kanary.severity_label(event.current_severity)}",
             f"Transition: {event.transition.value if event.transition else '-'}",
-            f"Owner: {event.alert.owner or '-'}",
-            f"Tags: {', '.join(event.alert.tags) if event.alert.tags else '-'}",
-            f"Message: {event.alert.message or '-'}",
+            f"Owner: {event.owner or '-'}",
+            f"Tags: {', '.join(event.tags) if event.tags else '-'}",
+            f"Message: {event.message or '-'}",
         ]
         return "\n".join(lines)
 ```

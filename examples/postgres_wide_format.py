@@ -31,7 +31,7 @@ def load_config() -> dict:
 @kanary.source(source_id="postgres.wide", interval=30.0)
 class WideEnvironmentSource:
 
-    def init(self, ctx):
+    def init(self):
         config = load_config()
         dsn = str(config.get("dsn") or "").strip()
         if not dsn:
@@ -45,7 +45,7 @@ class WideEnvironmentSource:
             options=f"-c statement_timeout={statement_timeout_ms}",
         )
 
-    def poll(self, ctx):
+    def poll(self):
         with self.conn.cursor() as cur:
             cur.execute(
                 """
@@ -70,7 +70,7 @@ class WideEnvironmentSource:
             metadata={"table": "env_samples_wide"},
         )
 
-    def terminate(self, ctx):
+    def terminate(self):
         if hasattr(self, "conn"):
             self.conn.close()
 
@@ -124,7 +124,7 @@ class WideCo2Levels(kanary.ThresholdRule):
 class WideEnvironmentFresh:
     timeout = 2 * kanary.minute
 
-    def evaluate(self, payload, ctx):
+    def evaluate(self, ctx):
         stale_inputs: list[str] = []
         missing_inputs: list[str] = []
         for item in ctx.inputs():
@@ -135,7 +135,7 @@ class WideEnvironmentFresh:
             if age_seconds > self.timeout:
                 stale_inputs.append(f"{item.name} ({kanary.format_time(age_seconds)})")
 
-        result_payload = dict(payload)
+        result_payload = ctx.source_payload()
         result_payload["stale_inputs"] = stale_inputs
         result_payload["missing_inputs"] = missing_inputs
 

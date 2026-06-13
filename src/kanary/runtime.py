@@ -202,19 +202,30 @@ class EngineRuntime:
         if self.engine is None or self._discovered_snapshot is None:
             return {"status": "reload_failed"}
         target, pattern = _parse_reload_request(request)
+        selected_ids = {
+            plugin_type: self._select_plugin_ids(plugin_type, target=target, pattern=pattern)
+            for plugin_type in ("source", "rule", "output")
+        }
         summary = {
             "status": "reloaded",
             "target": target,
             "pattern": pattern,
-            "rules": self._apply_plugin_reload("rule", target=target, pattern=pattern),
-            "sources": self._apply_plugin_reload("source", target=target, pattern=pattern),
-            "outputs": self._apply_plugin_reload("output", target=target, pattern=pattern),
+            "sources": self._apply_plugin_reload("source", target=target, pattern=pattern, selected_ids=selected_ids["source"]),
+            "rules": self._apply_plugin_reload("rule", target=target, pattern=pattern, selected_ids=selected_ids["rule"]),
+            "outputs": self._apply_plugin_reload("output", target=target, pattern=pattern, selected_ids=selected_ids["output"]),
         }
         self._publish_runtime_plugin_overlay()
         return summary
 
-    def _apply_plugin_reload(self, plugin_type: str, *, target: str, pattern: str | None) -> dict[str, Any]:
-        selected_ids = self._select_plugin_ids(plugin_type, target=target, pattern=pattern)
+    def _apply_plugin_reload(
+        self,
+        plugin_type: str,
+        *,
+        target: str,
+        pattern: str | None,
+        selected_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        selected_ids = set(selected_ids or self._select_plugin_ids(plugin_type, target=target, pattern=pattern))
         if not selected_ids:
             return {"matched": [], "reloaded": [], "removed": [], "failed": []}
 
@@ -389,7 +400,7 @@ class EngineRuntime:
         attempt = 0
 
         try:
-            return source.poll({"engine": self.engine, "now": now})
+            return self.engine._call_source_poll(source, now=now)
         except Exception as exc:
             last_exc = exc
 
@@ -398,7 +409,7 @@ class EngineRuntime:
             if stop_event.wait(attempt ** 2) or self._stop_event.is_set():
                 raise RuntimeError("source polling interrupted during recovery")
             try:
-                return source.poll({"engine": self.engine, "now": now})
+                return self.engine._call_source_poll(source, now=now)
             except Exception as exc:
                 last_exc = exc
 
@@ -416,7 +427,7 @@ class EngineRuntime:
                 last_exc = exc
                 continue
             try:
-                return source.poll({"engine": self.engine, "now": now})
+                return self.engine._call_source_poll(source, now=now)
             except Exception as exc:
                 last_exc = exc
 
