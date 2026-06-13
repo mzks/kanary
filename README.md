@@ -116,7 +116,7 @@ Internally, Kanary handles plugin loading, periodic source polling, rule evaluat
 If you want shorter definitions later, you can switch to built-in helper classes such as `RangeRule`, `StaleRule`, and `ThresholdRule`.
 Users can create plugin class factory too.
 
-For sources, the usual public API is `kanary.inputs(...)` and `kanary.no_data(...)`.
+For sources, the usual public API is `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, and `kanary.skip(...)`.
 For rules, the usual public API is `kanary.ok(...)`, `kanary.firing(...)`, `kanary.warn(...)`, `kanary.error(...)`, and `kanary.critical(...)`.
 `kanary.SourceResult(...)` and `kanary.Evaluation(...)` remain available as advanced forms.
 

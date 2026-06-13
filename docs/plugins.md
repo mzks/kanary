@@ -59,7 +59,7 @@ If all attempts fail, the source stays `FAILED` until the next scheduled poll or
 
 ### Returning inputs
 
-The usual public API is `kanary.inputs(...)`.
+The usual public API is `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, and `kanary.skip(...)`.
 
 Tuple/list style:
 
@@ -89,10 +89,19 @@ Rules:
 - `(name, value)`, `(name, value, timestamp)`, and `(name, value, timestamp, metadata)` are accepted
 - if the item timestamp is omitted or `None`, Kanary uses the outer `timestamp=` if present, otherwise the server's current time
 - outer `metadata=` becomes `SourceResult.metadata`
-- `kanary.no_data(reason=..., metadata=...)` means the poll succeeded but produced no usable inputs
+- `kanary.no_data(reason=..., metadata=...)` means the poll succeeded and produced an empty snapshot; Kanary updates the source snapshot and still evaluates rules
+- `kanary.no_update(reason=..., metadata=...)` means the poll succeeded but there is no new snapshot; Kanary keeps the last snapshot and still evaluates rules against it
+- `kanary.skip(reason=..., metadata=...)` means the poll should be ignored entirely; Kanary keeps the last snapshot and does not evaluate rules
 - raising an exception means source/plugin failure and triggers the runtime retry/reinit policy
 
 `kanary.SourceResult(...)` remains available as an advanced form.
+
+Typical guidance:
+
+- use `kanary.inputs(...)` for a normal successful poll
+- use `kanary.no_data(...)` when "empty" is the correct current result
+- use `kanary.no_update(...)` when you want `StaleRule` and other rules to keep looking at the last good snapshot
+- use `kanary.skip(...)` only for explicit no-op cases such as warm-up or maintenance windows, because stale detection does not advance
 
 Plugins are also free to read local files from their own directory when they need site-specific configuration.
 A common pattern is to place `*_config.toml` next to the plugin script and read it with `Path(__file__).with_name(...)`.

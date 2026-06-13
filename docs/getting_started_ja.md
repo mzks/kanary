@@ -55,6 +55,7 @@ class LocalLoadSource:
 - `@kanary.source(source_id="...")`
 - `poll(self)`
 - 通常は `kanary.inputs(...)` を返すこと
+- 実際に空の snapshot を返したい時は `kanary.no_data(...)`、最後の snapshot で rule を再評価したい時は `kanary.no_update(...)`、明示的な no-op は `kanary.skip(...)`
 
 `interval` は source の取得間隔です。省略すると 60 秒です。wall-clock に
 合わせたい場合は、`*/5 * * * *` のような Unix cron 互換 5-field の

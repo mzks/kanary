@@ -230,12 +230,14 @@ class Engine:
     ) -> dict[str, Alert]:
         with self._lock:
             current_time = now or self._now_fn()
-            source_payload = self._normalize_source_input(source_id, payload, current_time)
-            source_state = self._update_source_state(
+            normalized_payload = self._normalize_source_input(source_id, payload, current_time)
+            source_payload, source_state = self._apply_source_result(
                 source_id,
-                source_payload,
+                normalized_payload,
                 observed_at=current_time,
             )
+            if source_payload is None or source_state is None:
+                return dict(self.alerts)
             for rule in self.rules.values():
                 if source_id not in getattr(rule, "resolved_sources", []):
                     continue
@@ -843,6 +845,10 @@ class Engine:
 
     def _normalize_source_result(self, result: object, *, now: datetime | None = None) -> dict[str, object]:
         normalized_result = normalize_source_output(result, now=now)
+        if normalized_result.status not in {"ok", "empty", "no_update", "skip"}:
+            raise ValueError(
+                "source result status must be one of 'ok', 'empty', 'no_update', or 'skip'"
+            )
         channels: dict[str, dict[str, object]] = {}
         for measurement in normalized_result.measurements:
             channels[measurement.name] = {
@@ -880,6 +886,28 @@ class Engine:
         status.last_success_at = now
         status.last_updated_at = now
         return normalized
+
+    def _apply_source_result(
+        self,
+        source_id: str,
+        payload: dict[str, object],
+        *,
+        observed_at: datetime,
+    ) -> tuple[dict[str, object] | None, SourceState | None]:
+        status = payload.get("status", "ok")
+        if not isinstance(status, str):
+            raise ValueError("source result status must be a string")
+        if status == "skip":
+            return None, None
+        if status == "no_update":
+            state = self.source_states.setdefault(source_id, SourceState(source_id=source_id))
+            return dict(state.current.payload), state
+        state = self._update_source_state(
+            source_id,
+            payload,
+            observed_at=observed_at,
+        )
+        return dict(state.current.payload), state
 
     def _build_test_evaluate_source_states(
         self,
@@ -1565,8 +1593,6 @@ class Engine:
                 resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
                 previous_alert=self.alerts.get(rule.rule_id),
             )
-            if not ctx.inputs():
-                raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
             dependency_state = self._resolve_dependency_state(rule, source_payload)
             if dependency_state is not None:
                 self._apply_evaluation(
@@ -1651,8 +1677,6 @@ class Engine:
             resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
             previous_alert=self.alerts.get(rule.rule_id),
         )
-        if not ctx.inputs():
-            raise ValueError(f"rule '{rule.rule_id}' resolved zero inputs")
         dependency_state = self._resolve_dependency_state(rule, source_payload)
         if dependency_state is not None:
             return dependency_state

@@ -108,7 +108,7 @@ class ConsoleOutput:
 あとから短く書きたくなったら、`RangeRule`, `StaleRule`, `ThresholdRule` などの組み込み helper class に置き換えられます。
 また, ユーザーは独自のclass factory関数を実装できます.
 
-source の public API としては `kanary.inputs(...)` と `kanary.no_data(...)` を使うのが通常です。  
+source の public API としては `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` を使うのが通常です。  
 rule の public API としては `kanary.ok(...)`, `kanary.firing(...)`, `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)` を使うのが通常です。  
 `kanary.SourceResult(...)` と `kanary.Evaluation(...)` は advanced な書き方として引き続き使えます。
 

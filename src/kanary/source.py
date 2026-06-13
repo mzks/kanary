@@ -139,6 +139,32 @@ def no_data(
     )
 
 
+def no_update(
+    *,
+    reason: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> SourceResult:
+    return SourceResult(
+        measurements=[],
+        status="no_update",
+        reason=reason,
+        metadata=dict(metadata or {}),
+    )
+
+
+def skip(
+    *,
+    reason: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> SourceResult:
+    return SourceResult(
+        measurements=[],
+        status="skip",
+        reason=reason,
+        metadata=dict(metadata or {}),
+    )
+
+
 def normalize_source_output(
     result: Any,
     *,

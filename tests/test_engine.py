@@ -319,6 +319,56 @@ class EngineTest(unittest.TestCase):
             45,
         )
 
+    def test_no_data_evaluates_rules_without_marking_them_failed(self) -> None:
+        alerts = self.engine.evaluate_source("postgres", kanary.no_data(reason="no rows"), now=self.now)
+        self.assertEqual(alerts["postgres.temperature.range"].state, kanary.AlertState.OK)
+        self.assertEqual(alerts["postgres.temperature.stale"].state, kanary.AlertState.FIRING)
+        self.assertEqual(
+            self.engine.plugin_states["rule:postgres.temperature.range"].state,
+            "READY",
+        )
+        source_state = self.engine.source_states["postgres"]
+        self.assertEqual(source_state.current.payload["status"], "empty")
+        self.assertEqual(source_state.current.payload["channels"], {})
+
+    def test_no_update_keeps_snapshot_and_re_evaluates_rules(self) -> None:
+        source = self.engine.sources["postgres"]
+        source.now = self.now
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        before = self.engine.source_states["postgres"]
+        later = self.now + timedelta(minutes=20)
+
+        alerts = self.engine.evaluate_source("postgres", kanary.no_update(reason="latest row not advanced"), now=later)
+
+        after = self.engine.source_states["postgres"]
+        self.assertEqual(after.current.payload, before.current.payload)
+        self.assertEqual(after.previous.payload, before.previous.payload)
+        self.assertEqual(after.poll_count, before.poll_count)
+        self.assertEqual(alerts["postgres.temperature.stale"].state, kanary.AlertState.FIRING)
+        self.assertEqual(
+            alerts["postgres.temperature.stale"].message,
+            "stale for 20 min (> 10 min)",
+        )
+
+    def test_skip_keeps_snapshot_and_does_not_re_evaluate_rules(self) -> None:
+        source = self.engine.sources["postgres"]
+        source.now = self.now
+        initial_alerts = self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        before_state = self.engine.source_states["postgres"]
+        before_alert = initial_alerts["postgres.temperature.stale"]
+        later = self.now + timedelta(minutes=20)
+
+        alerts = self.engine.evaluate_source("postgres", kanary.skip(reason="warming up"), now=later)
+
+        after_state = self.engine.source_states["postgres"]
+        after_alert = alerts["postgres.temperature.stale"]
+        self.assertEqual(after_state.current.payload, before_state.current.payload)
+        self.assertEqual(after_state.previous.payload, before_state.previous.payload)
+        self.assertEqual(after_state.poll_count, before_state.poll_count)
+        self.assertEqual(after_alert.state, before_alert.state)
+        self.assertEqual(after_alert.message, before_alert.message)
+        self.assertEqual(after_alert.last_evaluated_at, before_alert.last_evaluated_at)
+
     def test_rule_context_input_accessors_work_for_current_and_previous(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
@@ -570,6 +620,24 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(payload["status"], "empty")
         self.assertEqual(payload["reason"], "no rows")
         self.assertEqual(payload["metadata"], {"table": "demo"})
+
+    def test_no_update_helper_sets_status_and_reason(self) -> None:
+        payload = self.engine._normalize_source_result(
+            kanary.no_update(reason="latest row not advanced", metadata={"table": "demo"}),
+            now=self.now,
+        )
+        self.assertEqual(payload["status"], "no_update")
+        self.assertEqual(payload["reason"], "latest row not advanced")
+        self.assertEqual(payload["metadata"], {"table": "demo"})
+
+    def test_skip_helper_sets_status_and_reason(self) -> None:
+        payload = self.engine._normalize_source_result(
+            kanary.skip(reason="warmup", metadata={"phase": "startup"}),
+            now=self.now,
+        )
+        self.assertEqual(payload["status"], "skip")
+        self.assertEqual(payload["reason"], "warmup")
+        self.assertEqual(payload["metadata"], {"phase": "startup"})
 
     def test_rule_helpers_inherit_payload_and_merge_extra(self) -> None:
         rule = self.engine.rules["postgres.temperature.custom_threshold"]

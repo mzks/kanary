@@ -68,6 +68,7 @@ The minimum source interface is:
 - `@kanary.source(source_id="...")`
 - `poll(self)`
 - usually return `kanary.inputs(...)`
+- use `kanary.no_data(...)` for a real empty snapshot, `kanary.no_update(...)` to re-evaluate rules against the last snapshot, and `kanary.skip(...)` for an explicit no-op
 
 `interval` controls how often the source is polled. If you omit it, the default
 is 60 seconds. If you prefer wall-clock timing, you can use `schedule` with a

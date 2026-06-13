@@ -60,7 +60,7 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 
 ### input を返す
 
-通常の public API は `kanary.inputs(...)` です。
+通常の public API は `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` です。
 
 tuple/list 形式:
 
@@ -90,10 +90,19 @@ return kanary.inputs(
 - `(name, value)`, `(name, value, timestamp)`, `(name, value, timestamp, metadata)` を受け付けます
 - item 側の timestamp が省略または `None` の場合、outer `timestamp=` があればそれを使い、無ければ Kanary server の current time を使います
 - outer `metadata=` は `SourceResult.metadata` になります
-- `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功したが usable な input が 0 件だったことを表します
+- `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功し、結果として空の snapshot を返すことを表します。source snapshot は更新され、rule も評価されます
+- `kanary.no_update(reason=..., metadata=...)` は poll 自体は成功したが新しい snapshot は無いことを表します。直前の snapshot を保持したまま、その snapshot に対して rule を再評価します
+- `kanary.skip(reason=..., metadata=...)` は今回の poll を完全に無視したい時に使います。source snapshot は更新されず、rule も評価されません
 - 例外を送出した場合は source/plugin failure として扱われ、runtime の retry/reinit policy に入ります
 
 `kanary.SourceResult(...)` も advanced な書き方として引き続き使えます。
+
+典型的な使い分け:
+
+- 通常の成功時は `kanary.inputs(...)`
+- 「空であること自体が正しい現在値」の時は `kanary.no_data(...)`
+- `StaleRule` などに最後の有効 snapshot を見せ続けたい時は `kanary.no_update(...)`
+- warm-up や maintenance などの明示的な no-op にだけ `kanary.skip(...)` を使います。`skip` では stale 判定も進みません
 
 plugin は、site-specific な設定が必要な場合に自分の directory 内の local file を自由に読んで構いません。  
 よくある形は、plugin script の隣に `*_config.toml` を置き、`Path(__file__).with_name(...)` で読むやり方です。  
