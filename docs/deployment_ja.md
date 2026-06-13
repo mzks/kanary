@@ -119,7 +119,7 @@ docker run --rm \
 ```
 
 公開済み image を使う場合は、`kanary:local` の代わりに
-`ghcr.io/mzks/kanary:latest` や `ghcr.io/mzks/kanary:0.3.0` のような
+`ghcr.io/mzks/kanary:latest` や `ghcr.io/mzks/kanary:0.3.1` のような
 version tag を指定します。
 
 container の既定 command は次です。
@@ -158,7 +158,7 @@ site-specific な派生 image を作るのが自然です。container 起動後�
 するのではなく、Dockerfile に明示するほうがよりよいです。
 
 ```dockerfile
-FROM ghcr.io/mzks/kanary:0.3.0
+FROM ghcr.io/mzks/kanary:0.3.1
 
 RUN python -m pip install 'psycopg[binary]' psutil
 ```
@@ -177,7 +177,7 @@ cd docker-deploy
 `Dockerfile`:
 
 ```dockerfile
-FROM ghcr.io/mzks/kanary:0.3.0
+FROM ghcr.io/mzks/kanary:0.3.1
 
 RUN python -m pip install 'psycopg[binary]' psutil
 ```
@@ -201,7 +201,7 @@ docker run --rm \
 plugin 側 dependency をまとめた `requirements.txt` があるなら、次のようにも書けます。
 
 ```dockerfile
-FROM ghcr.io/mzks/kanary:0.3.0
+FROM ghcr.io/mzks/kanary:0.3.1
 
 COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install -r /tmp/requirements.txt
