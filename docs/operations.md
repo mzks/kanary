@@ -106,6 +106,8 @@ kanaryctl test-poll sqlite
 kanaryctl test-evaluate sqlite.value1.range --payload-file payload.json
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl reload --dirty
+kanaryctl reload --all
+kanaryctl reload --full
 kanaryctl plugins
 kanaryctl silences
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
@@ -113,8 +115,14 @@ kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
 kanaryctl silence-until --operator operator_name --start-at 2026-03-19T10:00:00+09:00 --end-at 2026-03-19T12:00:00+09:00 --tag sqlite
 kanaryctl unsilence <silence_id> --operator operator_name
-kanaryctl reload --all
 ```
+
+- `reload --dirty`
+  Apply only `DISCOVERED`, `DIRTY`, and `PENDING_REMOVE` plugins.
+- `reload --all`
+  Rerun full plugin discovery even when no watched Python file changed, then apply the result.
+- `reload --full`
+  Perform an in-process engine restart. All sources, rules, and outputs are reinitialized.
 
 ## Log history Persistence
 

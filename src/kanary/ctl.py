@@ -115,13 +115,14 @@ def main() -> int:
     unsilence_parser.add_argument("--operator", required=True)
     unsilence_parser.add_argument("--reason")
 
-    reload_parser = subparsers.add_parser("reload", help="Apply discovered plugin changes")
+    reload_parser = subparsers.add_parser("reload", help="Apply discovered plugin changes or restart the engine")
     reload_group = reload_parser.add_mutually_exclusive_group(required=True)
     reload_group.add_argument("--rule")
     reload_group.add_argument("--source")
     reload_group.add_argument("--output")
     reload_group.add_argument("--dirty", action="store_true")
     reload_group.add_argument("--all", action="store_true")
+    reload_group.add_argument("--full", action="store_true")
 
     test_poll_parser = subparsers.add_parser("test-poll", help="Poll one source and print the normalized payload")
     test_poll_parser.add_argument("source_id")
@@ -303,6 +304,7 @@ def main() -> int:
                     "output": args.output,
                     "dirty": args.dirty,
                     "all": args.all,
+                    "full": args.full,
                 },
             )
             print(payload.get("status", "unknown"))

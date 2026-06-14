@@ -24,7 +24,7 @@ class ControlAPI:
         self,
         *,
         engine_getter: Callable[[], Engine | None],
-        reload_callback: Callable[[], bool],
+        reload_callback: Callable[..., object],
         meta_getter: Callable[[], dict[str, object]] | None = None,
         host: str = "0.0.0.0",
         port: int = 8000,

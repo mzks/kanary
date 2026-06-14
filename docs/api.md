@@ -53,6 +53,9 @@ Use `--api-host` and `--api-port` to change the bind address.
   - `{"output":"discord*"}`
   - `{"dirty":true}`
   - `{"all":true}`
+  - `{"full":true}`
+  `{"all":true}` always reruns full plugin discovery even when no watched Python file changed.
+  `{"full":true}` performs an in-process engine restart after successful discovery and validation.
   For legacy compatibility, an empty body is still accepted and behaves like `{"all":true}`.
 - `POST /test-poll/{source_id}`
   Polls one source and returns the normalized source payload.
@@ -110,7 +113,9 @@ Main subcommands:
   Cancels one silence.
 - `reload`
   Applies discovered plugin changes.
-  Use exactly one of `--rule`, `--source`, `--output`, `--dirty`, or `--all`.
+  Use exactly one of `--rule`, `--source`, `--output`, `--dirty`, `--all`, or `--full`.
+  `--all` reruns full discovery even without local Python file changes.
+  `--full` performs an in-process engine restart and reinitializes all sources, rules, and outputs.
   For legacy compatibility, `POST /reload` with an empty body still behaves like `--all`.
 - `test-poll`
   Polls one source and prints the normalized payload as JSON.

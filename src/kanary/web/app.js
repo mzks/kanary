@@ -74,6 +74,7 @@ function bindControls() {
   document.getElementById("admin-window-button").addEventListener("click", submitAdminWindowSilence);
   document.getElementById("admin-reload-dirty-button").addEventListener("click", reloadDirtyPlugins);
   document.getElementById("admin-reload-all-button").addEventListener("click", reloadAllPlugins);
+  document.getElementById("admin-restart-engine-button").addEventListener("click", restartEngine);
   document.getElementById("source-modal-close").addEventListener("click", closeSourceModal);
   for (const element of document.querySelectorAll("[data-close-source]")) {
     element.addEventListener("click", closeSourceModal);
@@ -837,6 +838,19 @@ async function reloadAllPlugins() {
   });
 }
 
+async function restartEngine() {
+  const confirmed = window.confirm(
+    "Restart the engine now?\n\nAll sources, rules, and outputs will be reinitialized. Without a state DB, in-memory state may be lost."
+  );
+  if (!confirmed) {
+    return;
+  }
+  await runPendingAction("reload-full", ["admin-restart-engine-button"], async () => {
+    await postJson("/reload", { full: true });
+    await refreshAll();
+  });
+}
+
 async function applyPlugin(pluginType, pluginId) {
   await runPendingAction(`apply-${pluginType}-${pluginId}`, [], async () => {
     await postJson("/reload", { [pluginType]: pluginId });
@@ -1351,6 +1365,7 @@ function syncActionButtonState() {
     { actionKey: "admin-silence-window", buttonId: "admin-window-button" },
     { actionKey: "reload-dirty", buttonId: "admin-reload-dirty-button" },
     { actionKey: "reload-all", buttonId: "admin-reload-all-button" },
+    { actionKey: "reload-full", buttonId: "admin-restart-engine-button" },
   ];
   for (const mapping of pendingMappings) {
     const button = document.getElementById(mapping.buttonId);

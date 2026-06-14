@@ -188,9 +188,12 @@ kanaryctl reload --source 'demo*'
 kanaryctl reload --output 'mail*'
 kanaryctl reload --dirty
 kanaryctl reload --all
+kanaryctl reload --full
 ```
 
 `dirty` は完全な依存解析ではなく、実用上のヒントです。Kanary は plugin 定義本体の変更と watched root 内の静的 import を見ますが、same-file helper の全変更や動的依存を完全には追いません。意図してコードを変えた場合は、該当する reload を明示的に実行してください。
+`all` は watched な Python file に変更が無くても full discovery をやり直します。
+`full` は in-process で Engine restart を行い、全 source/rule/output を再初期化します。
 
 ## 環境変数
 

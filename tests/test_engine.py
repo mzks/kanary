@@ -1994,9 +1994,92 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
         runtime.engine.start()
         now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
         for source_id, source in runtime.engine.sources.items():
-            runtime.engine.evaluate_source(source_id, source.poll({"now": now}), now=now)
+            payload = runtime.engine._call_source_poll(source, now=now)
+            runtime.engine.evaluate_source(source_id, payload, now=now)
         runtime._publish_runtime_plugin_overlay()
         return runtime
+
+    def _write_dynamic_discovery_plugins(self, directory: Path) -> None:
+        path = directory / "plugins.py"
+        path.write_text(
+            textwrap.dedent(
+                """
+                import json
+                from pathlib import Path
+
+                import kanary
+
+                CONFIG = json.loads(Path(__file__).with_name("remote_rules.json").read_text(encoding="utf-8"))
+
+                @kanary.source(source_id="example.source", interval=60.0)
+                class ExampleSource:
+                    def poll(self, ctx):
+                        return kanary.SourceResult(
+                            measurements=[
+                                kanary.Measurement(
+                                    name="value",
+                                    value=1,
+                                    timestamp=ctx["now"],
+                                )
+                            ]
+                        )
+
+                for index, rule_id in enumerate(CONFIG["rule_ids"], start=1):
+                    attrs = {
+                        "__module__": __name__,
+                        "rule_id": rule_id,
+                        "inputs": "example.source:value",
+                        "severity": kanary.ERROR,
+                        "tags": ["dynamic"],
+                        "high": index,
+                    }
+                    kanary.register_rule(type(f"GeneratedRule{index}", (kanary.RangeRule,), attrs))
+                """
+            )
+        )
+
+    def _write_full_restart_plugins(self, directory: Path) -> None:
+        path = directory / "plugins.py"
+        path.write_text(
+            textwrap.dedent(
+                """
+                from pathlib import Path
+
+                import kanary
+
+                COUNT_PATH = Path(__file__).with_name("init_count.txt")
+                FAIL_PATH = Path(__file__).with_name("fail_flag.txt")
+
+                @kanary.source(source_id="restart.source", interval=60.0)
+                class RestartSource:
+                    def init(self):
+                        if FAIL_PATH.exists() and FAIL_PATH.read_text(encoding="utf-8").strip() == "1":
+                            raise RuntimeError("restart init failed")
+                        current = int(COUNT_PATH.read_text(encoding="utf-8").strip() or "0") if COUNT_PATH.exists() else 0
+                        COUNT_PATH.write_text(str(current + 1), encoding="utf-8")
+
+                    def poll(self):
+                        return kanary.SourceResult(
+                            measurements=[
+                                kanary.Measurement(
+                                    name="value",
+                                    value=1,
+                                    timestamp=self._kanary_poll_now,
+                                )
+                            ]
+                        )
+
+                @kanary.rule(
+                    rule_id="restart.rule",
+                    inputs="restart.source:value",
+                    severity=kanary.ERROR,
+                    tags=["restart"],
+                )
+                class RestartRule(kanary.RangeRule):
+                    high = 5
+                """
+            )
+        )
 
     def test_reload_dirty_loads_discovered_rule(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2143,6 +2226,76 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
                 self.assertIs(runtime.engine.outputs["example.output"], old_output)
                 self.assertEqual(new_rule.high, 30)
                 self.assertEqual(runtime.engine._plugin_status("rule", "example.rule").state, "READY")
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+    def test_reload_all_forces_full_discovery_without_python_file_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_dynamic_discovery_plugins(root)
+            (root / "remote_rules.json").write_text(
+                json.dumps({"rule_ids": ["dynamic.one"]}),
+                encoding="utf-8",
+            )
+            runtime = self._bootstrap_runtime(root)
+            try:
+                self.assertIn("dynamic.one", runtime.engine.rules)
+                self.assertNotIn("dynamic.two", runtime.engine.rules)
+
+                (root / "remote_rules.json").write_text(
+                    json.dumps({"rule_ids": ["dynamic.one", "dynamic.two"]}),
+                    encoding="utf-8",
+                )
+
+                summary = runtime.reload_now({"all": True})
+
+                self.assertEqual(summary["status"], "reloaded")
+                self.assertIn("dynamic.one", runtime.engine.rules)
+                self.assertIn("dynamic.two", runtime.engine.rules)
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+    def test_reload_full_restarts_engine_and_reinitializes_sources(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_full_restart_plugins(root)
+            runtime = self._bootstrap_runtime(root)
+            try:
+                count_path = root / "init_count.txt"
+                self.assertEqual(count_path.read_text(encoding="utf-8").strip(), "1")
+                old_engine = runtime.engine
+
+                summary = runtime.reload_now({"full": True})
+
+                self.assertEqual(summary["status"], "reloaded")
+                self.assertEqual(summary["target"], "full")
+                self.assertEqual(count_path.read_text(encoding="utf-8").strip(), "2")
+                self.assertIsNot(runtime.engine, old_engine)
+                self.assertIn("restart.rule", runtime.engine.rules)
+            finally:
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
+    def test_reload_full_keeps_old_engine_when_restart_fails(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_full_restart_plugins(root)
+            runtime = self._bootstrap_runtime(root)
+            try:
+                count_path = root / "init_count.txt"
+                fail_path = root / "fail_flag.txt"
+                old_engine = runtime.engine
+                fail_path.write_text("1", encoding="utf-8")
+
+                summary = runtime.reload_now({"full": True})
+
+                self.assertEqual(summary["status"], "reload_failed")
+                self.assertEqual(summary["target"], "full")
+                self.assertIs(runtime.engine, old_engine)
+                self.assertEqual(count_path.read_text(encoding="utf-8").strip(), "1")
+                self.assertIn("restart.rule", runtime.engine.rules)
             finally:
                 runtime.api._server.server_close()
                 runtime.engine.shutdown()
@@ -3785,6 +3938,31 @@ class ControlAPITest(unittest.TestCase):
             thread.join(timeout=2.0)
         self.assertEqual(body["status"], "reloaded")
         self.assertEqual(captured, {"rule": "postgres.*"})
+
+    def test_reload_endpoint_forwards_full_payload(self) -> None:
+        captured: dict[str, object] = {}
+        api = kanary.ControlAPI(
+            engine_getter=lambda: self.engine,
+            reload_callback=lambda payload: captured.update(payload) or {"status": "reloaded"},
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            request = Request(
+                f"http://127.0.0.1:{api._server.server_address[1]}/reload",
+                method="POST",
+                data=json.dumps({"full": True}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request) as response:
+                body = json.loads(response.read().decode())
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+        self.assertEqual(body["status"], "reloaded")
+        self.assertEqual(captured, {"full": True})
 
     def test_plugins_endpoint_returns_output_status(self) -> None:
         with urlopen(f"{self.base_url}/plugins") as response:

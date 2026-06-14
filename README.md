@@ -196,9 +196,12 @@ kanaryctl reload --source 'demo*'
 kanaryctl reload --output 'mail*'
 kanaryctl reload --dirty
 kanaryctl reload --all
+kanaryctl reload --full
 ```
 
 `dirty` is a practical hint, not a complete dependency tracker. Kanary detects plugin definition changes and watched-root static imports, but it does not try to prove every same-file helper change or dynamic dependency. If you changed code intentionally, apply the relevant reload explicitly.
+`all` reruns full plugin discovery even when no watched Python file changed.
+`full` performs an in-process engine restart and reinitializes all sources, rules, and outputs.
 
 ## Environment Variables
 

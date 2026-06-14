@@ -53,6 +53,9 @@
   - `{"output":"discord*"}`
   - `{"dirty":true}`
   - `{"all":true}`
+  - `{"full":true}`
+  `{"all":true}` は watched な Python file に変更が無くても、毎回 full discovery をやり直します。
+  `{"full":true}` は discovery 成功後に in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、空 body も受け付けます。この場合は `{"all":true}` と同じ意味です。
 - `POST /test-poll/{source_id}`
   1 つの source を poll し、normalized source payload を返します。
@@ -109,7 +112,9 @@
   1 つの silence を cancel します。
 - `reload`
   発見済み plugin の変更を適用します。
-  `--rule`, `--source`, `--output`, `--dirty`, `--all` のいずれか 1 つを指定します。
+  `--rule`, `--source`, `--output`, `--dirty`, `--all`, `--full` のいずれか 1 つを指定します。
+  `--all` は local の Python file に変更が無くても full discovery をやり直します。
+  `--full` は in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、HTTP の `POST /reload` に空 body を送った場合は `--all` 相当で動きます。
 - `test-poll`
   1 つの source を poll し、normalized payload を JSON で表示します。

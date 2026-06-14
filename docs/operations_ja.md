@@ -91,11 +91,19 @@ kanaryctl test-poll sqlite
 kanaryctl test-evaluate sqlite.value1.range --payload-file payload.json
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
 kanaryctl reload --dirty
+kanaryctl reload --all
+kanaryctl reload --full
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
-kanaryctl reload --all
 ```
+
+- `reload --dirty`
+  `DISCOVERED`, `DIRTY`, `PENDING_REMOVE` の plugin だけを適用します。
+- `reload --all`
+  watched な Python file に変更が無くても full discovery をやり直してから適用します。
+- `reload --full`
+  in-process で Engine restart を行います。全 source/rule/output が再初期化されます。
 
 ## 履歴の永続化
 

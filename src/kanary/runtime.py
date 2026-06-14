@@ -155,7 +155,15 @@ class EngineRuntime:
         request: dict[str, Any] | None = None,
         expected_signature: tuple[tuple[str, int], ...] | None = None,
     ) -> dict[str, Any] | bool:
-        if expected_signature is not None or self.loader.snapshot_signature() != self._signature:
+        force_refresh = request is None
+        if request is not None:
+            target, _ = _parse_reload_request(request)
+            force_refresh = target in {"all", "full"}
+        if (
+            force_refresh
+            or expected_signature is not None
+            or self.loader.snapshot_signature() != self._signature
+        ):
             refreshed = self._refresh_discovery(expected_signature=expected_signature)
             if refreshed is False:
                 return {"status": "reload_failed"} if request is not None else False
@@ -202,6 +210,8 @@ class EngineRuntime:
         if self.engine is None or self._discovered_snapshot is None:
             return {"status": "reload_failed"}
         target, pattern = _parse_reload_request(request)
+        if target == "full":
+            return self._restart_engine_full()
         selected_ids = {
             plugin_type: self._select_plugin_ids(plugin_type, target=target, pattern=pattern)
             for plugin_type in ("source", "rule", "output")
@@ -216,6 +226,89 @@ class EngineRuntime:
         }
         self._publish_runtime_plugin_overlay()
         return summary
+
+    def _restart_engine_full(self) -> dict[str, Any]:
+        if self.engine is None or self._discovered_snapshot is None:
+            return {"status": "reload_failed", "target": "full"}
+
+        old_engine = self.engine
+        old_source_ids = set(self._source_threads)
+        self._stop_source_threads(old_source_ids)
+
+        new_store = build_store(self.config.state_db_path)
+        new_engine = Engine(
+            source_registry=self._discovered_snapshot.sources,
+            rule_registry=self._discovered_snapshot.rules,
+            output_registry=self._discovered_snapshot.outputs,
+            store=new_store,
+            node_id=self.config.node_id,
+        )
+
+        try:
+            new_engine.start()
+            failed_plugins = [
+                f"{status.plugin_type}:{status.plugin_id}"
+                for status in new_engine.plugin_states.values()
+                if status.state == "FAILED"
+            ]
+            if failed_plugins:
+                raise RuntimeError(
+                    "full restart produced failed plugins: "
+                    + ", ".join(sorted(failed_plugins))
+                )
+        except Exception as exc:
+            try:
+                new_engine.shutdown()
+            except Exception:
+                pass
+            self._start_source_threads(old_source_ids)
+            logger.exception("full engine restart failed")
+            return {
+                "status": "reload_failed",
+                "target": "full",
+                "error": str(exc),
+            }
+
+        try:
+            old_engine.shutdown()
+        except Exception:
+            logger.exception("old engine shutdown failed after full restart")
+
+        self.engine = new_engine
+        self.store = new_store
+        self._loaded_metadata = dict(self._discovered_metadata)
+        self.engine.last_reload_at = self.engine._now_fn()
+        self._publish_runtime_plugin_overlay()
+        self._sync_source_threads()
+        logger.info(
+            "engine full restart applied: sources=%d, rules=%d, outputs=%d",
+            len(self.engine.sources),
+            len(self.engine.rules),
+            len(self.engine.outputs),
+        )
+        return {
+            "status": "reloaded",
+            "target": "full",
+            "pattern": None,
+            "sources": {
+                "matched": sorted(self.engine.sources),
+                "reloaded": sorted(self.engine.sources),
+                "removed": [],
+                "failed": [],
+            },
+            "rules": {
+                "matched": sorted(self.engine.rules),
+                "reloaded": sorted(self.engine.rules),
+                "removed": [],
+                "failed": [],
+            },
+            "outputs": {
+                "matched": sorted(self.engine.outputs),
+                "reloaded": sorted(self.engine.outputs),
+                "removed": [],
+                "failed": [],
+            },
+        }
 
     def _apply_plugin_reload(
         self,
@@ -584,15 +677,36 @@ def _initial_schedule_run_at(schedule, now: datetime) -> datetime:
 
 
 def _parse_reload_request(request: dict[str, Any]) -> tuple[str, str | None]:
+    if not request:
+        return ("all", None)
+    if request.get("target"):
+        target = str(request["target"])
+        pattern = request.get("pattern")
+        if target not in {"dirty", "all", "full", "rule", "source", "output"}:
+            raise ValueError(f"unknown reload target '{target}'")
+        if target in {"rule", "source", "output"}:
+            if not pattern:
+                raise ValueError(f"reload target '{target}' requires a pattern")
+            return (target, str(pattern))
+        return (target, None)
+    selected = [
+        name
+        for name in ("dirty", "all", "full", "rule", "source", "output")
+        if request.get(name)
+    ]
+    if len(selected) > 1:
+        raise ValueError("reload request must select only one of rule/source/output/dirty/all/full")
     if request.get("dirty"):
         return ("dirty", None)
     if request.get("all"):
         return ("all", None)
+    if request.get("full"):
+        return ("full", None)
     for target in ("rule", "source", "output"):
         pattern = request.get(target)
         if pattern:
             return (target, str(pattern))
-    raise ValueError("reload request requires one of rule/source/output/dirty/all")
+    raise ValueError("reload request requires one of rule/source/output/dirty/all/full")
 
 
 def _changed_files(
