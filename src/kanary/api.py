@@ -687,6 +687,8 @@ def _export_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
         "owner": alert.owner,
         "tags": list(alert.tags),
         "message": alert.message,
+        "description": getattr(rule, "description", None) if rule else None,
+        "runbook": getattr(rule, "runbook", None) if rule else None,
         "payload": alert.payload,
         "last_evaluated_at": alert.last_evaluated_at,
         "definition_file": getattr(rule.__class__, "__kanary_definition_file__", None) if rule is not None else None,

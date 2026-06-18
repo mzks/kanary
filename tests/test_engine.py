@@ -2769,6 +2769,14 @@ class ControlAPITest(unittest.TestCase):
         self.assertEqual(alert_row["origin_rule_id"], "postgres.temperature.stale")
         self.assertEqual(alert_row["mirror_path"], ["node-a"])
         self.assertFalse(alert_row["is_mirrored"])
+        self.assertEqual(
+            alert_row["description"],
+            "Alert when the synthetic PostgreSQL temperature input stops updating.",
+        )
+        self.assertEqual(
+            alert_row["runbook"],
+            "https://example.invalid/runbooks/postgres-temperature-stale",
+        )
 
     def test_plugin_source_endpoint_returns_class_source(self) -> None:
         engine = kanary.Engine(output_registry={})
@@ -3817,6 +3825,15 @@ class RemoteAlarmFactoryTest(unittest.TestCase):
         self.assertIn("postgres.temperature.range", generated_ids)
         self.assertIn("postgres.temperature.rate", generated_ids)
         self.assertNotIn("postgres.temperature_humidity.balance", generated_ids)
+        generated_rule = next(cls for cls in generated if cls.rule_id == "postgres.temperature.stale")
+        self.assertEqual(
+            generated_rule.description,
+            "Alert when the synthetic PostgreSQL temperature input stops updating.",
+        )
+        self.assertEqual(
+            generated_rule.runbook,
+            "https://example.invalid/runbooks/postgres-temperature-stale",
+        )
 
 
 class ControlAPITest(unittest.TestCase):

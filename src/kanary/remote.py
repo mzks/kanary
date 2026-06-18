@@ -252,6 +252,8 @@ def import_remote_alarms(
             "severity": _coerce_severity(alert.get("severity")) or severity,
             "tags": rule_tags,
             "owner": owner if owner is not None else alert.get("owner"),
+            "description": alert.get("description"),
+            "runbook": alert.get("runbook"),
             "remote_alarm_id": remote_alarm_id,
             "propagate_ack": propagate_ack,
             "propagate_silence": propagate_silence,
