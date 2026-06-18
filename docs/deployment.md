@@ -123,7 +123,7 @@ docker run --rm \
 
 When using the published image, replace `kanary:local` with
 `ghcr.io/mzks/kanary:latest`. For reproducible production deployments, pin a
-release tag such as `ghcr.io/mzks/kanary:0.4.0`.
+release tag such as `ghcr.io/mzks/kanary:0.4.1`.
 
 The default container command is:
 
@@ -160,7 +160,7 @@ site-specific derived image from the Kanary base image. Do not rely on manually
 running `pip install` inside an already-running container.
 
 ```dockerfile
-FROM ghcr.io/mzks/kanary:0.4.0
+FROM ghcr.io/mzks/kanary:0.4.1
 
 RUN python -m pip install 'psycopg[binary]' psutil
 ```
@@ -178,7 +178,7 @@ cd docker-deploy
 `Dockerfile`:
 
 ```dockerfile
-FROM ghcr.io/mzks/kanary:0.4.0
+FROM ghcr.io/mzks/kanary:0.4.1
 
 RUN python -m pip install 'psycopg[binary]' psutil
 ```
@@ -202,7 +202,7 @@ docker run --rm \
 If plugin dependencies are collected in `requirements.txt`, you can also write:
 
 ```dockerfile
-FROM ghcr.io/mzks/kanary:0.4.0
+FROM ghcr.io/mzks/kanary:0.4.1
 
 COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install -r /tmp/requirements.txt
