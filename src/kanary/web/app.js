@@ -76,8 +76,16 @@ function bindControls() {
   document.getElementById("admin-reload-all-button").addEventListener("click", reloadAllPlugins);
   document.getElementById("admin-restart-engine-button").addEventListener("click", restartEngine);
   document.getElementById("source-modal-close").addEventListener("click", closeSourceModal);
+  document.getElementById("plugin-info-modal-close").addEventListener("click", closePluginInfoModal);
+  document.getElementById("alert-state-modal-close").addEventListener("click", closeAlertStateModal);
   for (const element of document.querySelectorAll("[data-close-source]")) {
     element.addEventListener("click", closeSourceModal);
+  }
+  for (const element of document.querySelectorAll("[data-close-plugin-info]")) {
+    element.addEventListener("click", closePluginInfoModal);
+  }
+  for (const element of document.querySelectorAll("[data-close-alert-state]")) {
+    element.addEventListener("click", closeAlertStateModal);
   }
 }
 
@@ -347,7 +355,7 @@ function renderDashboardPage() {
             </div>
             <button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Open</button>
           </div>
-          <div class="alert-card-message">${escapeHtml(alert.message || "")}</div>
+          <div class="alert-card-message">${renderLinkedText(alert.message || "-")}</div>
           <div class="alert-card-meta">
             <span>Outputs: ${escapeHtml((alert.matched_outputs || []).join(", ") || "-")}</span>
             <span>Silences: ${escapeHtml((alert.active_silence_ids || []).join(", ") || "-")}</span>
@@ -372,13 +380,14 @@ function renderAlertsPage() {
     .map(
       (alert) => `
         <tr>
-          <td>${escapeHtml(alert.rule_id)}</td>
-          <td><span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span></td>
+          <td class="plugin-primary-cell">
+            <div class="plugin-title">${escapeHtml(alert.rule_id)}</div>
+          </td>
+          <td>${formatAlertStateCell(alert)}</td>
           <td><span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span></td>
-          <td>${escapeHtml(alert.acked_by || "-")}</td>
-          <td>${escapeHtml((alert.active_silence_ids || []).join(", ") || "-")}</td>
-          <td>${escapeHtml((alert.matched_outputs || []).join(", ") || "-")}</td>
-          <td>${escapeHtml(alert.message || "")}</td>
+          <td>${formatTagList(alert.tags, { empty: "-" })}</td>
+          <td>${formatChipList(alert.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
+          <td>${renderLinkedText(alert.message || "-")}</td>
           <td class="action-cell"><button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Detail</button></td>
         </tr>
       `
@@ -387,6 +396,9 @@ function renderAlertsPage() {
 
   for (const button of tbody.querySelectorAll("[data-open-rule]")) {
     button.addEventListener("click", () => openDetail(button.dataset.openRule));
+  }
+  for (const button of tbody.querySelectorAll("[data-open-alert-state]")) {
+    button.addEventListener("click", () => openAlertStateModal(button.dataset.openAlertState));
   }
 }
 
@@ -410,13 +422,14 @@ async function renderDetailPage() {
     row("Severity", severityLabel(alert.severity)),
     row("Acked By", alert.acked_by || "-"),
     row("Owner", alert.owner || "-"),
+    row("Tags", formatTagList(alert.tags, { empty: "-" }), true),
     row("Silences", (alert.active_silence_ids || []).join(", ") || "-"),
     row("Outputs", (alert.matched_outputs || []).join(", ") || "-"),
-    row("Description", alert.description || "-"),
-    row("Runbook", alert.runbook || "-"),
-    row("File", alert.definition_file || "-"),
+    row("Description", renderLinkedText(alert.description || "-"), true),
+    row("Runbook", renderLinkedText(alert.runbook || "-"), true),
+    row("File", formatDefinitionFile(alert.definition_file), true),
     row("Source", `<button class="button button-secondary" id="detail-source-button">View Rule Source</button>`, true),
-    row("Message", alert.message || "-"),
+    row("Message", renderLinkedText(alert.message || "-"), true),
   ].join("");
   document.getElementById("detail-source-button").addEventListener("click", () => openSourceModal("rule", alert.rule_id));
   updateDetailActionAvailability(alert);
@@ -440,17 +453,14 @@ function renderSourcesPage() {
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
-          <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
-          <td>${escapeHtml(plugin.definition_file || "-")}</td>
-          <td>${formatPluginError(plugin)}</td>
-          <td class="action-cell">
-            <div class="plugin-action-group">
-              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button>
-              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button>
-            </div>
+          <td class="plugin-primary-cell">
+            <div class="plugin-title">${escapeHtml(plugin.plugin_id)}</div>
           </td>
+          <td>${formatPluginRuntime(plugin)}</td>
+          <td>${formatPlainDescription(plugin.description)}</td>
+          <td>${formatSourceInfo(plugin)}</td>
+          <td class="action-cell"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button></td>
+          <td class="action-cell"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button></td>
         </tr>
       `
     )
@@ -461,6 +471,9 @@ function renderSourcesPage() {
   }
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
+  }
+  for (const button of tbody.querySelectorAll("[data-open-plugin-info]")) {
+    button.addEventListener("click", () => openPluginInfoModal(button.dataset.pluginType, button.dataset.pluginId));
   }
   bindPluginErrorDetailToggles(tbody);
 }
@@ -475,19 +488,16 @@ function renderRulesPage() {
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
           <td class="plugin-primary-cell">
-            <div>${escapeHtml(plugin.plugin_id)}</div>
-            ${formatRulePluginContext(plugin)}
+            <div class="plugin-title">${escapeHtml(plugin.plugin_id)}</div>
           </td>
-          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
-          <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
-          <td>${escapeHtml(plugin.definition_file || "-")}</td>
-          <td>${formatPluginError(plugin)}</td>
-          <td class="action-cell">
-            <div class="plugin-action-group">
-              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button>
-              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button>
-            </div>
-          </td>
+          <td>${formatPluginRuntime(plugin)}</td>
+          <td>${formatPlainDescription(plugin.description)}</td>
+          <td>${formatInputList(plugin.inputs)}</td>
+          <td>${formatTagList(plugin.tags, { empty: "-" })}</td>
+          <td>${formatChipList(plugin.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
+          <td>${formatRuleInfo(plugin)}</td>
+          <td class="action-cell"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button></td>
+          <td class="action-cell"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button></td>
         </tr>
       `
     )
@@ -498,6 +508,9 @@ function renderRulesPage() {
   }
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
+  }
+  for (const button of tbody.querySelectorAll("[data-open-plugin-info]")) {
+    button.addEventListener("click", () => openPluginInfoModal(button.dataset.pluginType, button.dataset.pluginId));
   }
   bindPluginErrorDetailToggles(tbody);
 }
@@ -509,39 +522,23 @@ function renderOutputsPage() {
     .filter((plugin) => plugin.type === "output")
     .filter(matchesOutputFilter)
     .sort(comparePluginHealth);
-
-  const failedOutputs = outputs.filter((plugin) => plugin.state === "FAILED");
-  summary.innerHTML = failedOutputs.length > 0
-    ? `
-      <div class="status-banner status-banner-failed">
-        <div class="status-banner-title">${escapeHtml(String(failedOutputs.length))} output plugin${failedOutputs.length === 1 ? "" : "s"} failed</div>
-        <div class="status-banner-body">Recent output failures are shown first. The Last Error column includes the current exception message from the runtime.</div>
-      </div>
-    `
-    : `
-      <div class="status-banner status-banner-ok">
-        <div class="status-banner-title">All output plugins are ready</div>
-        <div class="status-banner-body">No current delivery failure is reported by the runtime.</div>
-      </div>
-    `;
+  summary.innerHTML = "";
 
   tbody.innerHTML = outputs
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td>${escapeHtml(plugin.plugin_id)}</td>
-          <td><span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span></td>
-          <td>${escapeHtml(String(plugin.run_count))}</td>
-          <td title="${escapeHtml(plugin.last_updated_at || "-")}">${escapeHtml(formatDateTime(plugin.last_updated_at))}</td>
-          <td title="${escapeHtml(plugin.last_failure_at || "-")}">${escapeHtml(formatDateTime(plugin.last_failure_at))}</td>
-          <td>${escapeHtml(plugin.definition_file || "-")}</td>
-          <td>${formatPluginError(plugin)}</td>
-          <td class="action-cell">
-            <div class="plugin-action-group">
-              <button class="button" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button>
-              <button class="button button-secondary" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button>
-            </div>
+          <td class="plugin-primary-cell">
+            <div class="plugin-title">${escapeHtml(plugin.plugin_id)}</div>
           </td>
+          <td>${formatPluginRuntime(plugin)}</td>
+          <td>${formatMinimumSeverity(plugin.minimum_severity)}</td>
+          <td>${formatChipList(plugin.include_tags, { empty: "*", tagColors: true })}</td>
+          <td>${formatChipList(plugin.exclude_tags, { empty: "-", tagColors: true })}</td>
+          <td>${formatPlainDescription(plugin.description)}</td>
+          <td>${formatOutputInfo(plugin)}</td>
+          <td class="action-cell"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button></td>
+          <td class="action-cell"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button></td>
         </tr>
       `
     )
@@ -552,6 +549,9 @@ function renderOutputsPage() {
   }
   for (const button of tbody.querySelectorAll("[data-open-source]")) {
     button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
+  }
+  for (const button of tbody.querySelectorAll("[data-open-plugin-info]")) {
+    button.addEventListener("click", () => openPluginInfoModal(button.dataset.pluginType, button.dataset.pluginId));
   }
   bindPluginErrorDetailToggles(tbody);
 }
@@ -876,6 +876,42 @@ function closeSourceModal() {
   modal.setAttribute("aria-hidden", "true");
 }
 
+function openPluginInfoModal(pluginType, pluginId) {
+  const plugin = state.plugins.find((item) => item.type === pluginType && item.plugin_id === pluginId);
+  if (!plugin) {
+    window.alert("Plugin info is not available.");
+    return;
+  }
+  renderPluginInfoModal(plugin);
+  const modal = document.getElementById("plugin-info-modal");
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function closePluginInfoModal() {
+  const modal = document.getElementById("plugin-info-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function openAlertStateModal(ruleId) {
+  const alert = state.alerts.find((item) => item.rule_id === ruleId);
+  if (!alert) {
+    window.alert("Alert details are not available.");
+    return;
+  }
+  renderAlertStateModal(alert);
+  const modal = document.getElementById("alert-state-modal");
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function closeAlertStateModal() {
+  const modal = document.getElementById("alert-state-modal");
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
 function renderSourceModal(payload) {
   document.getElementById("source-modal-title").textContent = `${payload.type} ${payload.plugin_id}`;
   document.getElementById("source-modal-meta").textContent =
@@ -891,6 +927,22 @@ function renderSourceModal(payload) {
         </div>
       `;
     })
+    .join("");
+}
+
+function renderPluginInfoModal(plugin) {
+  document.getElementById("plugin-info-modal-title").textContent = `${plugin.type} ${plugin.plugin_id}`;
+  document.getElementById("plugin-info-modal-meta").textContent = `${plugin.state} · ${plugin.definition_file_name || plugin.definition_file || "-"}`;
+  document.getElementById("plugin-info-modal-body").innerHTML = pluginInfoRows(plugin)
+    .map(([label, value, raw]) => infoRow(label, value, raw))
+    .join("");
+}
+
+function renderAlertStateModal(alert) {
+  document.getElementById("alert-state-modal-title").textContent = alert.rule_id;
+  document.getElementById("alert-state-modal-meta").textContent = `${alert.state} · ${severityLabel(alert.severity)}`;
+  document.getElementById("alert-state-modal-body").innerHTML = alertStateRows(alert)
+    .map(([label, value, raw]) => infoRow(label, value, raw))
     .join("");
 }
 
@@ -910,6 +962,8 @@ function matchesAlertFilter(alert) {
     alert.rule_id,
     alert.state,
     alert.message || "",
+    alert.description || "",
+    alert.runbook || "",
     (alert.matched_outputs || []).join(" "),
     alert.acked_by || "",
     alert.owner || "",
@@ -922,6 +976,13 @@ function matchesPluginFilter(plugin, filterValue) {
     plugin.type,
     plugin.plugin_id,
     plugin.state,
+    plugin.description || "",
+    (plugin.inputs || []).join(" "),
+    (plugin.resolved_sources || []).join(" "),
+    (plugin.matched_outputs || []).join(" "),
+    (plugin.tags || []).join(" "),
+    plugin.owner || "",
+    plugin.runbook || "",
     plugin.definition_file || "",
     plugin.last_error || "",
   ], filterValue);
@@ -931,6 +992,12 @@ function matchesOutputFilter(plugin) {
   return matchesTextFilter([
     plugin.plugin_id,
     plugin.state,
+    plugin.description || "",
+    (plugin.include_tags || []).join(" "),
+    (plugin.exclude_tags || []).join(" "),
+    (plugin.exclude_states || []).join(" "),
+    (plugin.exclude_transitions || []).join(" "),
+    plugin.minimum_severity || "",
     plugin.definition_file || "",
     plugin.last_error || "",
   ], state.outputFilter);
@@ -951,33 +1018,22 @@ function matchesSilenceFilter(silence) {
   ], state.silenceFilter);
 }
 
-function formatRulePluginContext(plugin) {
-  if (plugin.type !== "rule") {
-    return "";
-  }
-  const inputs = (plugin.inputs || []).join(", ");
-  const resolvedSources = (plugin.resolved_sources || []).join(", ");
-  if (!inputs && !resolvedSources) {
-    return "";
-  }
-  const parts = [];
-  if (inputs) {
-    parts.push(`
-      <div class="plugin-context-row">
-        <div class="plugin-context-label">Inputs</div>
-        <div class="plugin-context-value">${escapeHtml(inputs)}</div>
-      </div>
-    `);
-  }
-  if (resolvedSources) {
-    parts.push(`
-      <div class="plugin-context-row">
-        <div class="plugin-context-label">Sources</div>
-        <div class="plugin-context-value">${escapeHtml(resolvedSources)}</div>
-      </div>
-    `);
-  }
-  return `<div class="plugin-context-list muted">${parts.join("")}</div>`;
+function formatPluginRuntime(plugin) {
+  return `
+    <div class="plugin-runtime-block runtime-badge-group">
+      <span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span>
+    </div>
+  `;
+}
+
+function formatAlertStateCell(alert) {
+  const hasDetails = alertHasStateDetails(alert);
+  return `
+    <div class="state-with-detail">
+      <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
+      ${hasDetails ? `<button class="state-detail-button" data-open-alert-state="${escapeAttribute(alert.rule_id)}" aria-label="Show state details for ${escapeAttribute(alert.rule_id)}">i</button>` : ""}
+    </div>
+  `;
 }
 
 function historyActionLabel(actionType) {
@@ -1230,7 +1286,7 @@ function pluginTableRowClass(plugin) {
 function formatPluginError(plugin) {
   const errorText = plugin.last_error || "-";
   if (plugin.state !== "FAILED") {
-    return escapeHtml(errorText);
+    return errorText === "-" ? "" : formatKeyValueLine("Last Error", errorText);
   }
   const isExpanded = state.expandedPluginErrors.has(plugin.plugin_id);
   const detail = plugin.last_error_detail
@@ -1248,6 +1304,247 @@ function formatPluginError(plugin) {
       ${detail}
     </div>
   `;
+}
+
+function formatDescriptionLine(value, options = {}) {
+  const hasValue = Boolean(String(value || "").trim());
+  if (!hasValue && options.empty === false) {
+    return "";
+  }
+  return formatKeyValueLine("Description", hasValue ? renderLinkedText(value) : "-", true);
+}
+
+function formatPlainDescription(value) {
+  const text = String(value || "").trim();
+  return text ? `<div class="plain-text-cell">${renderLinkedText(text)}</div>` : `<span class="muted">-</span>`;
+}
+
+function formatTagLine(tags) {
+  return formatKeyValueLine("Tags", formatTagList(tags, { empty: "-" }), true);
+}
+
+function formatKeyValueLine(label, value, raw = false) {
+  if (!value) {
+    return "";
+  }
+  return `
+    <div class="plugin-context-row">
+      <div class="plugin-context-label">${escapeHtml(label)}</div>
+      <div class="plugin-context-value">${raw ? value : escapeHtml(value)}</div>
+    </div>
+  `;
+}
+
+function formatDefinitionFile(definitionFile) {
+  if (!definitionFile) {
+    return "";
+  }
+  return formatKeyValueLine(
+    "File",
+    `<span class="plugin-file-name" title="${escapeAttribute(definitionFile)}">${escapeHtml(baseName(definitionFile))}</span>`,
+    true,
+  );
+}
+
+function formatTagList(tags, options = {}) {
+  return formatChipList(tags, { ...options, tagColors: true, chipClass: "tag-chip" });
+}
+
+function formatChipList(values, options = {}) {
+  const items = Array.isArray(values) ? values.filter(Boolean) : [];
+  if (items.length === 0) {
+    return options.empty ? `<span class="muted">${escapeHtml(options.empty)}</span>` : "";
+  }
+  return `
+    <div class="tag-list">
+      ${items.map((item) => formatChip(item, options)).join("")}
+    </div>
+  `;
+}
+
+function formatChip(value, options = {}) {
+  const baseClass = options.chipClass || "meta-chip";
+  const style = options.tagColors || options.family ? ` style="${escapeAttribute(tagColorStyle(String(value), options.family || "tag"))}"` : "";
+  return `<span class="${baseClass}"${style}>${escapeHtml(String(value))}</span>`;
+}
+
+function tagColorStyle(tag, family = "tag") {
+  const palettes = {
+    tag: [
+      { bg: "#dbe9f6", border: "#a9bfd8", text: "#325a78" },
+      { bg: "#deeddc", border: "#a7c79f", text: "#41693b" },
+      { bg: "#f5edcf", border: "#dcc986", text: "#75611f" },
+      { bg: "#e8e0ef", border: "#c6b0d6", text: "#654b77" },
+      { bg: "#f1dfd8", border: "#d8ad9f", text: "#804d3d" },
+      { bg: "#dcedea", border: "#a6ccc3", text: "#336459" },
+    ],
+    output: [
+      { bg: "#f4e3d6", border: "#dcb28f", text: "#875126" },
+      { bg: "#e2e9f4", border: "#afc2dc", text: "#4a6988" },
+      { bg: "#e7edd7", border: "#bfd09d", text: "#5b6d33" },
+      { bg: "#efe2d9", border: "#cfaf9a", text: "#7a5646" },
+      { bg: "#ebe1ef", border: "#c5afd3", text: "#68517a" },
+    ],
+  };
+  const palette = palettes[family] || palettes.tag;
+  const tone = palette[hashString(String(tag)) % palette.length];
+  return `background:${tone.bg};border-color:${tone.border};color:${tone.text};`;
+}
+
+function hashString(value) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+function formatInfoButton(pluginType, pluginId) {
+  return `<button class="button button-secondary button-compact button-info" data-open-plugin-info="1" data-plugin-type="${escapeAttribute(pluginType)}" data-plugin-id="${escapeAttribute(pluginId)}">Info</button>`;
+}
+
+function alertHasStateDetails(alert) {
+  return Boolean(
+    alert.acked_by
+    || alert.acked_at
+    || alert.ack_reason
+    || (Array.isArray(alert.active_silences) && alert.active_silences.length > 0)
+  );
+}
+
+function alertStateRows(alert) {
+  const rows = [
+    ["State", `<span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>`, true],
+    ["Severity", `<span class="severity-badge severity-${escapeHtml(severityLabel(alert.severity))}">${escapeHtml(severityLabel(alert.severity))}</span>`, true],
+  ];
+  if (alert.acked_by || alert.acked_at || alert.ack_reason) {
+    rows.push(
+      ["Acked By", alert.acked_by || "-", false],
+      ["Acked At", alert.acked_at ? formatDateTime(alert.acked_at) : "-", false],
+      ["Ack Reason", alert.ack_reason ? renderLinkedText(alert.ack_reason) : "-", true],
+    );
+  }
+  if (Array.isArray(alert.active_silences) && alert.active_silences.length > 0) {
+    rows.push(["Active Silences", formatAlertSilences(alert.active_silences), true]);
+  }
+  return rows;
+}
+
+function formatAlertSilences(silences) {
+  return `
+    <div class="info-block-list">
+      ${silences.map((silence) => `
+        <div class="info-block">
+          <div class="info-block-title">${escapeHtml(shortId(silence.silence_id || "-"))}</div>
+          <div class="info-block-meta">${escapeHtml((silence.created_by || "-"))} · ${escapeHtml(formatWindow(silence.start_at, silence.end_at))}</div>
+          <div class="info-block-text">${renderLinkedText(silence.reason || "-")}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function pluginInfoRows(plugin) {
+  const rows = [
+    ["State", plugin.state, false],
+    ["Description", plugin.description || "-", true],
+    ["Updated", plugin.last_updated_at ? formatDateTime(plugin.last_updated_at) : "-", false],
+    ["File", plugin.definition_file || "-", false],
+  ];
+  if (plugin.type === "source") {
+    rows.push(
+      ["Last Success", plugin.last_success_at ? formatDateTime(plugin.last_success_at) : "-", false],
+      ["Last Failure", plugin.last_failure_at ? formatDateTime(plugin.last_failure_at) : "-", false],
+    );
+  }
+  if (plugin.type === "rule") {
+    rows.push(
+      ["Inputs", (plugin.inputs || []).join(", ") || "-", false],
+      ["Sources", (plugin.resolved_sources || []).join(", ") || "-", false],
+      ["Outputs", (plugin.matched_outputs || []).join(", ") || "-", false],
+      ["Runbook", plugin.runbook ? renderLinkedText(plugin.runbook) : "-", true],
+    );
+  }
+  if (plugin.type === "output") {
+    rows.push(
+      ["Emit Count", String(plugin.run_count || 0), false],
+      ["Last Failure", plugin.last_failure_at ? formatDateTime(plugin.last_failure_at) : "-", false],
+      ["Minimum Severity", plugin.minimum_severity || "-", false],
+      ["Include Tags", (plugin.include_tags || []).join(", ") || "*", false],
+      ["Exclude Tags", (plugin.exclude_tags || []).join(", ") || "-", false],
+      ["Exclude States", (plugin.exclude_states || []).join(", ") || "-", false],
+      ["Exclude Transitions", (plugin.exclude_transitions || []).join(", ") || "-", false],
+    );
+  }
+  if (plugin.last_error) {
+    rows.push(["Last Error", plugin.last_error, false]);
+  }
+  return rows;
+}
+
+function infoRow(label, value, raw = false) {
+  return `
+    <div class="info-row">
+      <div class="info-label">${escapeHtml(label)}</div>
+      <div class="info-value">${raw ? value : escapeHtml(value)}</div>
+    </div>
+  `;
+}
+
+function formatSourceInfo(plugin) {
+  return formatInfoButton(plugin.type, plugin.plugin_id);
+}
+
+function formatRuleInfo(plugin) {
+  return formatInfoButton(plugin.type, plugin.plugin_id);
+}
+
+function formatOutputInfo(plugin) {
+  return formatInfoButton(plugin.type, plugin.plugin_id);
+}
+
+function formatInputList(inputs) {
+  const values = Array.isArray(inputs) ? inputs.filter(Boolean) : [];
+  if (values.length === 0) {
+    return `<span class="muted">-</span>`;
+  }
+  return `<div class="inline-code-cell">${values.map((value) => escapeHtml(String(value))).join("<br>")}</div>`;
+}
+
+function formatMinimumSeverity(value) {
+  if (!value) {
+    return `<span class="muted">-</span>`;
+  }
+  return `<span class="severity-badge severity-${escapeHtml(String(value))}">${escapeHtml(String(value))}</span>`;
+}
+
+function renderLinkedText(value) {
+  const text = String(value || "");
+  if (!text.trim()) {
+    return escapeHtml("-");
+  }
+  const pattern = /\bhttps?:\/\/[^\s<>"']+/g;
+  let cursor = 0;
+  let html = "";
+  for (const match of text.matchAll(pattern)) {
+    let url = match[0];
+    const start = match.index || 0;
+    let trailing = "";
+    while (/[),.;!?]$/.test(url)) {
+      trailing = url.slice(-1) + trailing;
+      url = url.slice(0, -1);
+    }
+    html += escapeHtml(text.slice(cursor, start)).replaceAll("\n", "<br>");
+    html += `<a class="inline-link" href="${escapeAttribute(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
+    html += escapeHtml(trailing);
+    cursor = start + match[0].length;
+  }
+  html += escapeHtml(text.slice(cursor)).replaceAll("\n", "<br>");
+  return html;
+}
+
+function baseName(value) {
+  return String(value || "").split("/").pop() || String(value || "");
 }
 
 function bindPluginErrorDetailToggles(container) {

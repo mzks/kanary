@@ -11,6 +11,12 @@ Required:
 - `source_id`
 - `poll()`
 
+Optional metadata:
+
+- `description`
+
+`description` is surfaced by the API and the default Web viewer.
+
 Optional:
 
 - `interval`
@@ -40,6 +46,8 @@ Example:
 ```python
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
+    description = "Read the latest sqlite sample rows and expose them as Kanary inputs."
+
     def poll(self):
         ...
 ```
@@ -237,6 +245,12 @@ Required:
 
 - `output_id`
 - `emit(event)`
+
+Optional metadata:
+
+- `description`
+
+`description` is surfaced by the API and the default Web viewer.
 
 Optional:
 

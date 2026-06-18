@@ -5,6 +5,8 @@ import kanary
 
 @kanary.source(source_id="demo", interval=10.0)
 class DemoSource:
+    description = "Emit a single demo temperature input with the current server timestamp."
+
     def poll(self):
         return kanary.inputs([
             # (name, value, timestamp)
@@ -31,6 +33,8 @@ class DemoTemperatureHigh:
                minimum_severity=kanary.WARN,
                include_tags=['demo'])
 class ConsoleOutput:
+    description = "Print demo alert transitions to stdout."
+
     def emit(self, event):
         print(
             event.rule_id,

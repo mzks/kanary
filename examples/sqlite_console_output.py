@@ -5,6 +5,7 @@ import kanary
 
 @kanary.output(output_id="console")
 class ConsoleOutput:
+    description = "Print alert transitions as JSON lines for local testing and debugging."
 
     def emit(self, event):
         print(

@@ -12,6 +12,7 @@ import kanary
     minimum_severity="ERROR",
 )
 class DiscordOutput:
+    description = "Send sqlite alerts at ERROR or higher to a Discord webhook."
 
     def init(self):
         config = kanary.load_toml(filename="discord_webhook_output_config.toml")

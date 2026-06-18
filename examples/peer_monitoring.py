@@ -11,6 +11,7 @@ import kanary
 
 @kanary.source(source_id="kanary.peer", interval=30.0)
 class KanaryPeerSource:
+    description = "Poll a peer Kanary node and expose its reported health as ordinary inputs."
 
     def init(self):
         config = kanary.load_toml(filename="peer_monitoring_config.toml")

@@ -30,6 +30,7 @@ def fetch_json(url: str, method: str = "GET", body: dict | None = None) -> dict:
 
 @kanary.source(source_id="postgres", interval=5.0)
 class SlowPostgresSource:
+    description = "Expose synthetic PostgreSQL temperature and humidity inputs for API tests."
 
     def __init__(self) -> None:
         self.now = datetime(2026, 3, 17, 0, 0, tzinfo=timezone.utc)
@@ -76,6 +77,9 @@ class BufferedTemperatureSource(kanary.BufferedSource):
     owner="expert_db",
 )
 class SlowPostgresStale(kanary.StaleRule):
+    description = "Alert when the synthetic PostgreSQL temperature input stops updating."
+    runbook = "https://example.invalid/runbooks/postgres-temperature-stale"
+
     timeout = 10 * kanary.minute
 
 
@@ -3981,6 +3985,70 @@ class ControlAPITest(unittest.TestCase):
         )
         self.assertEqual(stale_rule["inputs"], ["postgres:temperature"])
         self.assertEqual(stale_rule["resolved_sources"], ["postgres"])
+        self.assertEqual(
+            stale_rule["description"],
+            "Alert when the synthetic PostgreSQL temperature input stops updating.",
+        )
+        self.assertEqual(
+            stale_rule["runbook"],
+            "https://example.invalid/runbooks/postgres-temperature-stale",
+        )
+
+    def test_plugins_endpoint_includes_source_and_output_metadata(self) -> None:
+        class DescribedOutput(kanary.Output):
+            output_id = "described-output"
+            description = "Deliver threshold alerts to an external sink."
+            include_tags = ["threshold"]
+            exclude_tags = ["noise"]
+            exclude_states = ["SUPPRESSED"]
+            exclude_transitions = ["DEESCALATED"]
+            minimum_severity = "ERROR"
+
+            def emit(self, event):
+                return None
+
+        engine = kanary.Engine(
+            now_fn=lambda: self.now,
+            output_registry={"described-output": DescribedOutput},
+        )
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            source = engine.sources["postgres"]
+            engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            with urlopen(f"http://127.0.0.1:{api._server.server_address[1]}/plugins") as response:
+                body = json.loads(response.read().decode())
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+
+        source_plugin = next(
+            plugin for plugin in body["plugins"]
+            if plugin["type"] == "source" and plugin["plugin_id"] == "postgres"
+        )
+        output_plugin = next(
+            plugin for plugin in body["plugins"]
+            if plugin["type"] == "output" and plugin["plugin_id"] == "described-output"
+        )
+
+        self.assertEqual(
+            source_plugin["description"],
+            "Expose synthetic PostgreSQL temperature and humidity inputs for API tests.",
+        )
+        self.assertEqual(output_plugin["description"], "Deliver threshold alerts to an external sink.")
+        self.assertEqual(output_plugin["include_tags"], ["threshold"])
+        self.assertEqual(output_plugin["exclude_tags"], ["noise"])
+        self.assertEqual(output_plugin["exclude_states"], ["SUPPRESSED"])
+        self.assertEqual(output_plugin["exclude_transitions"], ["DEESCALATED"])
+        self.assertEqual(output_plugin["minimum_severity"], "ERROR")
 
     def test_test_poll_endpoint_returns_normalized_payload(self) -> None:
         request = Request(f"{self.base_url}/test-poll/postgres", method="POST")

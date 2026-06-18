@@ -11,6 +11,12 @@
 - `source_id`
 - `poll()`
 
+任意 metadata:
+
+- `description`
+
+`description` は API と built-in Web viewer に表示されます。
+
 任意:
 
 - `interval`
@@ -41,6 +47,8 @@
 ```python
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
+    description = "最新の sqlite sample row を読み、Kanary input として公開します。"
+
     def poll(self):
         ...
 ```
@@ -238,6 +246,12 @@ payload を明示しない場合、Kanary は current source payload を自動�
 
 - `output_id`
 - `emit(event)`
+
+任意 metadata:
+
+- `description`
+
+`description` は API と built-in Web viewer に表示されます。
 
 任意:
 

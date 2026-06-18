@@ -10,6 +10,7 @@ import kanary
 
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
+    description = "Read the latest sqlite sample rows and expose value1/value2/value3 as Kanary inputs."
 
     def init(self):
         config = kanary.load_toml(filename="sqlite_monitoring_config.toml")

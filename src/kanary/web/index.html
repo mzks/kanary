@@ -109,14 +109,13 @@
                 <table class="data-table">
                   <thead>
                     <tr>
-                      <th>Rule</th>
+                      <th>Name</th>
                       <th>State</th>
                       <th>Severity</th>
-                      <th>Acked By</th>
-                      <th>Silences</th>
-                      <th>Outputs</th>
+                      <th>Tags</th>
+                      <th>Output</th>
                       <th>Message</th>
-                      <th></th>
+                      <th>Detail</th>
                     </tr>
                   </thead>
                   <tbody id="alerts-body"></tbody>
@@ -218,19 +217,19 @@
                   <h2>Source Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="source-filter" type="search" placeholder="Filter by source, state, file, error. Supports glob." />
+                  <input id="source-filter" type="search" placeholder="Filter by source, state, description, file, error. Supports glob." />
                 </div>
               </div>
               <div class="table-wrap">
                 <table class="data-table">
                   <thead>
                     <tr>
-                      <th>Source</th>
+                      <th>Name</th>
                       <th>State</th>
-                      <th>Updated</th>
-                      <th>File</th>
-                      <th>Last Error</th>
-                      <th></th>
+                      <th>Description</th>
+                      <th>Info</th>
+                      <th>Apply</th>
+                      <th>Source</th>
                     </tr>
                   </thead>
                   <tbody id="sources-body"></tbody>
@@ -247,19 +246,22 @@
                   <h2>Rule Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="rule-filter" type="search" placeholder="Filter by rule, state, file, error. Supports glob." />
+                  <input id="rule-filter" type="search" placeholder="Filter by rule, input, tag, owner, file, error. Supports glob." />
                 </div>
               </div>
               <div class="table-wrap">
                 <table class="data-table">
                   <thead>
                     <tr>
-                      <th>Rule</th>
+                      <th>Name</th>
                       <th>State</th>
-                      <th>Updated</th>
-                      <th>File</th>
-                      <th>Last Error</th>
-                      <th></th>
+                      <th>Description</th>
+                      <th>Inputs</th>
+                      <th>Tags</th>
+                      <th>Output</th>
+                      <th>Info</th>
+                      <th>Apply</th>
+                      <th>Source</th>
                     </tr>
                   </thead>
                   <tbody id="rules-body"></tbody>
@@ -276,7 +278,7 @@
                   <h2>Output Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="output-filter" type="search" placeholder="Filter by plugin, state, file, error. Supports glob." />
+                  <input id="output-filter" type="search" placeholder="Filter by output, policy, description, file, error. Supports glob." />
                 </div>
               </div>
               <div id="outputs-summary"></div>
@@ -284,14 +286,15 @@
                 <table class="data-table">
                   <thead>
                     <tr>
-                      <th>Plugin</th>
+                      <th>Name</th>
                       <th>State</th>
-                      <th>Runs</th>
-                      <th>Updated</th>
-                      <th>Last Failure</th>
-                      <th>File</th>
-                      <th>Last Error</th>
-                      <th></th>
+                      <th>Min Severity</th>
+                      <th>Include Tags</th>
+                      <th>Exclude Tags</th>
+                      <th>Description</th>
+                      <th>Info</th>
+                      <th>Apply</th>
+                      <th>Source</th>
                     </tr>
                   </thead>
                   <tbody id="outputs-body"></tbody>
@@ -441,6 +444,36 @@
             <button id="source-modal-close" class="button button-secondary">Close</button>
           </div>
           <div id="source-modal-body" class="source-viewer"></div>
+        </div>
+      </div>
+
+      <div id="plugin-info-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-close-plugin-info></div>
+        <div class="modal-panel modal-panel-narrow">
+          <div class="modal-header">
+            <div>
+              <div class="panel-kicker">Plugin Metadata</div>
+              <h2 id="plugin-info-modal-title">Plugin Info</h2>
+              <div id="plugin-info-modal-meta" class="muted"></div>
+            </div>
+            <button id="plugin-info-modal-close" class="button button-secondary button-compact">Close</button>
+          </div>
+          <div id="plugin-info-modal-body" class="info-viewer"></div>
+        </div>
+      </div>
+
+      <div id="alert-state-modal" class="modal hidden" aria-hidden="true">
+        <div class="modal-backdrop" data-close-alert-state></div>
+        <div class="modal-panel modal-panel-narrow">
+          <div class="modal-header">
+            <div>
+              <div class="panel-kicker">Alert State</div>
+              <h2 id="alert-state-modal-title">Alert Details</h2>
+              <div id="alert-state-modal-meta" class="muted"></div>
+            </div>
+            <button id="alert-state-modal-close" class="button button-secondary button-compact">Close</button>
+          </div>
+          <div id="alert-state-modal-body" class="info-viewer"></div>
         </div>
       </div>
     </div>

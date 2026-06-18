@@ -10,6 +10,7 @@ from .signature_compat import detect_instance_method_style, invoke_compat
 
 class Source:
     source_id: str
+    description: str | None = None
     interval: float | None = None
     schedule: str | None = None
     max_retry: int = 1
@@ -305,6 +306,7 @@ def _resolve_timestamp(
 
 
 def prepare_source_class(cls: type[Any]) -> type[Any]:
+    _setdefault(cls, "description", None)
     _setdefault(cls, "max_retry", 1)
     _setdefault(cls, "max_reinit", 1)
     if "init" not in cls.__dict__ and getattr(cls, "init", None) in {None, Source.init}:

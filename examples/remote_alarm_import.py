@@ -3,6 +3,8 @@ import kanary
 
 @kanary.source(source_id="remote", interval=60.0)
 class UpstreamKanarySource(kanary.RemoteKanarySource):
+    description = "Import alert state from another Kanary node through its HTTP API."
+
     base_url = "http://127.0.0.1:8000"
 
 

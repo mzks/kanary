@@ -10,6 +10,7 @@ import kanary
 
 @kanary.source(source_id="kanary.plugins", interval=30.0)
 class KanaryPluginSource:
+    description = "Poll the local /plugins API and turn failed plugin counts into ordinary Kanary inputs."
 
     def init(self):
         config = kanary.load_toml(filename="self_plugin_monitoring_config.toml")

@@ -20,6 +20,7 @@ import kanary
 
 @kanary.source(source_id="postgres.wide", interval=30.0)
 class WideEnvironmentSource:
+    description = "Read the latest wide-format environment row from PostgreSQL and expose temperature, humidity, and CO2 inputs."
 
     def init(self):
         config = kanary.load_toml(filename="postgres_wide_format_config.toml")

@@ -244,6 +244,11 @@ class ControlAPI:
                     plugins = []
                     for status in engine.plugin_states.values():
                         plugin = _resolve_plugin(engine, status.plugin_type, status.plugin_id)
+                        plugin_class = plugin if isinstance(plugin, type) else plugin.__class__ if plugin is not None else None
+                        definition_file = (
+                            status.definition_file
+                            or (getattr(plugin_class, "__kanary_definition_file__", None) if plugin_class is not None else None)
+                        )
                         plugins.append(
                             {
                                 "type": status.plugin_type,
@@ -259,9 +264,20 @@ class ControlAPI:
                                 "last_success_at": status.last_success_at,
                                 "last_failure_at": status.last_failure_at,
                                 "last_updated_at": status.last_updated_at,
-                                "definition_file": status.definition_file or (getattr(plugin.__class__, "__kanary_definition_file__", None) if plugin is not None and not isinstance(plugin, type) else getattr(plugin, "__kanary_definition_file__", None) if plugin is not None else None),
+                                "definition_file": definition_file,
+                                "definition_file_name": Path(definition_file).name if definition_file else None,
+                                "description": getattr(plugin, "description", None) if plugin is not None else None,
+                                "tags": list(getattr(plugin, "tags", [])) if plugin is not None else [],
+                                "owner": getattr(plugin, "owner", None) if status.plugin_type == "rule" and plugin is not None else None,
+                                "runbook": getattr(plugin, "runbook", None) if status.plugin_type == "rule" and plugin is not None else None,
                                 "inputs": list(getattr(plugin, "inputs", [])) if status.plugin_type == "rule" and plugin is not None else [],
                                 "resolved_sources": list(getattr(plugin, "resolved_sources", [])) if status.plugin_type == "rule" and plugin is not None else [],
+                                "matched_outputs": list(getattr(plugin, "matched_outputs", [])) if status.plugin_type == "rule" and plugin is not None else [],
+                                "include_tags": list(getattr(plugin, "include_tags", [])) if status.plugin_type == "output" and plugin is not None else [],
+                                "exclude_tags": list(getattr(plugin, "exclude_tags", [])) if status.plugin_type == "output" and plugin is not None else [],
+                                "exclude_states": list(getattr(plugin, "exclude_states", [])) if status.plugin_type == "output" and plugin is not None else [],
+                                "exclude_transitions": list(getattr(plugin, "exclude_transitions", [])) if status.plugin_type == "output" and plugin is not None else [],
+                                "minimum_severity": _plugin_minimum_severity(plugin, status.plugin_type),
                             }
                         )
                     plugins.sort(key=lambda row: (row["type"], row["plugin_id"]))
@@ -627,7 +643,20 @@ def _viewer_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
     payload = _export_alert_payload(engine, alert, rule)
     payload["acked_by"] = alert.acked_by
     payload["acked_at"] = alert.acked_at
+    payload["ack_reason"] = alert.ack_reason
     payload["active_silence_ids"] = list(alert.active_silence_ids)
+    payload["active_silences"] = [
+        {
+            "silence_id": silence.silence_id,
+            "created_by": silence.created_by,
+            "reason": silence.reason,
+            "created_at": silence.created_at,
+            "start_at": silence.start_at,
+            "end_at": silence.end_at,
+        }
+        for silence_id in alert.active_silence_ids
+        if (silence := engine.silences.get(silence_id)) is not None
+    ]
     payload["matched_outputs"] = list(getattr(rule, "matched_outputs", [])) if rule else []
     payload["description"] = getattr(rule, "description", None) if rule else None
     payload["runbook"] = getattr(rule, "runbook", None) if rule else None
@@ -703,6 +732,13 @@ def _plugin_source_payload(engine: Engine, plugin_type: str, plugin_id: str) -> 
         "end_line": snippet["end_line"],
         "source_text": snippet["source_text"],
     }
+
+
+def _plugin_minimum_severity(plugin: object | None, plugin_type: str) -> object | None:
+    if plugin_type != "output" or plugin is None:
+        return None
+    value = getattr(plugin, "minimum_severity", None)
+    return value.name if hasattr(value, "name") else value
 
 
 def _extract_class_source(source_text: str, class_name: str) -> dict[str, object] | None:

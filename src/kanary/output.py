@@ -11,6 +11,7 @@ from .signature_compat import detect_instance_method_style
 
 class Output:
     output_id: str
+    description: str | None = None
     include_tags: list[str] = []
     exclude_tags: list[str] = []
     exclude_states: list[str] = []
@@ -113,6 +114,7 @@ class MailOutput(Output):
 
 
 def prepare_output_class(cls: type[Any]) -> type[Any]:
+    _setdefault(cls, "description", None)
     _setdefault(cls, "include_tags", [])
     _setdefault(cls, "exclude_tags", [])
     _setdefault(cls, "exclude_states", [])
