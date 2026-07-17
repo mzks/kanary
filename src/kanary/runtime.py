@@ -35,6 +35,7 @@ class RuntimeConfig:
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     enable_default_viewer: bool = True
+    output_emit_enabled: bool = True
     print_alerts: bool = False
     exclude_plugins: list[str] | None = None
     log_level: str = DEFAULT_LOG_LEVEL
@@ -97,6 +98,7 @@ class EngineRuntime:
             output_registry=snapshot.outputs,
             store=self.store,
             node_id=self.config.node_id,
+            output_emit_enabled=self.config.output_emit_enabled,
         )
         self.engine.start()
         self._publish_runtime_plugin_overlay()
@@ -242,6 +244,7 @@ class EngineRuntime:
             output_registry=self._discovered_snapshot.outputs,
             store=new_store,
             node_id=self.config.node_id,
+            output_emit_enabled=self.config.output_emit_enabled,
         )
 
         try:

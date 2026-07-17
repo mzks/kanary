@@ -154,6 +154,12 @@ SQLite に履歴を保存する場合:
 kanary ./demo --state-db ./var/kanary.db
 ```
 
+Outputの`emit()`を呼ばずにroutingを確認するshadow instance:
+
+```bash
+kanary ./demo --api-port 8001 --node-id demo-shadow --no-output-emit
+```
+
 Web viewer:
 
 ```text

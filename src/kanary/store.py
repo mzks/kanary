@@ -569,17 +569,7 @@ class SQLiteStore:
                 )
             ]
             output_dispatches = [
-                {
-                    "rule_id": row["rule_id"],
-                    "previous_state": row["previous_state"],
-                    "current_state": row["current_state"],
-                    "occurred_at": row["occurred_at"],
-                    "matched_outputs": json.loads(row["matched_outputs_json"]),
-                    "delivered_outputs": json.loads(row["delivered_outputs_json"]),
-                    "filtered_outputs": json.loads(row["filtered_outputs_json"]),
-                    "uninitialized_outputs": json.loads(row["uninitialized_outputs_json"]),
-                    "failed_outputs": json.loads(row["failed_outputs_json"]),
-                }
+                _output_dispatch_row(row)
                 for row in conn.execute(
                     """
                     SELECT *
@@ -699,6 +689,30 @@ def _operator_action_row(row: sqlite3.Row) -> dict[str, Any]:
         "reason": row["reason"],
         "details": json.loads(row["details_json"]),
         "created_at": row["created_at"],
+    }
+
+
+def _output_dispatch_row(row: sqlite3.Row) -> dict[str, Any]:
+    matched_outputs = json.loads(row["matched_outputs_json"])
+    delivered_outputs = json.loads(row["delivered_outputs_json"])
+    uninitialized_outputs = json.loads(row["uninitialized_outputs_json"])
+    failed_outputs = json.loads(row["failed_outputs_json"])
+    completed_outputs = set(delivered_outputs) | set(uninitialized_outputs) | set(failed_outputs)
+    return {
+        "rule_id": row["rule_id"],
+        "previous_state": row["previous_state"],
+        "current_state": row["current_state"],
+        "occurred_at": row["occurred_at"],
+        "matched_outputs": matched_outputs,
+        "delivered_outputs": delivered_outputs,
+        "emit_skipped_outputs": [
+            output_id
+            for output_id in matched_outputs
+            if output_id not in completed_outputs
+        ],
+        "filtered_outputs": json.loads(row["filtered_outputs_json"]),
+        "uninitialized_outputs": uninitialized_outputs,
+        "failed_outputs": failed_outputs,
     }
 
 

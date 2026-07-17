@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  --api-host HOST        Bind the local API and Web viewer host\n"
             "  --api-port PORT        Bind the local API and Web viewer port\n"
             "  --state-db PATH        Persist history and actions in SQLite\n"
+            "  --no-output-emit       Route outputs without calling emit()\n"
             "  --auto-reload MODE     Apply discovered changes automatically (off, dirty, all)\n"
             "  --exclude GLOB         Exclude matching plugin ids from the runtime\n"
             "  For the full run option list, use:\n"
@@ -93,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--disable-default-viewer",
         action="store_true",
         help="Disable the built-in default Web viewer while keeping the HTTP API enabled.",
+    )
+    run_parser.add_argument(
+        "--no-output-emit",
+        action="store_true",
+        help="Load, initialize, and route Output plugins without calling emit().",
     )
     run_parser.add_argument(
         "--state-db",
@@ -164,6 +170,7 @@ def main() -> int:
             api_host=args.api_host,
             api_port=args.api_port,
             enable_default_viewer=not args.disable_default_viewer,
+            output_emit_enabled=not args.no_output_emit,
             state_db_path=Path(args.state_db) if args.state_db else None,
             node_id=args.node_id,
         )

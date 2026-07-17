@@ -638,6 +638,7 @@ def print_history(payload: dict) -> None:
                 f"{dispatch['previous_state'] or '-'} -> {dispatch['current_state']}  "
                 f"matched={', '.join(dispatch.get('matched_outputs', [])) or '-'}  "
                 f"delivered={', '.join(dispatch.get('delivered_outputs', [])) or '-'}  "
+                f"emit_skipped={', '.join(dispatch.get('emit_skipped_outputs', [])) or '-'}  "
                 f"failed={', '.join(dispatch.get('failed_outputs', [])) or '-'}  "
                 f"uninitialized={', '.join(dispatch.get('uninitialized_outputs', [])) or '-'}  "
                 f"filtered={', '.join(dispatch.get('filtered_outputs', [])) or '-'}"

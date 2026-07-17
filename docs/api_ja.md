@@ -13,7 +13,7 @@
 ### Read endpoints
 
 - `GET /health`
-  source や rule の読み込み状況を含む、小さな runtime health summary を返します。
+  sourceやruleの読み込み状況と`output_emit_enabled`を含む、小さなruntime health summaryを返します。
 - `GET /peer-status`
   peer monitoring 用の compact な status payload を返します。
 - `GET /alerts`
@@ -22,6 +22,7 @@
   remote alert import 用の安定した形式で alert を返します。
 - `GET /history/{rule_id}`
   1 つの rule に対する alert event、output dispatch summary、operator action を返します。
+  output dispatchには、`--no-output-emit`により実行されなかったmatched outputを`emit_skipped_outputs`として含めます。
 - `GET /silences`
   active, scheduled, cancelled の silence を返します。
   raw API 自体には `EXPIRED` 状態は追加しません。Web viewer と `kanaryctl` では、すでに終了した silence を表示上 `EXPIRED` と導出することがあります。
@@ -66,6 +67,7 @@
   1 つの rule 向けの canonical な `inputs` payload template を返します。単一 input rule の場合は shorthand template も含まれることがあります。
 - `POST /test-fire/{rule_id}`
   live alert state を変更せず、synthetic な state change を output pipeline に流します。
+  `--no-output-emit`の場合はOutputを呼ばず、matching結果を`emit_skipped_outputs`に返します。
 
 ## API の考え方
 

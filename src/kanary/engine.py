@@ -38,6 +38,7 @@ class Engine:
         now_fn: Callable[[], datetime] | None = None,
         store: object | None = None,
         node_id: str | None = None,
+        output_emit_enabled: bool = True,
     ) -> None:
         self._source_registry = source_registry or get_source_registry()
         self._rule_registry = rule_registry or get_rule_registry()
@@ -45,6 +46,7 @@ class Engine:
         self._exclude_rule_patterns = exclude_rule_patterns or []
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self.node_id = node_id or socket.gethostname()
+        self.output_emit_enabled = output_emit_enabled
         self.started_at = self._now_fn()
         self.last_reload_at: datetime | None = None
         self.store = store or NullStore()
@@ -196,6 +198,10 @@ class Engine:
 
     def start(self) -> None:
         with self._lock:
+            if not self.output_emit_enabled:
+                logger.warning(
+                    "output emit is disabled; Output plugins will be initialized and routed but emit() will not be called"
+                )
             self.store.initialize()
             restored = self.store.load_runtime_state()
             self.acknowledgements = {
@@ -1218,6 +1224,7 @@ class Engine:
         matched_output_ids: list[str] = []
         initialized_output_ids: list[str] = []
         delivered_output_ids: list[str] = []
+        emit_skipped_output_ids: list[str] = []
         filtered_output_ids: list[str] = []
         uninitialized_output_ids: list[str] = []
         failed_output_ids: list[str] = []
@@ -1241,6 +1248,9 @@ class Engine:
                 )
                 continue
             initialized_output_ids.append(output_id)
+            if not self.output_emit_enabled:
+                emit_skipped_output_ids.append(output_id)
+                continue
             try:
                 self._call_output_emit(output, event)
                 delivered_output_ids.append(output_id)
@@ -1258,12 +1268,13 @@ class Engine:
                 failed_output_ids.append(output_id)
                 logger.exception("output '%s' failed", output.output_id)
         logger.info(
-            "alert dispatch summary: rule=%s transition=%s->%s matched=%s delivered=%s filtered=%s uninitialized=%s failed=%s",
+            "alert dispatch summary: rule=%s transition=%s->%s matched=%s delivered=%s emit_skipped=%s filtered=%s uninitialized=%s failed=%s",
             event.rule_id,
             event.previous_state.value if event.previous_state is not None else "-",
             event.current_state.value,
             ",".join(matched_output_ids) or "-",
             ",".join(delivered_output_ids) or "-",
+            ",".join(emit_skipped_output_ids) or "-",
             ",".join(filtered_output_ids) or "-",
             ",".join(uninitialized_output_ids) or "-",
             ",".join(failed_output_ids) or "-",
@@ -1283,6 +1294,7 @@ class Engine:
             "occurred_at": event.occurred_at,
             "matched_outputs": matched_output_ids,
             "delivered_outputs": delivered_output_ids,
+            "emit_skipped_outputs": emit_skipped_output_ids,
             "filtered_outputs": filtered_output_ids,
             "uninitialized_outputs": uninitialized_output_ids,
             "failed_outputs": failed_output_ids,

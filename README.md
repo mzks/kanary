@@ -162,6 +162,12 @@ Persist history in SQLite:
 kanary ./demo --state-db ./var/kanary.db
 ```
 
+Run a shadow instance that evaluates routing without calling Output `emit()`:
+
+```bash
+kanary ./demo --api-port 8001 --node-id demo-shadow --no-output-emit
+```
+
 The Web viewer is available at:
 
 ```text

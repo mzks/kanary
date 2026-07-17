@@ -247,7 +247,9 @@ function setRefreshStatus(message, isError) {
 
 function renderBuildMeta() {
   const element = document.getElementById("viewer-build-meta");
+  const outputEmitBanner = document.getElementById("output-emit-disabled-banner");
   const meta = state.meta;
+  outputEmitBanner.classList.toggle("hidden", !meta || meta.output_emit_enabled !== false);
   if (!meta) {
     element.classList.add("hidden");
     element.innerHTML = "";
@@ -623,6 +625,19 @@ function renderHistory(history) {
           <div class="history-meta" title="${escapeHtml(event.occurred_at || "-")}">${escapeHtml(formatDateTime(event.occurred_at))} event</div>
           <div class="history-title">${escapeHtml((event.previous_state || "-") + " -> " + event.current_state)}</div>
           <div>${escapeHtml(event.message || "")}</div>
+        </div>
+      `,
+    })),
+    ...(history.output_dispatches || []).map((dispatch) => ({
+      kind: "dispatch",
+      at: dispatch.occurred_at || "",
+      html: `
+        <div class="history-item">
+          <div class="history-meta" title="${escapeHtml(dispatch.occurred_at || "-")}">${escapeHtml(formatDateTime(dispatch.occurred_at))} output routing</div>
+          <div class="history-title">${escapeHtml((dispatch.previous_state || "-") + " -> " + dispatch.current_state)}</div>
+          <div>Matched: ${escapeHtml((dispatch.matched_outputs || []).join(", ") || "-")}</div>
+          <div>Delivered: ${escapeHtml((dispatch.delivered_outputs || []).join(", ") || "-")}</div>
+          <div>Emit skipped: ${escapeHtml((dispatch.emit_skipped_outputs || []).join(", ") || "-")}</div>
         </div>
       `,
     })),

@@ -1978,11 +1978,17 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
         self._write_tick = next_tick + 2
         os.utime(path, (self._write_tick, self._write_tick))
 
-    def _bootstrap_runtime(self, directory: Path) -> EngineRuntime:
+    def _bootstrap_runtime(
+        self,
+        directory: Path,
+        *,
+        output_emit_enabled: bool = True,
+    ) -> EngineRuntime:
         runtime = EngineRuntime(
             RuntimeConfig(
                 rule_directories=[directory],
                 api_port=0,
+                output_emit_enabled=output_emit_enabled,
             )
         )
         snapshot = runtime.loader.load(exclude_patterns=runtime.config.exclude_plugins)
@@ -1994,6 +2000,7 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
             source_registry=snapshot.sources,
             rule_registry=snapshot.rules,
             output_registry=snapshot.outputs,
+            output_emit_enabled=runtime.config.output_emit_enabled,
         )
         runtime.engine.start()
         now = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
@@ -2265,19 +2272,22 @@ class RuntimeTargetedReloadTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_full_restart_plugins(root)
-            runtime = self._bootstrap_runtime(root)
+            with self.assertLogs("kanary.engine", level="WARNING"):
+                runtime = self._bootstrap_runtime(root, output_emit_enabled=False)
             try:
                 count_path = root / "init_count.txt"
                 self.assertEqual(count_path.read_text(encoding="utf-8").strip(), "1")
                 old_engine = runtime.engine
 
-                summary = runtime.reload_now({"full": True})
+                with self.assertLogs("kanary.engine", level="WARNING"):
+                    summary = runtime.reload_now({"full": True})
 
                 self.assertEqual(summary["status"], "reloaded")
                 self.assertEqual(summary["target"], "full")
                 self.assertEqual(count_path.read_text(encoding="utf-8").strip(), "2")
                 self.assertIsNot(runtime.engine, old_engine)
                 self.assertIn("restart.rule", runtime.engine.rules)
+                self.assertFalse(runtime.engine.output_emit_enabled)
             finally:
                 runtime.api._server.server_close()
                 runtime.engine.shutdown()
@@ -2623,6 +2633,8 @@ class ControlAPITest(unittest.TestCase):
             with urlopen(f"http://127.0.0.1:{port}/viewer/app.js") as response:
                 javascript = response.read().decode()
             self.assertIn("DEFAULT_REFRESH_MS", javascript)
+            self.assertIn("output-emit-disabled-banner", body)
+            self.assertIn("emit_skipped_outputs", javascript)
             self.assertIn("Dashboard", body)
         finally:
             api.shutdown()
@@ -2687,8 +2699,9 @@ class ControlAPITest(unittest.TestCase):
         self.assertEqual(payload["node_id"], "node-a")
 
     def test_meta_endpoint_reports_repository_information(self) -> None:
-        engine = kanary.Engine(output_registry={})
-        engine.start()
+        engine = kanary.Engine(output_registry={}, output_emit_enabled=False)
+        with self.assertLogs("kanary.engine", level="WARNING") as captured:
+            engine.start()
         api = kanary.ControlAPI(
             engine_getter=lambda: engine,
             reload_callback=lambda: True,
@@ -2700,6 +2713,7 @@ class ControlAPITest(unittest.TestCase):
         try:
             port = api._server.server_address[1]
             payload = fetch_json(f"http://127.0.0.1:{port}/meta")
+            health = fetch_json(f"http://127.0.0.1:{port}/health")
         finally:
             api.shutdown()
             thread.join(timeout=2.0)
@@ -2712,6 +2726,9 @@ class ControlAPITest(unittest.TestCase):
         self.assertIn("state_db_enabled", payload)
         self.assertIn("state_db_schema_version", payload)
         self.assertIn("state_db_target_schema_version", payload)
+        self.assertFalse(payload["output_emit_enabled"])
+        self.assertFalse(health["output_emit_enabled"])
+        self.assertTrue(any("output emit is disabled" in line for line in captured.output))
 
     def test_alerts_endpoint_includes_tags_and_owner(self) -> None:
         engine = kanary.Engine(output_registry={})
@@ -3565,6 +3582,37 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(stale_events[0].previous_state, kanary.SILENCED)
         self.assertEqual(stale_events[0].current_state, kanary.FIRING)
 
+    def test_output_emit_can_be_disabled_without_disabling_init_or_routing(self) -> None:
+        RecordingOutput.events = []
+        with TemporaryDirectory() as tmp:
+            engine = kanary.Engine(
+                now_fn=lambda: self.now,
+                output_registry={"recording": RecordingOutput},
+                store=kanary.SQLiteStore(Path(tmp) / "shadow.db"),
+                output_emit_enabled=False,
+            )
+            with self.assertLogs("kanary.engine", level="WARNING"):
+                engine.start()
+            try:
+                summary = engine.test_fire(
+                    "postgres.temperature.range",
+                    state=kanary.FIRING,
+                    reason="shadow routing test",
+                    now=self.now,
+                )
+                status = engine.plugin_states["output:recording"]
+                history = engine.get_rule_history("postgres.temperature.range")
+            finally:
+                engine.shutdown()
+
+        self.assertTrue(status.init_ok)
+        self.assertEqual(status.run_count, 0)
+        self.assertEqual(summary["matched_outputs"], ["recording"])
+        self.assertEqual(summary["delivered_outputs"], [])
+        self.assertEqual(summary["emit_skipped_outputs"], ["recording"])
+        self.assertEqual(RecordingOutput.events, [])
+        self.assertEqual(history["output_dispatches"][0]["emit_skipped_outputs"], ["recording"])
+
     def test_ack_and_unack_emit_events(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
@@ -4308,6 +4356,7 @@ class ControlAPITest(unittest.TestCase):
         self.assertTrue(payload["synthetic"])
         self.assertEqual(payload["current_state"], "FIRING")
         self.assertEqual(payload["delivered_outputs"], ["recording"])
+        self.assertEqual(payload["emit_skipped_outputs"], [])
         self.assertTrue(RecordingOutput.events)
 
 
@@ -4334,7 +4383,13 @@ class CLIHelpersTest(unittest.TestCase):
         self.assertIn("--api-port PORT", help_text)
         self.assertIn("kanary run --help", help_text)
         self.assertIn("kanary lint ./plugins", help_text)
+        self.assertIn("--no-output-emit", help_text)
         self.assertIn("--version", help_text)
+
+    def test_run_parser_accepts_no_output_emit(self) -> None:
+        parser = kanary_main.build_parser()
+        args = parser.parse_args(["run", "./plugins", "--no-output-emit"])
+        self.assertTrue(args.no_output_emit)
 
     def test_cli_version_helpers_return_project_version(self) -> None:
         self.assertRegex(kanary_main._kanary_version(), r"^\d+\.\d+\.\d+$")

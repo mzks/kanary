@@ -88,6 +88,35 @@ select {
   border-color: var(--line-strong);
 }
 
+.output-emit-disabled-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 13px 18px;
+  border: 1px solid rgba(147, 54, 22, 0.55);
+  border-radius: 14px;
+  color: #6d260f;
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(168, 106, 22, 0.16),
+      rgba(168, 106, 22, 0.16) 12px,
+      rgba(244, 236, 220, 0.76) 12px,
+      rgba(244, 236, 220, 0.76) 24px
+    ),
+    var(--paper);
+  box-shadow: 0 8px 22px rgba(82, 45, 13, 0.12);
+}
+
+.output-emit-disabled-banner strong {
+  letter-spacing: 0.08em;
+}
+
+.output-emit-disabled-banner code {
+  font-family: var(--mono);
+}
+
 .eyebrow,
 .panel-kicker {
   color: var(--orange-brown);

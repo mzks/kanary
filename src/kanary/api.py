@@ -132,6 +132,7 @@ class ControlAPI:
                             "sources": sorted(engine.sources),
                             "rules": sorted(engine.rules),
                             "alert_count": len(engine.alerts),
+                            "output_emit_enabled": engine.output_emit_enabled,
                         },
                     )
                     return
@@ -566,6 +567,7 @@ def _installation_metadata(engine: Engine | None = None, extra: dict[str, object
         "state_db_enabled": bool(getattr(getattr(engine, "store", None), "enabled", False)),
         "state_db_schema_version": getattr(getattr(engine, "store", None), "schema_version", 0) if engine is not None else 0,
         "state_db_target_schema_version": getattr(getattr(engine, "store", None), "target_schema_version", 1) if engine is not None else 1,
+        "output_emit_enabled": getattr(engine, "output_emit_enabled", True) if engine is not None else True,
     }
     if extra:
         result.update(extra)
@@ -604,15 +606,19 @@ def _installation_metadata_from_pyproject(base: dict[str, object]) -> dict[str, 
         return base
 
     urls = project.get("urls", {})
-    return {
-        "package_name": project.get("name", base["package_name"]),
-        "version": project.get("version"),
-        "git_commit": base["git_commit"],
-        "homepage_url": urls.get("Homepage"),
-        "repository_url": urls.get("Repository") or urls.get("Homepage"),
-        "documentation_url": urls.get("Documentation"),
-        "issues_url": urls.get("Issues"),
-    }
+    result = dict(base)
+    result.update(
+        {
+            "package_name": project.get("name", base["package_name"]),
+            "version": project.get("version"),
+            "git_commit": base["git_commit"],
+            "homepage_url": urls.get("Homepage"),
+            "repository_url": urls.get("Repository") or urls.get("Homepage"),
+            "documentation_url": urls.get("Documentation"),
+            "issues_url": urls.get("Issues"),
+        }
+    )
+    return result
 
 
 def _git_commit_hash() -> str | None:

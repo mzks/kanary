@@ -26,6 +26,17 @@ kanary ./plugins --api-port 8000
 kanary ./plugins --api-host 0.0.0.0 --api-port 8000
 ```
 
+本番の入力と設定で Output routing だけを確認する shadow instance:
+
+```bash
+kanary ./plugins \
+  --api-port 8001 \
+  --node-id production-shadow \
+  --no-output-emit
+```
+
+`--no-output-emit` を指定しても Output plugin のloadと`init()`、routing filterの評価は通常どおり行われますが、`emit()`は呼ばれません。dispatch summaryでは対象Outputを`emit_skipped_outputs`に記録し、`delivered_outputs`とOutputのEmit Countは増えません。Source poll、Rule評価、state change、operator action、remote action propagationは停止しません。本番と並べて起動する場合は、別の`--state-db` pathを使うか、state DBを指定しないでください。
+
 主な引数:
 
 - `rule_directories...`
@@ -37,6 +48,7 @@ kanary ./plugins --api-host 0.0.0.0 --api-port 8000
 - `--node-id`
 - `--exclude`
 - `--disable-default-viewer`
+- `--no-output-emit`
 
 主な環境変数:
 

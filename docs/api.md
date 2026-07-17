@@ -13,7 +13,7 @@ Use `--api-host` and `--api-port` to change the bind address.
 ### Read Endpoints
 
 - `GET /health`
-  Returns a small runtime health summary, including loaded sources and rules.
+  Returns a small runtime health summary, including loaded sources, rules, and `output_emit_enabled`.
 - `GET /peer-status`
   Returns a compact status payload intended for peer monitoring.
 - `GET /alerts`
@@ -22,6 +22,7 @@ Use `--api-host` and `--api-port` to change the bind address.
   Returns alerts in a stable format intended for remote alert import.
 - `GET /history/{rule_id}`
   Returns alert events, output dispatch summaries, and operator actions for one rule.
+  Output dispatches include `emit_skipped_outputs` for matched outputs skipped by `--no-output-emit`.
 - `GET /silences`
   Returns active, scheduled, and cancelled silences.
   The raw API does not add a separate `EXPIRED` state. The Web viewer and `kanaryctl` may derive `EXPIRED` locally for silences whose window has already ended.
@@ -66,6 +67,7 @@ Use `--api-host` and `--api-port` to change the bind address.
   Returns a canonical `inputs` payload template for one rule. Single-input rules may also include a shorthand template.
 - `POST /test-fire/{rule_id}`
   Sends a synthetic state change through the output pipeline without changing the live alert state.
+  With `--no-output-emit`, it reports matching outputs in `emit_skipped_outputs` without calling them.
 
 ## Design Notes
 

@@ -38,6 +38,17 @@ Exclude plugins:
 kanary ./plugins --exclude 'sqlite.*.stale' --exclude 'discord'
 ```
 
+Run a shadow instance against production inputs without executing Output delivery:
+
+```bash
+kanary ./plugins \
+  --api-port 8001 \
+  --node-id production-shadow \
+  --no-output-emit
+```
+
+`--no-output-emit` still loads and initializes Output plugins and evaluates their routing filters, but it never calls `emit()`. Dispatch summaries report these routes in `emit_skipped_outputs`; `delivered_outputs` and each Output's Emit Count remain unchanged. Source polling, Rule evaluation, state changes, operator actions, and remote action propagation continue normally. Use a separate `--state-db` path, or no state DB, when running beside production.
+
 Main arguments:
 
 - `rule_directories...`
@@ -49,6 +60,7 @@ Main arguments:
 - `--node-id`
 - `--exclude`
 - `--disable-default-viewer`
+- `--no-output-emit`
 
 Environment variables:
 
