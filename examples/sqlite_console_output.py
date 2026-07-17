@@ -3,7 +3,7 @@ import json
 import kanary
 
 
-@kanary.output(output_id="console")
+@kanary.output(output_id="console", exclude_states=[])
 class ConsoleOutput:
     description = "Print alert transitions as JSON lines for local testing and debugging."
 

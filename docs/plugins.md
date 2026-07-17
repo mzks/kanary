@@ -271,7 +271,19 @@ The older `emit(event, ctx)`, `init(ctx)`, and `terminate(ctx)` signatures still
 `include_tags` and `exclude_tags` support glob patterns.  
 For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.
 
-`exclude_states` starts from "allow all states" and removes the listed ones.  
+`exclude_states` drops events whose current state matches a listed value. It defaults to `["SUPPRESSED", "SILENCED"]`.
+
+To add `OK` to the defaults and drop recovery events too, use `exclude_states=kanary.Output.exclude_states + ["OK"]`. An explicitly configured list replaces rather than merges with the defaults, so debugging and audit outputs that need every state event should set `exclude_states=[]`.
+
+Because `SILENCED -> OK` has `OK` as its current state, it is not excluded by default. If only that transition is unwanted, inspect `previous_state` and `current_state` in `emit()`.
+
+```python
+def emit(self, event):
+    if event.previous_state == kanary.SILENCED and event.current_state == kanary.OK:
+        return
+    ...
+```
+
 `exclude_transitions` also starts empty. 
 
 Common values for `exclude_states`:
@@ -283,9 +295,9 @@ Common values for `exclude_states`:
 - `ACKED`
   Operator acknowledgement events (`FIRING -> ACKED`).
 - `SILENCED`
-  A firing alert that is currently covered by an active silence.
+  An alert covered by an active silence, with its normal alert state temporarily muted.
 - `SUPPRESSED`
-  A firing alert suppressed by another rule via `suppressed_by`.
+  An alert whose normal state is suppressed because another rule in `suppressed_by` is active.
 
 Common values for `exclude_transitions`:
 
@@ -312,7 +324,6 @@ Example:
 @kanary.output(
     output_id="discord",
     include_tags=["sqlite"],
-    exclude_states=["SUPPRESSED"],
     minimum_severity="ERROR",
 )
 class DiscordOutput:
@@ -516,6 +527,7 @@ Rule relationships:
 `depends_on` expresses a prerequisite for meaningful evaluation. For example, you might only evaluate an instrument timeout while a network rule is healthy.
 
 `suppressed_by` is for automatic alert suppression during higher-level failures. For example, if `database.connection.failed` is firing, dependent stale alerts can become `SUPPRESSED`.
+An upper rule in `SILENCED` state is still active for dependency purposes, so it can suppress lower rules. `SUPPRESSED` is excluded from outputs by default.
 
 Alert states:
 
@@ -526,9 +538,9 @@ Alert states:
 - `ACKED`
   The alert is still abnormal, but an operator acknowledged it.
 - `SILENCED`
-  The alert would be firing, but an active silence currently masks it.
+  An active silence covers the alert and temporarily mutes its normal alert state.
 - `SUPPRESSED`
-  The alert would be firing, but another rule listed in `suppressed_by` is active.
+  Another active rule listed in `suppressed_by` suppresses the alert's normal state.
 
 Derived transitions:
 
@@ -541,5 +553,5 @@ Derived transitions:
 
 In practice:
 
-- `SILENCED` is useful if you want outputs or viewers to show that an alert is muted on purpose.
+- `SILENCED` shows viewers and history that an alert is muted on purpose. Remove it from `exclude_states` explicitly if an output should receive it.
 - Rule removals during reload are not represented as an alert state. They are recorded in history as an operator action with `action_type = "rule_removed"`.

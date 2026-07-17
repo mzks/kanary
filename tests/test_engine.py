@@ -3452,6 +3452,119 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(len(threshold_events), 1)
         self.assertEqual(threshold_events[0].transition, kanary.DEESCALATED)
 
+    def test_output_excludes_silenced_and_suppressed_states_by_default(self) -> None:
+        output = self.engine.outputs["recording"]
+        self.assertEqual(output.exclude_states, ["SUPPRESSED", "SILENCED"])
+
+        for state in (kanary.SILENCED, kanary.SUPPRESSED):
+            alert = kanary.Alert(
+                rule_id="example.alert",
+                state=state,
+                severity=kanary.WARN,
+            )
+            event = kanary.AlertEvent(
+                rule_id=alert.rule_id,
+                previous_state=kanary.OK,
+                current_state=state,
+                previous_severity=kanary.WARN,
+                current_severity=kanary.WARN,
+                transition=None,
+                alert=alert,
+                occurred_at=self.now,
+            )
+            self.assertFalse(output.matches(event))
+
+    def test_output_can_replace_or_extend_default_state_exclusions(self) -> None:
+        class PlainOutput:
+            output_id = "plain"
+
+            def emit(self, event):
+                return None
+
+        class AllStateOutput(kanary.Output):
+            output_id = "all-state"
+            exclude_states = []
+
+            def emit(self, event):
+                return None
+
+        class NoRecoveryOutput(kanary.Output):
+            output_id = "no-recovery"
+            exclude_states = kanary.Output.exclude_states + ["OK"]
+
+            def emit(self, event):
+                return None
+
+        silenced_alert = kanary.Alert(
+            rule_id="example.alert",
+            state=kanary.SILENCED,
+            severity=kanary.WARN,
+        )
+        silenced_event = kanary.AlertEvent(
+            rule_id=silenced_alert.rule_id,
+            previous_state=kanary.OK,
+            current_state=kanary.SILENCED,
+            previous_severity=kanary.WARN,
+            current_severity=kanary.WARN,
+            transition=None,
+            alert=silenced_alert,
+            occurred_at=self.now,
+        )
+        ok_alert = kanary.Alert(
+            rule_id="example.alert",
+            state=kanary.OK,
+            severity=kanary.WARN,
+        )
+        ok_event = kanary.AlertEvent(
+            rule_id=ok_alert.rule_id,
+            previous_state=kanary.FIRING,
+            current_state=kanary.OK,
+            previous_severity=kanary.WARN,
+            current_severity=kanary.WARN,
+            transition=None,
+            alert=ok_alert,
+            occurred_at=self.now,
+        )
+
+        prepared_plain_output = self.output_module.prepare_output_class(PlainOutput)
+        self.assertEqual(
+            prepared_plain_output.exclude_states,
+            ["SUPPRESSED", "SILENCED"],
+        )
+        self.assertTrue(AllStateOutput().matches(silenced_event))
+        self.assertEqual(
+            NoRecoveryOutput.exclude_states,
+            ["SUPPRESSED", "SILENCED", "OK"],
+        )
+        self.assertTrue(self.engine.outputs["recording"].matches(ok_event))
+        self.assertFalse(NoRecoveryOutput().matches(ok_event))
+
+    def test_output_delivers_firing_after_silence_is_cancelled(self) -> None:
+        source = self.engine.sources["postgres"]
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        silence = self.engine.create_silence(
+            operator="alice",
+            reason="maintenance",
+            start_at=self.now - timedelta(minutes=1),
+            end_at=self.now + timedelta(minutes=10),
+            rule_patterns=["postgres.temperature.stale"],
+        )
+
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        self.assertEqual(RecordingOutput.events, [])
+
+        self.engine.cancel_silence(silence.silence_id, operator="alice")
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+
+        stale_events = [
+            event
+            for event in RecordingOutput.events
+            if event.rule_id == "postgres.temperature.stale"
+        ]
+        self.assertEqual(len(stale_events), 1)
+        self.assertEqual(stale_events[0].previous_state, kanary.SILENCED)
+        self.assertEqual(stale_events[0].current_state, kanary.FIRING)
+
     def test_ack_and_unack_emit_events(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)

@@ -8,7 +8,6 @@ import kanary
 @kanary.output(
     output_id="discord",
     include_tags=["sqlite"],
-    exclude_states=["SUPPRESSED"],
     minimum_severity="ERROR",
 )
 class DiscordOutput:

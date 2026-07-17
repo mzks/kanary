@@ -272,7 +272,19 @@ SMTP output は利便性のために、引き続き `KANARY_SMTP_*` 環境変数
 `include_tags` と `exclude_tags` は glob pattern を使えます。  
 たとえば `include_tags=["expert_*"]` とすると、`expert_db` や `expert_shift` のような tag に一致します。
 
-`exclude_states` は「全 state を許可してから除外する」設定です。  
+`exclude_states` は current state が指定値に一致する event を除外します。default は `["SUPPRESSED", "SILENCED"]` です。
+
+default に `OK` を追加して recovery event も除外する場合は、`exclude_states=kanary.Output.exclude_states + ["OK"]` と書けます。指定したリストは default との merge ではなく置き換えになるため、すべての state event を受け取るデバッグ・監査用 output では `exclude_states=[]` を明示します。
+
+`SILENCED -> OK` は current state が `OK` なので default では除外されません。この遷移だけが不要な場合は `emit()` 内で `previous_state` と `current_state` を確認します。
+
+```python
+def emit(self, event):
+    if event.previous_state == kanary.SILENCED and event.current_state == kanary.OK:
+        return
+    ...
+```
+
 `exclude_transitions` も default は空です。severity 低下を通知したくないなら `DEESCALATED` を明示的に追加します。
 
 `exclude_states` によく入る値:
@@ -284,9 +296,9 @@ SMTP output は利便性のために、引き続き `KANARY_SMTP_*` 環境変数
 - `ACKED`
   operator が確認したことを示す通知 (`FIRING -> ACKED`)。
 - `SILENCED`
-  active な silence に覆われている `FIRING`。
+  active な silence の対象になり、通常の alert state が一時的に mute されている状態。
 - `SUPPRESSED`
-  `suppressed_by` により別 rule に抑制されている `FIRING`。
+  `suppressed_by` に指定された別 rule が active なため、通常の alert state が抑制されている状態。
 
 `exclude_transitions` に入る値:
 
@@ -313,7 +325,6 @@ SMTP output は利便性のために、引き続き `KANARY_SMTP_*` 環境変数
 @kanary.output(
     output_id="discord",
     include_tags=["sqlite"],
-    exclude_states=["SUPPRESSED"],
     minimum_severity="ERROR",
 )
 class DiscordOutput:
@@ -500,7 +511,7 @@ rule 間関係:
 - `suppressed_by`
 
 `depends_on` は上位のルールが守られていない時, そもそも評価されません.
-`suppressed_by` は評価されますが, アラームは`SUPRESSED`状態になるので, これらが通知されないようなOutputを書くことが可能です.
+`suppressed_by` に指定した rule が active な時は、対象 alert は `SUPPRESSED` になります。上位 rule が `SILENCED` の場合も active とみなされるため、下位 rule は suppression の対象になります。`SUPPRESSED` は default の `exclude_states` に含まれるため、通常の Output には通知されません。
 
 alert state:
 
@@ -511,9 +522,9 @@ alert state:
 - `ACKED`
   異常は継続しているが、operator が確認済み。
 - `SILENCED`
-  本来は `FIRING` だが、active な silence により一時的に mute されている。
+  active な silence の対象になり、期間中は通常の alert state が一時的に mute されている。
 - `SUPPRESSED`
-  本来は `FIRING` だが、`suppressed_by` にある別 rule が active なため抑制されている。
+  `suppressed_by` にある別 rule が active なため、通常の alert state が抑制されている。
 
 派生 transition:
 
@@ -526,5 +537,5 @@ alert state:
 
 実運用では:
 
-- `SILENCED` は「意図的に止めている」ことを viewer や output で示したい時に役立ちます。
+- `SILENCED` は viewer や history で「意図的に止めている」ことを示します。Output で受け取りたい場合は `exclude_states` から明示的に外します。
 - reload 中の rule removal は alert state では表しません。履歴上は `action_type = "rule_removed"` の operator action として残ります。

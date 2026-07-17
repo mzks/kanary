@@ -9,12 +9,15 @@ from .patterns import matches_any_tag, matches_excluded_tag
 from .signature_compat import detect_instance_method_style
 
 
+_DEFAULT_EXCLUDED_STATES = ("SUPPRESSED", "SILENCED")
+
+
 class Output:
     output_id: str
     description: str | None = None
     include_tags: list[str] = []
     exclude_tags: list[str] = []
-    exclude_states: list[str] = []
+    exclude_states: list[str] = list(_DEFAULT_EXCLUDED_STATES)
     exclude_transitions: list[str] = []
     minimum_severity: str | Severity | None = None
     max_retry: int = 1
@@ -117,7 +120,7 @@ def prepare_output_class(cls: type[Any]) -> type[Any]:
     _setdefault(cls, "description", None)
     _setdefault(cls, "include_tags", [])
     _setdefault(cls, "exclude_tags", [])
-    _setdefault(cls, "exclude_states", [])
+    _setdefault(cls, "exclude_states", list(_DEFAULT_EXCLUDED_STATES))
     _setdefault(cls, "exclude_transitions", [])
     _setdefault(cls, "minimum_severity", None)
     _setdefault(cls, "max_retry", 1)
