@@ -282,6 +282,8 @@ kanaryctl --base-url http://127.0.0.1:8000 ack local_load.busy --operator operat
 kanaryctl --base-url http://127.0.0.1:8000 silence-for --operator operator_name --minutes 10 --rule 'local_load.*'
 ```
 
+scheduled silence は、Source の次回 poll を待たずに開始・終了時刻で `SILENCED` を更新します。境界では poll を追加実行せず、silence 中を含む最後の通常 Rule 評価結果へ戻します。process を再起動してから対象 Rule がまだ一度も評価されていない場合だけ、最初の poll まで state は更新されません。
+
 ### Lint
 単純なlinterが用意されています. pluginをpushする前に, 単純な確認を行うことが可能です.
 ```bash

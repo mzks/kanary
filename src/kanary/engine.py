@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 import logging
@@ -9,7 +10,7 @@ from uuid import uuid4
 import threading
 from typing import Callable
 
-from .constants import AlertState, DEESCALATED, ESCALATED, TransitionKind, UNACK
+from .constants import AlertState, DEESCALATED, ESCALATED, Severity, TransitionKind, UNACK
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
 from .output import Output, prepare_output_class
 from .registry import get_output_registry, get_rule_registry, get_source_registry
@@ -19,6 +20,16 @@ from .store import NullStore
 from .source import Source, normalize_source_output, prepare_source_class
 
 logger = logging.getLogger("kanary.engine")
+
+
+@dataclass(slots=True)
+class _RuleEvaluation:
+    state: AlertState
+    payload: dict[str, object]
+    message: str | None
+    severity: Severity
+    evaluated_at: datetime
+    active_since: datetime | None
 
 
 def _coerce_test_timestamp(value: object) -> object:
@@ -39,6 +50,7 @@ class Engine:
         store: object | None = None,
         node_id: str | None = None,
         output_emit_enabled: bool = True,
+        silence_changed_callback: Callable[[], None] | None = None,
     ) -> None:
         self._source_registry = source_registry or get_source_registry()
         self._rule_registry = rule_registry or get_rule_registry()
@@ -47,6 +59,7 @@ class Engine:
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self.node_id = node_id or socket.gethostname()
         self.output_emit_enabled = output_emit_enabled
+        self._silence_changed_callback = silence_changed_callback
         self.started_at = self._now_fn()
         self.last_reload_at: datetime | None = None
         self.store = store or NullStore()
@@ -56,6 +69,7 @@ class Engine:
         self.outputs = self._instantiate_outputs()
         self.plugin_states: dict[str, PluginStatus] = {}
         self.alerts: dict[str, Alert] = {}
+        self._rule_evaluations: dict[str, _RuleEvaluation] = {}
         self.acknowledgements: dict[str, Acknowledgement] = {}
         self.silences: dict[str, Silence] = {}
         self.source_states: dict[str, SourceState] = {
@@ -284,6 +298,7 @@ class Engine:
             if rule_registry is not None:
                 self._rule_registry = rule_registry
                 self.rules = self._instantiate_rules()
+                self._rule_evaluations.clear()
                 self._rebuild_plugin_states()
 
             if output_registry is not None:
@@ -326,6 +341,7 @@ class Engine:
                 )
                 self.alerts.pop(rule_id, None)
                 self.acknowledgements.pop(rule_id, None)
+                self._rule_evaluations.pop(rule_id, None)
             self._refresh_rule_resolutions()
             self._sync_plugin_definition_files()
             self._refresh_rule_plugin_resolution_status()
@@ -360,11 +376,13 @@ class Engine:
                     )
                 self.alerts.pop(rule_id, None)
                 self.acknowledgements.pop(rule_id, None)
+                self._rule_evaluations.pop(rule_id, None)
                 self.rules.pop(rule_id, None)
                 self._rule_registry.pop(rule_id, None)
 
             for rule_id, rule_cls in replacements.items():
                 self._rule_registry[rule_id] = rule_cls
+                self._rule_evaluations.pop(rule_id, None)
                 rule = rule_cls()
                 self._configure_rule(rule)
                 self.rules[rule_id] = rule
@@ -559,6 +577,8 @@ class Engine:
             )
             self.silences[silence.silence_id] = silence
             self.store.create_silence(silence)
+            self.reconcile_silences(now=silence.created_at)
+            self._notify_silence_changed()
             return silence
 
     def cancel_silence(self, silence_id: str, *, operator: str, reason: str | None = None) -> Silence:
@@ -573,7 +593,35 @@ class Engine:
             silence.cancelled_by = operator
             silence.cancel_reason = reason
             self.store.cancel_silence(silence)
+            self.reconcile_silences(now=silence.cancelled_at)
+            self._notify_silence_changed()
             return silence
+
+    def next_silence_boundary(self, *, now: datetime | None = None) -> datetime | None:
+        with self._lock:
+            current_time = now or self._now_fn()
+            boundaries = [
+                boundary
+                for silence in self.silences.values()
+                if silence.cancelled_at is None
+                for boundary in (silence.start_at, silence.end_at)
+                if boundary > current_time
+            ]
+            return min(boundaries) if boundaries else None
+
+    def reconcile_silences(self, *, now: datetime | None = None) -> None:
+        """Apply silence boundaries using the last completed Rule evaluations."""
+        with self._lock:
+            current_time = now or self._now_fn()
+            for rule in self._rules_in_dependency_order():
+                evaluation = self._rule_evaluations.get(rule.rule_id)
+                if evaluation is None:
+                    continue
+                self._apply_effective_evaluation(rule, evaluation, current_time)
+
+    def _notify_silence_changed(self) -> None:
+        if self._silence_changed_callback is not None:
+            self._silence_changed_callback()
 
     def list_silences(self) -> list[Silence]:
         with self._lock:
@@ -1054,9 +1102,11 @@ class Engine:
         message: str | None,
         severity,
         now: datetime,
+        *,
+        active_since: datetime | None,
+        evaluated_at: datetime,
     ) -> None:
         previous = self.alerts.get(rule.rule_id)
-        active_since = previous.active_since if previous and previous.state != AlertState.OK else None
         acknowledgement = self.acknowledgements.get(rule.rule_id)
         acked_at = acknowledgement.created_at if acknowledgement and state == AlertState.ACKED else None
         acked_by = acknowledgement.operator if acknowledgement and state == AlertState.ACKED else None
@@ -1064,8 +1114,6 @@ class Engine:
         previous_state = previous.state if previous else None
         active_silence_ids = tuple(silence.silence_id for silence in self._matching_active_silences(rule, now))
 
-        if state == AlertState.FIRING and active_since is None:
-            active_since = now
         if state == AlertState.OK:
             active_since = None
             acked_at = None
@@ -1082,7 +1130,7 @@ class Engine:
             payload=payload,
             message=message,
             active_since=active_since,
-            last_evaluated_at=now,
+            last_evaluated_at=evaluated_at,
             acked_at=acked_at,
             acked_by=acked_by,
             ack_reason=ack_reason,
@@ -1105,6 +1153,105 @@ class Engine:
 
         if event is not None and previous is not None:
             self._emit_alert_event(event)
+
+    def _store_rule_evaluation(
+        self,
+        rule: Rule,
+        evaluation: Evaluation,
+        now: datetime,
+    ) -> _RuleEvaluation:
+        previous = self._rule_evaluations.get(rule.rule_id)
+        active_since = (
+            previous.active_since
+            if evaluation.state == AlertState.FIRING
+            and previous is not None
+            and previous.state == AlertState.FIRING
+            else now if evaluation.state == AlertState.FIRING else None
+        )
+        stored = _RuleEvaluation(
+            state=evaluation.state,
+            payload=dict(evaluation.payload or {}),
+            message=evaluation.message,
+            severity=evaluation.severity or rule.severity,
+            evaluated_at=now,
+            active_since=active_since,
+        )
+        self._rule_evaluations[rule.rule_id] = stored
+        return stored
+
+    def _apply_effective_evaluation(
+        self,
+        rule: Rule,
+        evaluation: _RuleEvaluation,
+        now: datetime,
+    ) -> None:
+        dependency_state = self._resolve_dependency_state(rule, evaluation.payload)
+        if dependency_state is not None:
+            self._apply_evaluation(
+                rule,
+                dependency_state.state,
+                dependency_state.payload,
+                dependency_state.message,
+                dependency_state.severity,
+                now,
+                active_since=evaluation.active_since,
+                evaluated_at=evaluation.evaluated_at,
+            )
+            return
+
+        operator_state = self._resolve_operator_state(
+            rule,
+            evaluation.state,
+            evaluation.payload,
+            evaluation.message,
+            evaluation.severity,
+            now,
+        )
+        if operator_state is not None:
+            self._apply_evaluation(
+                rule,
+                operator_state.state,
+                operator_state.payload,
+                operator_state.message,
+                operator_state.severity,
+                now,
+                active_since=evaluation.active_since,
+                evaluated_at=evaluation.evaluated_at,
+            )
+            return
+
+        self._apply_evaluation(
+            rule,
+            evaluation.state,
+            evaluation.payload,
+            evaluation.message,
+            evaluation.severity,
+            now,
+            active_since=evaluation.active_since,
+            evaluated_at=evaluation.evaluated_at,
+        )
+
+    def _rules_in_dependency_order(self) -> list[Rule]:
+        ordered: list[Rule] = []
+        visited: set[str] = set()
+        visiting: set[str] = set()
+
+        def visit(rule_id: str) -> None:
+            if rule_id in visited or rule_id in visiting:
+                return
+            rule = self.rules.get(rule_id)
+            if rule is None:
+                return
+            visiting.add(rule_id)
+            for dependency_rule_id in [*rule.suppressed_by, *rule.depends_on]:
+                visit(dependency_rule_id)
+            visiting.remove(rule_id)
+            visited.add(rule_id)
+            ordered.append(rule)
+
+        for rule_id in self.rules:
+            visit(rule_id)
+        return ordered
 
     def _resolve_dependency_state(
         self,
@@ -1607,6 +1754,7 @@ class Engine:
             )
             dependency_state = self._resolve_dependency_state(rule, source_payload)
             if dependency_state is not None:
+                previous_evaluation = self._rule_evaluations.get(rule.rule_id)
                 self._apply_evaluation(
                     rule,
                     dependency_state.state,
@@ -1614,46 +1762,16 @@ class Engine:
                     dependency_state.message,
                     dependency_state.severity,
                     now,
+                    active_since=previous_evaluation.active_since if previous_evaluation else None,
+                    evaluated_at=previous_evaluation.evaluated_at if previous_evaluation else now,
                 )
             else:
                 evaluation = rule.normalize_evaluation(
                     self._call_rule_evaluate(rule, source_payload, ctx),
                     source_payload,
                 )
-                operator_state = self._resolve_operator_state(
-                    rule,
-                    evaluation.state,
-                    evaluation.payload,
-                    evaluation.message,
-                    evaluation.severity or rule.severity,
-                    now,
-                )
-                if operator_state is not None:
-                    self._apply_evaluation(
-                        rule,
-                        operator_state.state,
-                        operator_state.payload,
-                        operator_state.message,
-                        operator_state.severity,
-                        now,
-                    )
-                    self._set_plugin_ready(status)
-                    status.init_ok = True
-                    status.last_error = None
-                    status.last_error_detail = None
-                    status.run_count += 1
-                    status.last_run_at = now
-                    status.last_success_at = now
-                    status.last_updated_at = now
-                    return
-                self._apply_evaluation(
-                    rule,
-                    evaluation.state,
-                    evaluation.payload,
-                    evaluation.message,
-                    evaluation.severity or rule.severity,
-                    now,
-                )
+                stored_evaluation = self._store_rule_evaluation(rule, evaluation, now)
+                self._apply_effective_evaluation(rule, stored_evaluation, now)
             self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None

@@ -65,6 +65,8 @@ class EngineRuntime:
         self._stop_event = threading.Event()
         self._reload_thread: threading.Thread | None = None
         self._api_thread: threading.Thread | None = None
+        self._silence_thread: threading.Thread | None = None
+        self._silence_wakeup = threading.Event()
         self._source_threads: dict[str, threading.Thread] = {}
         self._source_stop_events: dict[str, threading.Event] = {}
         self.engine: Engine | None = None
@@ -99,11 +101,14 @@ class EngineRuntime:
             store=self.store,
             node_id=self.config.node_id,
             output_emit_enabled=self.config.output_emit_enabled,
+            silence_changed_callback=self._wake_silence_scheduler,
         )
         self.engine.start()
         self._publish_runtime_plugin_overlay()
         logger.info("engine started with %d sources, %d rules, %d outputs", len(self.engine.sources), len(self.engine.rules), len(self.engine.outputs))
         self._sync_source_threads()
+        self._silence_thread = threading.Thread(target=self._silence_boundary_loop, daemon=True)
+        self._silence_thread.start()
         self._api_thread = threading.Thread(target=self.api.start, daemon=True)
         self._api_thread.start()
         logger.info("control API listening on %s:%d", self.config.api_host, self.config.api_port)
@@ -112,11 +117,14 @@ class EngineRuntime:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._silence_wakeup.set()
         self.api.shutdown()
         if self._api_thread is not None:
             self._api_thread.join(timeout=2.0)
         if self._reload_thread is not None:
             self._reload_thread.join(timeout=2.0)
+        if self._silence_thread is not None:
+            self._silence_thread.join(timeout=2.0)
         for stop_event in self._source_stop_events.values():
             stop_event.set()
         for thread in self._source_threads.values():
@@ -138,6 +146,25 @@ class EngineRuntime:
     def _watch_reload_loop(self) -> None:
         while not self._stop_event.wait(self.config.reload_interval):
             self.reload_now_if_changed()
+
+    def _wake_silence_scheduler(self) -> None:
+        self._silence_wakeup.set()
+
+    def _silence_boundary_loop(self) -> None:
+        while not self._stop_event.is_set():
+            engine = self.engine
+            if engine is None:
+                return
+            self._silence_wakeup.clear()
+            boundary = engine.next_silence_boundary()
+            timeout = None
+            if boundary is not None:
+                timeout = max(0.0, (boundary - datetime.now().astimezone()).total_seconds())
+            if self._silence_wakeup.wait(timeout):
+                continue
+            if self._stop_event.is_set():
+                return
+            engine.reconcile_silences()
 
     def reload_now_if_changed(self) -> bool:
         new_signature = self.loader.snapshot_signature()
@@ -245,6 +272,7 @@ class EngineRuntime:
             store=new_store,
             node_id=self.config.node_id,
             output_emit_enabled=self.config.output_emit_enabled,
+            silence_changed_callback=self._wake_silence_scheduler,
         )
 
         try:
@@ -283,6 +311,7 @@ class EngineRuntime:
         self.engine.last_reload_at = self.engine._now_fn()
         self._publish_runtime_plugin_overlay()
         self._sync_source_threads()
+        self._wake_silence_scheduler()
         logger.info(
             "engine full restart applied: sources=%d, rules=%d, outputs=%d",
             len(self.engine.sources),

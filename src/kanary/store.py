@@ -276,9 +276,9 @@ class SQLiteStore:
                     FROM alert_events
                     GROUP BY rule_id
                 ) latest ON latest.max_id = ae.id
-                WHERE ae.current_state = ?
+                WHERE ae.current_state IN (?, ?)
                 """,
-                (AlertState.ACKED.value,),
+                (AlertState.ACKED.value, AlertState.SILENCED.value),
                 )
             ]
             for rule_id in acked_rule_ids:

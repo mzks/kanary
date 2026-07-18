@@ -340,6 +340,8 @@ kanaryctl --base-url http://127.0.0.1:8000 ack local_load.busy --operator operat
 kanaryctl --base-url http://127.0.0.1:8000 silence-for --operator operator_name --minutes 10 --rule 'local_load.*' --reason "load test in progress"
 ```
 
+Scheduled silences update `SILENCED` at their start and end times without waiting for the next Source poll. A boundary does not trigger another poll; it restores the latest normal Rule evaluation, including evaluations completed while the silence was active. Only rules that have not been evaluated since process startup wait for their first poll before their state can change.
+
 ### Lint
 
 Run lint before starting Kanary to catch definition mistakes early.

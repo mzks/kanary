@@ -973,6 +973,75 @@ class EngineTest(unittest.TestCase):
         alerts = self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         self.assertEqual(alerts["postgres.temperature.stale"].state, kanary.AlertState.FIRING)
 
+    def test_scheduled_silence_reconciles_from_the_latest_poll_result(self) -> None:
+        source = self.engine.sources["postgres"]
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        start_at = self.now + timedelta(minutes=5)
+        end_at = start_at + timedelta(minutes=10)
+        self.engine.create_silence(
+            operator="bob",
+            reason="maintenance",
+            start_at=start_at,
+            end_at=end_at,
+            rule_patterns=["postgres.temperature.range"],
+        )
+
+        self.now = start_at
+        self.engine.reconcile_silences(now=self.now)
+        self.assertEqual(
+            self.engine.alerts["postgres.temperature.range"].state,
+            kanary.AlertState.SILENCED,
+        )
+
+        self.now = self.now + timedelta(minutes=1)
+        source.temperature = 50
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        self.assertEqual(
+            self.engine.alerts["postgres.temperature.range"].state,
+            kanary.AlertState.SILENCED,
+        )
+
+        self.now = end_at
+        self.engine.reconcile_silences(now=self.now)
+        alert = self.engine.alerts["postgres.temperature.range"]
+        self.assertEqual(alert.state, kanary.AlertState.OK)
+        self.assertEqual(alert.last_evaluated_at, start_at + timedelta(minutes=1))
+
+    def test_silencing_a_parent_keeps_suppressed_children_suppressed(self) -> None:
+        source = self.engine.sources["postgres"]
+        self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        start_at = self.now + timedelta(minutes=5)
+        end_at = start_at + timedelta(minutes=10)
+        self.engine.create_silence(
+            operator="bob",
+            reason="maintenance",
+            start_at=start_at,
+            end_at=end_at,
+            rule_patterns=["postgres.temperature.range"],
+        )
+
+        self.now = start_at
+        self.engine.reconcile_silences(now=self.now)
+        self.assertEqual(
+            self.engine.alerts["postgres.temperature.range"].state,
+            kanary.AlertState.SILENCED,
+        )
+        self.assertEqual(
+            self.engine.alerts["postgres.humidity.suppressed_range"].state,
+            kanary.AlertState.SUPPRESSED,
+        )
+
+        self.now = end_at
+        self.engine.reconcile_silences(now=self.now)
+        self.assertEqual(
+            self.engine.alerts["postgres.temperature.range"].state,
+            kanary.AlertState.FIRING,
+        )
+        self.assertEqual(
+            self.engine.alerts["postgres.humidity.suppressed_range"].state,
+            kanary.AlertState.SUPPRESSED,
+        )
+
     def test_custom_rule_can_read_multiple_measurements(self) -> None:
         source = self.engine.sources["postgres"]
         alerts = self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
