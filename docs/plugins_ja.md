@@ -332,6 +332,40 @@ class DiscordOutput:
         ...
 ```
 
+### 時間を置いた followup
+
+`kanary.OutputFollowups` は、最初の出力後も alert が対応されていなければ別の処理を呼ぶための、process 内 helper です。
+
+```python
+def init(self):
+    self.followups = kanary.OutputFollowups()
+
+def terminate(self):
+    self.followups.close()
+
+def emit(self, event):
+    followups = self.followups.for_event(event)
+
+    if event.current_state == kanary.FIRING and event.previous_state != kanary.FIRING:
+        followups.now(self.output_to_owner)
+        followups.after(10 * kanary.minute, self.output_to_group)
+        followups.after(20 * kanary.minute, self.output_to_mailing_list)
+        return
+
+    if event.current_state in {
+        kanary.ACKED, kanary.SILENCED, kanary.OK, kanary.SUPPRESSED,
+    }:
+        followups.cancel()
+```
+
+`now()` は現在の event を渡して callback を同期実行します。callback の例外は `emit()` へ伝播するため、Output の retry/reinit の対象になります。
+
+`after()` の時刻は、同じ `rule_id` で最初に followup を登録した時刻からの絶対 offset です。上の例では mailing list は group の実行から 20 分後ではなく、最初の出力から 20 分後に呼ばれます。callback には登録時の event ではなく、`for_event(event)` で最後に確認した event が渡されます。
+
+`cancel(callback)` とすると指定 callback の登録だけを取り消せます。callback がすでに実行を始めている場合は停止できません。登録は memory 上だけに保持されるため process restart 後には引き継がれず、`terminate()` では `close()` を呼びます。
+
+`SILENCED` と `SUPPRESSED` を見て followup を取り消す Output は、default routing でそれらを除外させず、decorator に `exclude_states=[]` を指定する必要があります。完全な例は `examples/output_followups.py` にあります。
+
 実行失敗からの復帰の default:
 
 - `max_retry = 1`

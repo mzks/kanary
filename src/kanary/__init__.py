@@ -4,7 +4,7 @@ from .constants import AlertState, Severity, TransitionKind
 from .engine import Engine
 from .loader import RuleDirectoryLoader
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
-from .output import MailOutput, Output
+from .output import MailOutput, Output, OutputFollowups
 from .plugin_files import load_json, load_toml, plugin_dir
 from .remote import RemoteAlarm, RemoteKanarySource, import_remote_alarms
 from .registry import (
@@ -74,6 +74,7 @@ __all__ = [
     "ok",
     "ok_if",
     "Output",
+    "OutputFollowups",
     "PluginStatus",
     "BufferedSource",
     "cps",

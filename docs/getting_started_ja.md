@@ -281,6 +281,7 @@ thin clientからは, 以下のように実行できます.
 kanaryctl --base-url http://127.0.0.1:8000 ack local_load.busy --operator operator_name --reason "investigating"
 kanaryctl --base-url http://127.0.0.1:8000 silence-for --operator operator_name --minutes 10 --rule 'local_load.*'
 ```
+`ACK`されていても, アラームの状態がOKにもどれば自動的に解除されます.
 
 scheduled silence は、Source の次回 poll を待たずに開始・終了時刻で `SILENCED` を更新します。境界では poll を追加実行せず、silence 中を含む最後の通常 Rule 評価結果へ戻します。process を再起動してから対象 Rule がまだ一度も評価されていない場合だけ、最初の poll まで state は更新されません。
 

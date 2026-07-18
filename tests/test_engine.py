@@ -3463,6 +3463,138 @@ class TestMailOutput(kanary.MailOutput):
     recipients = ["operator@example.invalid"]
 
 
+class OutputFollowupsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+        self.followups = kanary.OutputFollowups()
+        self.addCleanup(self.followups.close)
+
+    def event(
+        self,
+        state=kanary.FIRING,
+        severity=kanary.WARN,
+    ) -> kanary.AlertEvent:
+        alert = kanary.Alert(
+            rule_id="example.alert",
+            state=state,
+            severity=severity,
+        )
+        return kanary.AlertEvent(
+            rule_id=alert.rule_id,
+            previous_state=kanary.OK,
+            current_state=state,
+            previous_severity=kanary.WARN,
+            current_severity=severity,
+            transition=None,
+            alert=alert,
+            occurred_at=self.now,
+        )
+
+    def test_followups_run_in_registration_order_with_latest_event(self) -> None:
+        calls = []
+        completed = threading.Event()
+        scope = self.followups.for_event(self.event())
+
+        def first(event):
+            calls.append(("first", event.current_state, event.current_severity))
+
+        def second(event):
+            calls.append(("second", event.current_state, event.current_severity))
+            completed.set()
+
+        scope.after(0.01, first)
+        scope.after(0.01, second)
+        self.followups.for_event(self.event(kanary.ACKED, kanary.ERROR))
+
+        self.assertTrue(completed.wait(1.0))
+        self.assertEqual(
+            calls,
+            [
+                ("first", kanary.ACKED, kanary.ERROR),
+                ("second", kanary.ACKED, kanary.ERROR),
+            ],
+        )
+
+    def test_now_runs_synchronously_with_current_event(self) -> None:
+        event = self.event(kanary.FIRING, kanary.ERROR)
+        calls = []
+
+        self.followups.for_event(event).now(calls.append)
+
+        self.assertEqual(calls, [event])
+
+    def test_now_propagates_callback_failure(self) -> None:
+        def fail(_event):
+            raise RuntimeError("delivery failed")
+
+        with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+            self.followups.for_event(self.event()).now(fail)
+
+    def test_cancel_removes_all_followups_for_event(self) -> None:
+        called = threading.Event()
+        scope = self.followups.for_event(self.event())
+        scope.after(0.03, lambda _event: called.set())
+
+        scope.cancel()
+
+        self.assertFalse(called.wait(0.1))
+
+    def test_cancel_can_select_a_bound_method_callback(self) -> None:
+        calls = []
+        completed = threading.Event()
+
+        class Receiver:
+            def group(self, _event):
+                calls.append("group")
+
+            def mailing_list(self, _event):
+                calls.append("mailing-list")
+                completed.set()
+
+        receiver = Receiver()
+        scope = self.followups.for_event(self.event())
+        scope.after(0.01, receiver.group)
+        scope.after(0.01, receiver.mailing_list)
+
+        scope.cancel(receiver.group)
+
+        self.assertTrue(completed.wait(1.0))
+        self.assertEqual(calls, ["mailing-list"])
+
+    def test_callback_failure_does_not_stop_later_followups(self) -> None:
+        completed = threading.Event()
+        scope = self.followups.for_event(self.event())
+
+        def fail(_event):
+            raise RuntimeError("delivery failed")
+
+        with self.assertLogs("kanary.output", level="ERROR") as captured:
+            scope.after(0, fail)
+            scope.after(0, lambda _event: completed.set())
+            self.assertTrue(completed.wait(1.0))
+
+        self.assertTrue(any("delivery failed" in line for line in captured.output))
+
+    def test_close_cancels_pending_followups_and_rejects_new_work(self) -> None:
+        called = threading.Event()
+        event = self.event()
+        self.followups.for_event(event).after(0.03, lambda _event: called.set())
+
+        self.followups.close()
+
+        self.assertFalse(called.wait(0.1))
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            self.followups.for_event(event)
+
+    def test_after_rejects_invalid_delays(self) -> None:
+        scope = self.followups.for_event(self.event())
+
+        for delay in (-1, float("inf"), float("nan"), "invalid"):
+            with self.subTest(delay=delay):
+                with self.assertRaisesRegex(ValueError, "delay"):
+                    scope.after(delay, lambda _event: None)
+
+
 class OutputTest(unittest.TestCase):
     def setUp(self) -> None:
         RecordingOutput.events = []

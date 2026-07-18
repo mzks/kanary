@@ -331,6 +331,40 @@ class DiscordOutput:
         ...
 ```
 
+### Delayed Followups
+
+`kanary.OutputFollowups` is an in-process helper for calling another output action when an alert remains unattended after its first delivery.
+
+```python
+def init(self):
+    self.followups = kanary.OutputFollowups()
+
+def terminate(self):
+    self.followups.close()
+
+def emit(self, event):
+    followups = self.followups.for_event(event)
+
+    if event.current_state == kanary.FIRING and event.previous_state != kanary.FIRING:
+        followups.now(self.output_to_owner)
+        followups.after(10 * kanary.minute, self.output_to_group)
+        followups.after(20 * kanary.minute, self.output_to_mailing_list)
+        return
+
+    if event.current_state in {
+        kanary.ACKED, kanary.SILENCED, kanary.OK, kanary.SUPPRESSED,
+    }:
+        followups.cancel()
+```
+
+`now()` invokes its callback synchronously with the current event. Callback exceptions propagate to `emit()`, so the Output retry/reinit policy applies.
+
+Each `after()` delay is an absolute offset from the first followup registered for the same `rule_id`. In this example, the mailing-list action runs 20 minutes after the initial delivery, not 20 minutes after the group action. A callback receives the latest event seen by `for_event(event)`, rather than the event captured when it was registered.
+
+Use `cancel(callback)` to cancel only registrations for that callback. Cancellation cannot stop a callback that has already started. Registrations are kept only in memory and do not survive a process restart; call `close()` from `terminate()`.
+
+An output that cancels followups on `SILENCED` or `SUPPRESSED` must set `exclude_states=[]` in its decorator so those events are not removed by default routing. See `examples/output_followups.py` for a complete example.
+
 Failure recovery defaults:
 
 - `max_retry = 1`
