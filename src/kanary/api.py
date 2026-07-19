@@ -647,6 +647,7 @@ def _git_commit_hash() -> str | None:
 
 def _viewer_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
     payload = _export_alert_payload(engine, alert, rule)
+    payload["active_since"] = alert.active_since
     payload["acked_by"] = alert.acked_by
     payload["acked_at"] = alert.acked_at
     payload["ack_reason"] = alert.ack_reason

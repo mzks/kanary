@@ -2639,6 +2639,7 @@ class ControlAPITest(unittest.TestCase):
         alert = next(item for item in alerts_payload["alerts"] if item["rule_id"] == "postgres.temperature.stale")
         self.assertTrue(str(alert["definition_file"]).endswith("tests/test_engine.py"))
         self.assertIn("matched_outputs", alert)
+        self.assertEqual(alert["active_since"], "2026-03-17T00:20:00+00:00")
 
         source_plugin = next(
             item
@@ -2704,6 +2705,8 @@ class ControlAPITest(unittest.TestCase):
             self.assertIn("DEFAULT_REFRESH_MS", javascript)
             self.assertIn("output-emit-disabled-banner", body)
             self.assertIn("emit_skipped_outputs", javascript)
+            self.assertIn("formatRelativeTime", javascript)
+            self.assertIn("Acknowledged by", javascript)
             self.assertIn("Dashboard", body)
         finally:
             api.shutdown()

@@ -353,6 +353,7 @@ function renderDashboardPage() {
                 <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
                 <span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span>
                 <span>${escapeHtml(alert.acked_by || "Unacked")}</span>
+                <span title="${escapeHtml(alert.active_since || "-")}">Started ${escapeHtml(formatRelativeTime(alert.active_since))}</span>
               </div>
             </div>
             <button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Open</button>
@@ -422,6 +423,7 @@ async function renderDetailPage() {
     row("Rule", alert.rule_id),
     row("State", `<span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>`, true),
     row("Severity", severityLabel(alert.severity)),
+    row("Active Since", alert.active_since ? `${formatRelativeTime(alert.active_since)} (${formatDateTime(alert.active_since)})` : "-"),
     row("Acked By", alert.acked_by || "-"),
     row("Owner", alert.owner || "-"),
     row("Tags", formatTagList(alert.tags, { empty: "-" }), true),
@@ -650,16 +652,18 @@ function updateDetailActionAvailability(alert) {
   const ackButton = document.getElementById("ack-button");
   const unackButton = document.getElementById("unack-button");
   const ackNotice = document.getElementById("ack-notice");
-  const duplicateAck = shouldSkipRepeatedAlertAction("ack", alert.rule_id, alert, currentAckActionInput());
+  const alreadyAcknowledged = alert.state === "ACKED";
   if (ackButton) {
-    ackButton.disabled = state.pendingActions.has("acknowledge") || duplicateAck;
+    ackButton.disabled = state.pendingActions.has("acknowledge") || alreadyAcknowledged;
   }
   if (unackButton) {
     unackButton.disabled = alert.state !== "ACKED" || state.pendingActions.has("acknowledge");
   }
   if (ackNotice) {
-    if (duplicateAck) {
-      ackNotice.textContent = "ACK is unavailable because this alert and the current ACK input match the last acknowledged version.";
+    if (alreadyAcknowledged) {
+      ackNotice.textContent = alert.acked_by
+        ? `Acknowledged by ${alert.acked_by}. Use UNACK to reopen it.`
+        : "This alert is acknowledged. Use UNACK to reopen it.";
       ackNotice.classList.remove("hidden");
     } else {
       ackNotice.textContent = "";
@@ -673,7 +677,7 @@ async function submitAck() {
   if (!alert) {
     return;
   }
-  if (state.pendingActions.has("acknowledge")) {
+  if (alert.state === "ACKED" || state.pendingActions.has("acknowledge")) {
     return;
   }
   const operator = document.getElementById("ack-operator").value.trim();
@@ -684,15 +688,13 @@ async function submitAck() {
   }
   await runPendingAction("acknowledge", ["ack-button", "unack-button"], async () => {
     const latestAlert = await fetchLatestAlert(alert.rule_id);
-    const actionInput = { operator, reason };
-    if (shouldSkipRepeatedAlertAction("ack", alert.rule_id, latestAlert, actionInput)) {
-      setRefreshStatus("Skipped duplicate ACK: the alert content and ACK input have not changed.", false);
+    if (latestAlert && latestAlert.state === "ACKED") {
+      setRefreshStatus("Skipped ACK: the alert is already acknowledged.", false);
       await refreshAll();
       return;
     }
     await postJson(`/alerts/${encodeURIComponent(alert.rule_id)}/ack`, { operator, reason });
     await refreshAll();
-    rememberAlertActionSnapshot("ack", alert.rule_id, actionInput);
   });
 }
 
@@ -1167,6 +1169,28 @@ function formatDateTime(value) {
     options.timeZoneName = "short";
   }
   return parsed.toLocaleString(undefined, options);
+}
+
+function formatRelativeTime(value) {
+  const timestamp = parseIsoTime(value);
+  if (timestamp <= 0) {
+    return "-";
+  }
+  const elapsedSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (elapsedSeconds < 45) {
+    return "just now";
+  }
+  const elapsedMinutes = Math.round(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) {
+    return `${elapsedMinutes}m ago`;
+  }
+  const hours = Math.floor(elapsedMinutes / 60);
+  const minutes = elapsedMinutes % 60;
+  if (hours < 24) {
+    return minutes === 0 ? `${hours}h ago` : `${hours}h ${minutes}m ago`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function addTimeZoneOption(select, value, label) {
@@ -1729,15 +1753,6 @@ function normalizeAlertSnapshot(alert, actionInput = null) {
     };
   }
   return snapshot;
-}
-
-function currentAckActionInput() {
-  const operatorField = document.getElementById("ack-operator");
-  const reasonField = document.getElementById("ack-reason");
-  return {
-    operator: operatorField ? operatorField.value.trim() : "",
-    reason: reasonField ? reasonField.value.trim() : "",
-  };
 }
 
 function stripTimestamps(value) {
