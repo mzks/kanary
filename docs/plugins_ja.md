@@ -398,6 +398,12 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 - `count()`
 - `rate()`
 
+#### PushSource
+
+`kanary.PushSource` は通常の polling path の外から最新 result を渡すための helper です。plugin が独自 webhook server を持つ、MQTT を subscribe するなどして、その callback から `self.push(kanary.inputs(...))` を呼びます。`PushSource.poll()` は最後に push された result を返し、push が無ければ `no_update` を返します。
+
+push 後は既定で通常の source scheduler を起こします。次の regular poll まで評価を遅らせたい場合だけ `wake_on_push = False` を指定します。source の `interval` は regular な再評価周期として残り、`StaleRule` などの時間条件に使われます。plugin 自身が webhook を持つ例は `examples/webhook_push_source.py` を参照してください。この例は標準ライブラリだけで完結させていますが、外部公開する場合は reverse proxy または本番向け listener を使ってください。
+
 ### Rule 側
 
 #### RangeRule

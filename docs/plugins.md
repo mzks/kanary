@@ -397,6 +397,12 @@ Available helpers:
 - `count()`
 - `rate()`
 
+#### PushSource
+
+`kanary.PushSource` accepts the latest result from code outside the normal polling path. A plugin may run its own webhook server, subscribe to MQTT, or use another consumer, then call `self.push(kanary.inputs(...))` from that callback. `PushSource.poll()` returns the latest pushed result and otherwise returns `no_update`.
+
+Pushes wake the normal source scheduler by default. Set `wake_on_push = False` only when evaluation should wait until the next regular poll. The source's `interval` remains the regular re-evaluation cadence, which is useful for time-based rules such as `StaleRule`. See `examples/webhook_push_source.py` for a webhook implementation owned by the plugin. It uses the standard library for a small self-contained example; use a reverse proxy or a production-ready listener when exposing it publicly.
+
 ### Rule Helpers
 
 #### RangeRule

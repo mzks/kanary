@@ -1090,6 +1090,65 @@ class BufferedSourceTest(unittest.TestCase):
             source.terminate()
 
 
+class PushSourceTest(unittest.TestCase):
+    def test_push_source_returns_latest_snapshot_and_preserves_input_details(self) -> None:
+        class ExamplePushSource(kanary.PushSource):
+            source_id = "push.example"
+            interval = 60.0
+
+        source = ExamplePushSource()
+        received_at = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+        source.init()
+        source.push(kanary.inputs("temperature", 80, received_at))
+        source.push(
+            kanary.inputs(
+                ("temperature", 92.1, datetime(2026, 7, 20, 10, 1, 30, tzinfo=timezone.utc), {"unit": "C"}),
+                ("fan_rpm", 1200, datetime(2026, 7, 20, 10, 1, tzinfo=timezone.utc)),
+                metadata={"device": "lab-a"},
+            )
+        )
+
+        result = source.poll()
+
+        self.assertEqual(result.metadata, {"device": "lab-a"})
+        self.assertEqual(result.measurements[0].value, 92.1)
+        self.assertEqual(
+            result.measurements[0].timestamp,
+            datetime(2026, 7, 20, 10, 1, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(result.measurements[0].metadata, {"unit": "C"})
+        self.assertEqual(
+            result.measurements[1].timestamp,
+            datetime(2026, 7, 20, 10, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(source.poll().status, "no_update")
+
+    def test_push_source_wakes_the_scheduler_by_default(self) -> None:
+        class ExamplePushSource(kanary.PushSource):
+            source_id = "push.example"
+            interval = 60.0
+
+        runtime = EngineRuntime(RuntimeConfig(rule_directories=[], api_port=0))
+        engine = kanary.Engine(
+            source_registry={"push.example": ExamplePushSource},
+            rule_registry={},
+            output_registry={},
+        )
+        engine.start()
+        runtime.engine = engine
+        runtime._source_wake_events["push.example"] = threading.Event()
+        runtime._bind_push_wakeup("push.example", runtime._source_wake_events["push.example"])
+        try:
+            engine.sources["push.example"].push({"temperature": 92.1})
+            self.assertTrue(runtime._source_wake_events["push.example"].is_set())
+            result = engine.sources["push.example"].poll()
+            self.assertEqual(result.measurements[0].name, "temperature")
+            self.assertEqual(result.measurements[0].value, 92.1)
+        finally:
+            runtime.api._server.server_close()
+            engine.shutdown()
+
+
 class SourceScheduleTest(unittest.TestCase):
     def test_parse_cron_schedule_supports_five_fields_and_macros(self) -> None:
         from kanary.schedule import parse_schedule

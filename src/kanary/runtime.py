@@ -17,7 +17,7 @@ from .engine import Engine
 from .filtering import apply_excludes
 from .loader import RuleDirectoryLoader
 from .models import PluginStatus
-from .source import compiled_schedule
+from .source import PushSource, compiled_schedule
 from .store import build_store
 
 logger = logging.getLogger("kanary.runtime")
@@ -69,6 +69,7 @@ class EngineRuntime:
         self._silence_wakeup = threading.Event()
         self._source_threads: dict[str, threading.Thread] = {}
         self._source_stop_events: dict[str, threading.Event] = {}
+        self._source_wake_events: dict[str, threading.Event] = {}
         self.engine: Engine | None = None
         self._signature: tuple[tuple[str, int], ...] = ()
         self._discovered_snapshot = None
@@ -127,6 +128,8 @@ class EngineRuntime:
             self._silence_thread.join(timeout=2.0)
         for stop_event in self._source_stop_events.values():
             stop_event.set()
+        for wake_event in self._source_wake_events.values():
+            wake_event.set()
         for thread in self._source_threads.values():
             thread.join(timeout=2.0)
         if self.engine is not None:
@@ -434,20 +437,25 @@ class EngineRuntime:
 
         for source_id in existing_source_ids - current_source_ids:
             self._source_stop_events[source_id].set()
+            self._source_wake_events[source_id].set()
             self._source_threads[source_id].join(timeout=2.0)
             del self._source_stop_events[source_id]
+            del self._source_wake_events[source_id]
             del self._source_threads[source_id]
 
         for source_id in current_source_ids - existing_source_ids:
             if not self._source_is_initialized(source_id):
                 continue
             stop_event = threading.Event()
+            wake_event = threading.Event()
             thread = threading.Thread(
                 target=self._source_loop,
-                args=(source_id, stop_event),
+                args=(source_id, stop_event, wake_event),
                 daemon=True,
             )
             self._source_stop_events[source_id] = stop_event
+            self._source_wake_events[source_id] = wake_event
+            self._bind_push_wakeup(source_id, wake_event)
             self._source_threads[source_id] = thread
             thread.start()
 
@@ -458,8 +466,10 @@ class EngineRuntime:
             if stop_event is None or thread is None:
                 continue
             stop_event.set()
+            self._source_wake_events[source_id].set()
             thread.join(timeout=2.0)
             self._source_stop_events.pop(source_id, None)
+            self._source_wake_events.pop(source_id, None)
             self._source_threads.pop(source_id, None)
 
     def _start_source_threads(self, source_ids: set[str]) -> None:
@@ -471,12 +481,15 @@ class EngineRuntime:
             if not self._source_is_initialized(source_id):
                 continue
             stop_event = threading.Event()
+            wake_event = threading.Event()
             thread = threading.Thread(
                 target=self._source_loop,
-                args=(source_id, stop_event),
+                args=(source_id, stop_event, wake_event),
                 daemon=True,
             )
             self._source_stop_events[source_id] = stop_event
+            self._source_wake_events[source_id] = wake_event
+            self._bind_push_wakeup(source_id, wake_event)
             self._source_threads[source_id] = thread
             thread.start()
 
@@ -486,10 +499,23 @@ class EngineRuntime:
         status = self.engine._plugin_status("source", source_id)
         return status.init_ok
 
-    def _source_loop(self, source_id: str, stop_event: threading.Event) -> None:
+    def _bind_push_wakeup(self, source_id: str, wake_event: threading.Event) -> None:
+        if self.engine is None:
+            return
+        source = self.engine.sources.get(source_id)
+        if isinstance(source, PushSource):
+            source._set_push_wakeup(wake_event.set)
+
+    def _source_loop(
+        self,
+        source_id: str,
+        stop_event: threading.Event,
+        wake_event: threading.Event,
+    ) -> None:
         assert self.engine is not None
         next_run_at: datetime | None = None
         while not stop_event.is_set() and not self._stop_event.is_set():
+            wake_event.clear()
             source = self.engine.sources.get(source_id)
             if source is None:
                 return
@@ -511,7 +537,7 @@ class EngineRuntime:
             if schedule is not None:
                 next_run_at = schedule.next_after(now)
                 continue
-            stop_event.wait(float(source.interval))
+            wake_event.wait(float(source.interval))
 
     def _poll_source_with_recovery(
         self,

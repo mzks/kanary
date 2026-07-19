@@ -1,7 +1,8 @@
 from collections import deque
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
-from typing import Any
+import threading
+from typing import Any, Callable
 
 from .models import Measurement, SourceResult
 from .schedule import CronSchedule, parse_schedule
@@ -25,6 +26,33 @@ class Source:
     def terminate(self) -> None:
         return None
 
+
+class PushSource(Source):
+    """A source that accepts its latest result from external code."""
+
+    wake_on_push: bool = True
+
+    def init(self) -> None:
+        self._push_lock = threading.Lock()
+        self._pending_push: SourceResult | None = None
+        self._push_wakeup: Callable[[], None] | None = None
+
+    def push(self, result: Any, *, now: datetime | None = None) -> None:
+        """Store one input snapshot for the next poll."""
+        normalized = normalize_source_output(result, now=now)
+        with self._push_lock:
+            self._pending_push = normalized
+        if self.wake_on_push and self._push_wakeup is not None:
+            self._push_wakeup()
+
+    def _set_push_wakeup(self, wakeup: Callable[[], None] | None) -> None:
+        self._push_wakeup = wakeup
+
+    def poll(self) -> SourceResult:
+        with self._push_lock:
+            result = self._pending_push
+            self._pending_push = None
+        return result or no_update(reason="waiting for pushed inputs")
 
 class BufferedSource(Source):
     history_limit: int = 1024
@@ -309,6 +337,12 @@ def prepare_source_class(cls: type[Any]) -> type[Any]:
     _setdefault(cls, "description", None)
     _setdefault(cls, "max_retry", 1)
     _setdefault(cls, "max_reinit", 1)
+    if issubclass(cls, PushSource):
+        _setdefault(cls, "wake_on_push", True)
+        if not isinstance(cls.wake_on_push, bool):
+            raise ValueError(
+                f"source '{getattr(cls, 'source_id', cls.__name__)}' wake_on_push must be a boolean"
+            )
     if "init" not in cls.__dict__ and getattr(cls, "init", None) in {None, Source.init}:
         cls.init = Source.init
     if "terminate" not in cls.__dict__ and getattr(cls, "terminate", None) in {None, Source.terminate}:

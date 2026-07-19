@@ -41,7 +41,7 @@ from .rule import (
     warn_if,
 )
 from .runtime import EngineRuntime, RuntimeConfig
-from .source import BufferedSource, Source, inputs, no_data, no_update, skip
+from .source import BufferedSource, PushSource, Source, inputs, no_data, no_update, skip
 from .store import NullStore, SQLiteStore, build_store
 from .units import Hz, MHz, cps, day, format_rate, format_time, hour, kHz, microsecond, millisecond, minute, nanosecond, second
 
@@ -77,6 +77,7 @@ __all__ = [
     "OutputFollowups",
     "PluginStatus",
     "BufferedSource",
+    "PushSource",
     "cps",
     "day",
     "format_rate",
