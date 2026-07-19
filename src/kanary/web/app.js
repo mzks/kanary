@@ -307,9 +307,24 @@ function renderDashboardPage() {
   const severityCounts = countBySeverity(activeAlerts);
   const failedPlugins = state.plugins.filter((plugin) => plugin.state === "FAILED").length;
   const cards = [
-    { label: "FIRING", value: counts.FIRING || 0, note: "Requires attention now", className: "firing" },
-    { label: "ACKED", value: counts.ACKED || 0, note: "Someone already responded", className: "acked" },
-    { label: "SILENCED", value: counts.SILENCED || 0, note: "Muted by operator action", className: "silenced" },
+    {
+      label: "FIRING",
+      value: counts.FIRING || 0,
+      className: "firing",
+      ...activeAlertAgeNote(activeAlerts, "FIRING", "Requires attention now"),
+    },
+    {
+      label: "ACKED",
+      value: counts.ACKED || 0,
+      className: "acked",
+      ...activeAlertAgeNote(activeAlerts, "ACKED", "Someone already responded"),
+    },
+    {
+      label: "SILENCED",
+      value: counts.SILENCED || 0,
+      className: "silenced",
+      ...activeAlertAgeNote(activeAlerts, "SILENCED", "Muted by operator action"),
+    },
     { label: "FAILED PLUGINS", value: failedPlugins, note: "Runtime components in failed state", className: "failed" },
   ];
   document.getElementById("dashboard-cards").innerHTML = cards
@@ -318,7 +333,7 @@ function renderDashboardPage() {
         <article class="hero-card ${card.className}">
           <div class="hero-label">${escapeHtml(card.label)}</div>
           <strong>${escapeHtml(String(card.value))}</strong>
-          <div class="hero-note">${escapeHtml(card.note)}</div>
+          <div class="hero-note"${card.noteTitle ? ` title="${escapeHtml(card.noteTitle)}"` : ""}>${escapeHtml(card.note)}</div>
         </article>
       `
     )
@@ -353,7 +368,7 @@ function renderDashboardPage() {
                 <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
                 <span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span>
                 <span>${escapeHtml(alert.acked_by || "Unacked")}</span>
-                <span title="${escapeHtml(alert.active_since || "-")}">Started ${escapeHtml(formatRelativeTime(alert.active_since))}</span>
+                <span title="${escapeHtml(alert.active_since || "-")}">Active since ${escapeHtml(formatRelativeTime(alert.active_since))}</span>
               </div>
             </div>
             <button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Open</button>
@@ -1122,6 +1137,27 @@ function countBySeverity(alerts) {
     counts[label] = (counts[label] || 0) + 1;
     return counts;
   }, {});
+}
+
+function activeAlertAgeNote(alerts, alertState, fallback) {
+  const matching = alerts
+    .filter((alert) => alert.state === alertState && parseIsoTime(alert.active_since) > 0)
+    .sort((left, right) => parseIsoTime(left.active_since) - parseIsoTime(right.active_since));
+  if (matching.length === 0) {
+    return { note: fallback, noteTitle: "" };
+  }
+  const oldest = matching[0];
+  if (matching.length === 1) {
+    return {
+      note: `Active since ${formatRelativeTime(oldest.active_since)}`,
+      noteTitle: oldest.active_since,
+    };
+  }
+  const newest = matching[matching.length - 1];
+  return {
+    note: `Oldest ${formatRelativeTime(oldest.active_since)} · Newest ${formatRelativeTime(newest.active_since)}`,
+    noteTitle: `Oldest: ${oldest.active_since}\nNewest: ${newest.active_since}`,
+  };
 }
 
 function getSelectedAlert() {

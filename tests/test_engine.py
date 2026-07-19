@@ -2706,6 +2706,8 @@ class ControlAPITest(unittest.TestCase):
             self.assertIn("output-emit-disabled-banner", body)
             self.assertIn("emit_skipped_outputs", javascript)
             self.assertIn("formatRelativeTime", javascript)
+            self.assertIn("Oldest", javascript)
+            self.assertIn("Newest", javascript)
             self.assertIn("Acknowledged by", javascript)
             self.assertIn("Dashboard", body)
         finally:
