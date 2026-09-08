@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
@@ -87,6 +88,23 @@ class NullStore:
             "alert_events": [],
             "output_dispatches": [],
             "operator_actions": [],
+        }
+
+    def get_alert_history(
+        self,
+        *,
+        limit: int = 100,
+        after_alert_id: int | None = None,
+        after_action_id: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "enabled": False,
+            "entries": [],
+            "latest_alert_id": after_alert_id or 0,
+            "latest_action_id": after_action_id or 0,
+            "alert_has_more": False,
+            "action_has_more": False,
+            "initial_truncated": False,
         }
 
 
@@ -534,7 +552,12 @@ class SQLiteStore:
             silence_id=silence.silence_id,
             operator=silence.cancelled_by or "",
             reason=silence.cancel_reason,
-            details={},
+            details={
+                "start_at": silence.start_at.isoformat(),
+                "end_at": silence.end_at.isoformat(),
+                "rule_patterns": list(silence.rule_patterns),
+                "tags": list(silence.tags),
+            },
             created_at=silence.cancelled_at or datetime.now().astimezone(),
         )
 
@@ -619,6 +642,163 @@ class SQLiteStore:
                 "output_dispatches": output_dispatches,
                 "operator_actions": operator_actions,
             }
+
+    def get_alert_history(
+        self,
+        *,
+        limit: int = 100,
+        after_alert_id: int | None = None,
+        after_action_id: int | None = None,
+    ) -> dict[str, Any]:
+        primary_conn = self._require_conn()
+        shared_connection = str(self.path) == ":memory:"
+        # WAL allows this short read snapshot to run without taking the writer lock
+        # used by source evaluation and operator actions.
+        conn = (
+            primary_conn
+            if shared_connection
+            else sqlite3.connect(self.path, check_same_thread=False)
+        )
+        conn.row_factory = sqlite3.Row
+        if not shared_connection:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+        incremental = after_alert_id is not None or after_action_id is not None
+        try:
+            with self._lock if shared_connection else nullcontext():
+                alert_where: list[str] = [
+                    "NOT (ae.previous_state IS NULL AND ae.current_state = 'OK')"
+                ]
+                alert_params: list[object] = []
+                if incremental:
+                    alert_where.append("ae.id > ?")
+                    alert_params.append(after_alert_id or 0)
+                alert_order = "ASC" if incremental else "DESC"
+                alert_rows = list(
+                    conn.execute(
+                        f"""
+                    SELECT
+                        ae.id,
+                        ae.rule_id,
+                        ae.previous_state,
+                        ae.current_state,
+                        ae.previous_severity,
+                        ae.current_severity,
+                        ae.transition,
+                        ae.severity,
+                        ae.owner,
+                        ae.message,
+                        ae.tags_json,
+                        ae.occurred_at,
+                        ae.definition_file,
+                        ae.matched_outputs_json
+                    FROM alert_events AS ae
+                    WHERE {' AND '.join(alert_where)}
+                    ORDER BY ae.id {alert_order}
+                    LIMIT ?
+                    """,
+                        (*alert_params, limit + 1),
+                    )
+                )
+
+                action_where: list[str] = []
+                action_params: list[object] = []
+                if incremental:
+                    action_where.append("oa.id > ?")
+                    action_params.append(after_action_id or 0)
+                action_order = "ASC" if incremental else "DESC"
+                action_where_sql = f"WHERE {' AND '.join(action_where)}" if action_where else ""
+                action_rows = list(
+                    conn.execute(
+                        f"""
+                    SELECT oa.*
+                    FROM operator_actions AS oa
+                    {action_where_sql}
+                    ORDER BY oa.id {action_order}
+                    LIMIT ?
+                    """,
+                        (*action_params, limit + 1),
+                    )
+                )
+
+                alert_has_more = len(alert_rows) > limit
+                action_has_more = len(action_rows) > limit
+                alert_rows = alert_rows[:limit]
+                action_rows = action_rows[:limit]
+
+                max_alert_id = int(
+                    conn.execute("SELECT COALESCE(MAX(id), 0) FROM alert_events").fetchone()[0]
+                )
+                max_action_id = int(
+                    conn.execute("SELECT COALESCE(MAX(id), 0) FROM operator_actions").fetchone()[0]
+                )
+
+                if incremental:
+                    latest_alert_id = max((row["id"] for row in alert_rows), default=after_alert_id or 0)
+                    latest_action_id = max((row["id"] for row in action_rows), default=after_action_id or 0)
+                    if not alert_has_more:
+                        latest_alert_id = max(latest_alert_id, max_alert_id)
+                    if not action_has_more:
+                        latest_action_id = max(latest_action_id, max_action_id)
+                else:
+                    latest_alert_id = max_alert_id
+                    latest_action_id = max_action_id
+        finally:
+            if not shared_connection:
+                conn.close()
+
+        alert_entries = [
+            {
+                "kind": "alert_event",
+                "id": row["id"],
+                "occurred_at": row["occurred_at"],
+                "rule_id": row["rule_id"],
+                "previous_state": row["previous_state"],
+                "current_state": row["current_state"],
+                "transition": row["transition"],
+                "severity": row["severity"],
+                "previous_severity": row["previous_severity"],
+                "current_severity": row["current_severity"] if row["current_severity"] is not None else row["severity"],
+                "owner": row["owner"],
+                "message": row["message"],
+                "tags": json.loads(row["tags_json"]),
+                "matched_outputs": json.loads(row["matched_outputs_json"]),
+                "definition_file": row["definition_file"],
+                "action_type": None,
+                "operator": None,
+                "reason": None,
+            }
+            for row in alert_rows
+        ]
+        action_entries = [
+            {
+                "kind": "operator_action",
+                "id": row["id"],
+                "occurred_at": row["created_at"],
+                "action_type": row["action_type"],
+                "rule_id": row["rule_id"],
+                "silence_id": row["silence_id"],
+                "operator": row["operator"],
+                "reason": row["reason"],
+                "details": json.loads(row["details_json"]),
+            }
+            for row in action_rows
+        ]
+
+        merged = sorted(
+            alert_entries + action_entries,
+            key=lambda entry: (_parse_datetime(entry["occurred_at"]), entry["id"]),
+            reverse=True,
+        )
+        return {
+            "enabled": True,
+            "entries": merged,
+            "latest_alert_id": latest_alert_id,
+            "latest_action_id": latest_action_id,
+            "alert_has_more": alert_has_more if incremental else False,
+            "action_has_more": action_has_more if incremental else False,
+            "initial_truncated": not incremental and (alert_has_more or action_has_more),
+        }
 
     def _record_operator_action(
         self,

@@ -662,6 +662,21 @@ class Engine:
             rule = self.rules.get(rule_id)
             return self.store.get_rule_history(rule_id, list(getattr(rule, "tags", [])) if rule is not None else [])
 
+    def get_alert_history(
+        self,
+        *,
+        limit: int = 100,
+        after_alert_id: int | None = None,
+        after_action_id: int | None = None,
+    ) -> dict[str, object]:
+        # History is an independent SQLite snapshot; do not stall source evaluation
+        # behind the engine-wide state lock while the viewer reads it.
+        return self.store.get_alert_history(
+            limit=limit,
+            after_alert_id=after_alert_id,
+            after_action_id=after_action_id,
+        )
+
     def test_poll(self, source_id: str) -> dict[str, object]:
         with self._lock:
             source = self.sources[source_id]

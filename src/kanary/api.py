@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import tomllib
 from typing import Callable
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .engine import Engine
 from .constants import AlertState
@@ -198,6 +198,30 @@ class ControlAPI:
                         return
                     rule_id = unquote(request_path[len("/history/") :]).strip("/")
                     self._write_json(HTTPStatus.OK, engine.get_rule_history(rule_id))
+                    return
+
+                if request_path == "/alert-history":
+                    engine = engine_getter()
+                    if engine is None:
+                        self._write_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"status": "starting"},
+                        )
+                        return
+                    query = parse_qs(urlsplit(self.path).query)
+                    try:
+                        limit = _parse_query_int(query, "limit", default=500, minimum=1, maximum=500)
+                        after_alert_id = _parse_query_int(query, "after_alert_id", default=None, minimum=0)
+                        after_action_id = _parse_query_int(query, "after_action_id", default=None, minimum=0)
+                    except ValueError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    payload = engine.get_alert_history(
+                        limit=limit,
+                        after_alert_id=after_alert_id,
+                        after_action_id=after_action_id,
+                    )
+                    self._write_json(HTTPStatus.OK, payload)
                     return
 
                 if request_path == "/silences":
@@ -520,6 +544,28 @@ def _json_default(value: object) -> str:
 
 def _parse_datetime(value: str):
     return _json_datetime_fromisoformat(value)
+
+
+def _parse_query_int(
+    query: dict[str, list[str]],
+    key: str,
+    *,
+    default: int | None,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int | None:
+    values = query.get(key)
+    if not values or values[0] == "":
+        return default
+    try:
+        parsed = int(values[0])
+    except ValueError as exc:
+        raise ValueError(f"invalid integer for query parameter {key!r}: {values[0]!r}") from exc
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
 
 
 def _parse_alert_state(value: str) -> AlertState:
