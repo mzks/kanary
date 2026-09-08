@@ -48,6 +48,7 @@
         <nav class="sidebar">
           <a href="#dashboard" class="nav-link" data-route="dashboard"><span class="nav-link-title">Dashboard</span></a>
           <a href="#alerts" class="nav-link" data-route="alerts"><span class="nav-link-title">Alerts</span></a>
+          <a href="#history" class="nav-link" data-route="history"><span class="nav-link-title">History</span></a>
           <a href="#sources" class="nav-link" data-route="sources">
             <span class="nav-link-title">Sources</span>
             <span class="nav-link-meta">
@@ -210,6 +211,49 @@
                     <pre id="payload-content" class="code-block"></pre>
                   </section>
                 </div>
+              </div>
+            </section>
+          </section>
+
+          <section id="page-history" class="page hidden">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-kicker">Timeline</div>
+                  <h2>Alarm History</h2>
+                </div>
+                <div class="toolbar">
+                  <input id="history-filter" type="search" placeholder="Filter loaded history" />
+                  <select id="history-state-filter">
+                    <option value="">All states</option>
+                    <option value="FIRING">FIRING</option>
+                    <option value="ACKED">ACKED</option>
+                    <option value="SILENCED">SILENCED</option>
+                    <option value="SUPPRESSED">SUPPRESSED</option>
+                    <option value="OK">OK</option>
+                  </select>
+                </div>
+              </div>
+              <div id="history-disabled-notice" class="muted hidden">
+                History is disabled. Start KANARY with <code>--state-db /path/to/kanary.db</code> or set <code>KANARY_SQLITE_PATH</code> to persist alert and operator history.
+              </div>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Rule</th>
+                      <th>Change</th>
+                      <th>Severity</th>
+                      <th>Tags</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody id="history-body"></tbody>
+                </table>
+              </div>
+              <div class="inline-actions">
+                <span id="history-status" class="muted"></span>
               </div>
             </section>
           </section>

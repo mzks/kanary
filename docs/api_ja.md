@@ -23,6 +23,11 @@
 - `GET /history/{rule_id}`
   1 つの rule に対する alert event、output dispatch summary、operator action を返します。
   output dispatchには、`--no-output-emit`により実行されなかったmatched outputを`emit_skipped_outputs`として含めます。
+- `GET /alert-history`
+  全 rule の alert event と operator action を、新しい順の統合タイムラインとして返します。
+  初回requestでは各history streamから直近の行をそれぞれ最大`limit`件返します。2回目以降は`after_alert_id`と`after_action_id`を指定すると、それぞれのIDより後に追加された行だけを取得できます。`limit`はstreamごとに最大500件です。
+  filterはWeb viewerが読み込み済みのhistoryに対して適用します。Web viewerはACK/UNACK操作を対応するalert eventへ統合して表示します。
+  初回評価がOKだっただけのevent (`INITIAL -> OK`) は省略します。初回から非OKだったeventは返します。
 - `GET /silences`
   active, scheduled, cancelled の silence を返します。
   raw API 自体には `EXPIRED` 状態は追加しません。Web viewer と `kanaryctl` では、すでに終了した silence を表示上 `EXPIRED` と導出することがあります。

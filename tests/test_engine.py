@@ -4,7 +4,9 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
+import subprocess
 from tempfile import TemporaryDirectory
 import textwrap
 import threading
@@ -257,6 +259,48 @@ class EngineTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.engine.shutdown()
+
+    def test_history_read_does_not_hold_engine_lock(self) -> None:
+        history_started = threading.Event()
+        release_history = threading.Event()
+        evaluation_errors: list[BaseException] = []
+
+        class BlockingHistoryStore(kanary.NullStore):
+            def get_alert_history(self, **kwargs):
+                history_started.set()
+                release_history.wait(timeout=2.0)
+                return super().get_alert_history(**kwargs)
+
+        engine = kanary.Engine(now_fn=lambda: self.now, output_registry={}, store=BlockingHistoryStore())
+        engine.start()
+        history_thread = threading.Thread(target=engine.get_alert_history)
+        evaluation_finished = threading.Event()
+        try:
+            history_thread.start()
+            self.assertTrue(history_started.wait(timeout=1.0))
+            source = engine.sources["postgres"]
+            payload = source.poll({})
+
+            def evaluate_source() -> None:
+                try:
+                    engine.evaluate_source(source.source_id, payload, now=self.now)
+                except BaseException as exc:
+                    evaluation_errors.append(exc)
+                finally:
+                    evaluation_finished.set()
+
+            evaluation_thread = threading.Thread(target=evaluate_source)
+            evaluation_thread.start()
+            completed_while_history_waited = evaluation_finished.wait(timeout=0.5)
+            release_history.set()
+            evaluation_thread.join(timeout=1.0)
+        finally:
+            release_history.set()
+            history_thread.join(timeout=1.0)
+            engine.shutdown()
+
+        self.assertTrue(completed_while_history_waited)
+        self.assertEqual(evaluation_errors, [])
 
     def test_stale_rule_fires(self) -> None:
         source = self.engine.sources["postgres"]
@@ -2672,7 +2716,7 @@ class RuntimeRecoveryTest(unittest.TestCase):
         self.assertEqual(attempts, ["poll-1-1", "wait-1", "poll-1-2", "wait-4", "terminate", "init", "poll-2-1", "terminate"])
 
 
-class ControlAPITest(unittest.TestCase):
+class ControlAPIIntegrationTest(unittest.TestCase):
     def test_alerts_and_plugins_include_definition_file(self) -> None:
         engine = kanary.Engine(output_registry={})
         engine.start()
@@ -2769,6 +2813,12 @@ class ControlAPITest(unittest.TestCase):
             self.assertIn("Newest", javascript)
             self.assertIn("Acknowledged by", javascript)
             self.assertIn("Dashboard", body)
+            self.assertIn("Alarm History", body)
+            self.assertIn("mergeHistoryEntries", javascript)
+            self.assertIn("HISTORY_BATCH_LIMIT", javascript)
+            self.assertIn("Targets:", javascript)
+            self.assertIn("previous_severity", javascript)
+            self.assertNotIn("history-load-more-button", body)
         finally:
             api.shutdown()
             thread.join(timeout=2.0)
@@ -3009,7 +3059,11 @@ class ControlAPITest(unittest.TestCase):
             engine.shutdown()
 
     def test_silence_api_returns_broad_target_warning(self) -> None:
-        engine = kanary.Engine(output_registry={})
+        engine = kanary.Engine(
+            source_registry={"postgres": SlowPostgresSource},
+            rule_registry={"postgres.temperature.stale": SlowPostgresStale},
+            output_registry={},
+        )
         engine.start()
         api = kanary.ControlAPI(
             engine_getter=lambda: engine,
@@ -3065,9 +3119,10 @@ class ControlAPITest(unittest.TestCase):
             )
             local_engine.start()
             local_source = local_engine.sources["remote-api"]
+            polled = local_source.poll()
             alerts = local_engine.evaluate_source(
                 local_source.source_id,
-                local_source.poll({"engine": local_engine}),
+                polled,
                 now=now,
             )
         finally:
@@ -3110,9 +3165,10 @@ class ControlAPITest(unittest.TestCase):
             )
             local_engine.start()
             local_source = local_engine.sources["remote-api"]
+            polled = local_source.poll()
             alerts = local_engine.evaluate_source(
                 local_source.source_id,
-                local_source.poll({"engine": local_engine}),
+                polled,
                 now=now,
             )
         finally:
@@ -3122,10 +3178,11 @@ class ControlAPITest(unittest.TestCase):
             if local_engine is not None:
                 local_engine.shutdown()
 
-        self.assertEqual(alerts, {})
+        self.assertEqual(polled.measurements, [])
+        self.assertEqual(alerts["mirror.postgres.temperature.stale"].state, kanary.AlertState.OK)
 
     def test_remote_alarm_can_propagate_ack_and_silence(self) -> None:
-        remote_engine = kanary.Engine(output_registry={})
+        remote_engine = kanary.Engine(output_registry={}, node_id="remote-a")
         remote_engine.start()
         remote_api = kanary.ControlAPI(
             engine_getter=lambda: remote_engine,
@@ -3146,12 +3203,13 @@ class ControlAPITest(unittest.TestCase):
                 source_registry={"remote-api": RemoteAPISource},
                 rule_registry={"mirror.postgres.temperature.stale": MirroredTemperatureStale},
                 output_registry={},
+                node_id="local-a",
             )
             local_engine.start()
             local_source = local_engine.sources["remote-api"]
             local_engine.evaluate_source(
                 local_source.source_id,
-                local_source.poll({"engine": local_engine}),
+                local_source.poll(),
                 now=now,
             )
 
@@ -3190,7 +3248,7 @@ class ControlAPITest(unittest.TestCase):
                 local_engine.shutdown()
 
     def test_remote_alarm_can_unack_remote_acknowledgement(self) -> None:
-        remote_engine = kanary.Engine(output_registry={})
+        remote_engine = kanary.Engine(output_registry={}, node_id="remote-a")
         remote_engine.start()
         remote_api = kanary.ControlAPI(
             engine_getter=lambda: remote_engine,
@@ -3216,12 +3274,13 @@ class ControlAPITest(unittest.TestCase):
                 source_registry={"remote-api": RemoteAPISource},
                 rule_registry={"mirror.postgres.temperature.stale": MirroredTemperatureStale},
                 output_registry={},
+                node_id="local-a",
             )
             local_engine.start()
             local_source = local_engine.sources["remote-api"]
             local_engine.evaluate_source(
                 local_source.source_id,
-                local_source.poll({"engine": local_engine}),
+                local_source.poll(),
                 now=now,
             )
             self.assertEqual(
@@ -3244,6 +3303,20 @@ class ControlAPITest(unittest.TestCase):
             remote_engine.shutdown()
             if local_engine is not None:
                 local_engine.shutdown()
+
+
+class WebJavaScriptTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for Web UI tests")
+    def test_history_javascript(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["node", "tests/test_web_history.mjs"],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class SQLiteStoreTest(unittest.TestCase):
@@ -3276,6 +3349,93 @@ class SQLiteStoreTest(unittest.TestCase):
             store = kanary.SQLiteStore(db_path)
             with self.assertRaisesRegex(RuntimeError, "unsupported legacy state DB schema"):
                 store.initialize()
+
+    def test_alert_history_incremental_read_uses_ids_not_event_time(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = kanary.SQLiteStore(Path(tmp) / "kanary.db")
+            store.initialize()
+            try:
+                def append_event(rule_id: str, occurred_at: datetime) -> None:
+                    alert = kanary.Alert(
+                        rule_id=rule_id,
+                        state=kanary.AlertState.FIRING,
+                        severity=kanary.WARN,
+                    )
+                    store.append_alert_event(
+                        kanary.AlertEvent(
+                            rule_id=rule_id,
+                            previous_state=kanary.AlertState.OK,
+                            current_state=kanary.AlertState.FIRING,
+                            previous_severity=kanary.WARN,
+                            current_severity=kanary.WARN,
+                            transition=None,
+                            alert=alert,
+                            occurred_at=occurred_at,
+                        ),
+                        definition_file=None,
+                        matched_outputs=[],
+                    )
+
+                now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+                append_event("first", now)
+                initial = store.get_alert_history(limit=10)
+
+                expected_rule_ids = [f"recorded-later-{index}" for index in range(5)]
+                for index, rule_id in enumerate(expected_rule_ids, start=1):
+                    append_event(rule_id, now - timedelta(days=index))
+
+                delta_entries = []
+                alert_cursor = initial["latest_alert_id"]
+                action_cursor = initial["latest_action_id"]
+                saw_partial_batch = False
+                for _ in range(5):
+                    delta = store.get_alert_history(
+                        limit=2,
+                        after_alert_id=alert_cursor,
+                        after_action_id=action_cursor,
+                    )
+                    delta_entries.extend(delta["entries"])
+                    alert_cursor = delta["latest_alert_id"]
+                    action_cursor = delta["latest_action_id"]
+                    saw_partial_batch = saw_partial_batch or delta["alert_has_more"]
+                    if not delta["alert_has_more"] and not delta["action_has_more"]:
+                        break
+            finally:
+                store.close()
+
+        self.assertTrue(saw_partial_batch)
+        self.assertEqual(
+            [entry["rule_id"] for entry in delta_entries],
+            expected_rule_ids,
+        )
+
+    def test_alert_history_read_does_not_take_store_writer_lock(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = kanary.SQLiteStore(Path(tmp) / "kanary.db")
+            store.initialize()
+            read_finished = threading.Event()
+            read_errors: list[BaseException] = []
+
+            def read_history() -> None:
+                try:
+                    store.get_alert_history()
+                except BaseException as exc:
+                    read_errors.append(exc)
+                finally:
+                    read_finished.set()
+
+            read_thread = threading.Thread(target=read_history)
+            store._lock.acquire()
+            try:
+                read_thread.start()
+                completed_while_writer_lock_was_held = read_finished.wait(timeout=0.5)
+            finally:
+                store._lock.release()
+                read_thread.join(timeout=1.0)
+                store.close()
+
+        self.assertTrue(completed_while_writer_lock_was_held)
+        self.assertEqual(read_errors, [])
 
     def test_store_restores_acknowledgements_and_silences(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -3385,6 +3545,108 @@ class SQLiteStoreTest(unittest.TestCase):
                 self.assertEqual(payload["alert_events"][0]["transition"], "UNACK")
                 self.assertEqual(payload["alert_events"][0]["previous_severity"], int(kanary.ERROR))
                 self.assertEqual(payload["alert_events"][0]["current_severity"], int(kanary.ERROR))
+
+                silence = engine.create_silence(
+                    operator="bob",
+                    reason="maintenance",
+                    start_at=now,
+                    end_at=now + timedelta(minutes=10),
+                    rule_patterns=["postgres.temperature.stale"],
+                    tags=["infra"],
+                )
+
+                timeline = fetch_json(f"http://127.0.0.1:{port}/alert-history?limit=100")
+                self.assertTrue(timeline["enabled"])
+                self.assertFalse(
+                    any(
+                        entry["kind"] == "alert_event"
+                        and entry["previous_state"] is None
+                        and entry["current_state"] == "OK"
+                        for entry in timeline["entries"]
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        entry["kind"] == "alert_event"
+                        and entry["previous_state"] is None
+                        and entry["current_state"] == "FIRING"
+                        for entry in timeline["entries"]
+                    )
+                )
+                ack_entry = next(
+                    entry
+                    for entry in timeline["entries"]
+                    if entry["kind"] == "alert_event"
+                    and entry["rule_id"] == "postgres.temperature.stale"
+                    and entry["current_state"] == "ACKED"
+                )
+                self.assertIsNone(ack_entry["action_type"])
+                self.assertEqual(ack_entry["previous_severity"], int(kanary.ERROR))
+                self.assertEqual(ack_entry["current_severity"], int(kanary.ERROR))
+                ack_action = next(
+                    entry
+                    for entry in timeline["entries"]
+                    if entry["kind"] == "operator_action" and entry["action_type"] == "ack"
+                )
+                self.assertEqual(ack_action["operator"], "alice")
+                self.assertEqual(ack_action["reason"], "checking")
+                self.assertTrue(
+                    any(
+                        entry["kind"] == "operator_action"
+                        and entry["action_type"] == "create_silence"
+                        and entry["operator"] == "bob"
+                        for entry in timeline["entries"]
+                    )
+                )
+                self.assertGreater(timeline["latest_alert_id"], 0)
+                self.assertGreater(timeline["latest_action_id"], 0)
+
+                engine.cancel_silence(silence.silence_id, operator="carol", reason="finished")
+                engine.acknowledge("postgres.temperature.stale", operator="carol", reason="follow-up")
+                delta = fetch_json(
+                    f"http://127.0.0.1:{port}/alert-history"
+                    f"?limit=100&after_alert_id={timeline['latest_alert_id']}"
+                    f"&after_action_id={timeline['latest_action_id']}"
+                )
+                self.assertTrue(
+                    any(
+                        entry["kind"] == "alert_event"
+                        and entry["current_state"] == "ACKED"
+                        for entry in delta["entries"]
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        entry["kind"] == "operator_action"
+                        and entry["action_type"] == "ack"
+                        and entry["operator"] == "carol"
+                        for entry in delta["entries"]
+                    )
+                )
+                cancel_entry = next(
+                    entry
+                    for entry in delta["entries"]
+                    if entry["kind"] == "operator_action"
+                    and entry["action_type"] == "cancel_silence"
+                    and entry["silence_id"] == silence.silence_id
+                )
+                self.assertEqual(cancel_entry["details"]["rule_patterns"], ["postgres.temperature.stale"])
+                self.assertEqual(cancel_entry["details"]["tags"], ["infra"])
+                self.assertEqual(cancel_entry["details"]["start_at"], now.isoformat())
+                self.assertEqual(cancel_entry["details"]["end_at"], (now + timedelta(minutes=10)).isoformat())
+                self.assertFalse(delta["alert_has_more"])
+                self.assertFalse(delta["action_has_more"])
+
+                no_changes = fetch_json(
+                    f"http://127.0.0.1:{port}/alert-history"
+                    f"?after_alert_id={delta['latest_alert_id']}"
+                    f"&after_action_id={delta['latest_action_id']}"
+                )
+                self.assertEqual(no_changes["entries"], [])
+
+                with self.assertRaises(HTTPError) as invalid_cursor:
+                    fetch_json(f"http://127.0.0.1:{port}/alert-history?after_alert_id=invalid")
+                self.assertEqual(invalid_cursor.exception.code, 400)
             finally:
                 api.shutdown()
                 thread.join(timeout=2.0)

@@ -1,4 +1,6 @@
 const DEFAULT_REFRESH_MS = 5000;
+const HISTORY_BATCH_LIMIT = 500;
+const HISTORY_ENTRY_LIMIT = 1000;
 const DASHBOARD_STATES = new Set(["FIRING", "ACKED", "SILENCED"]);
 
 const state = {
@@ -18,6 +20,19 @@ const state = {
   outputFilter: "",
   silenceFilter: "",
   hidePastSilences: true,
+  historyEntries: [],
+  historyFilter: "",
+  historyStateFilter: "",
+  historyEnabled: true,
+  historyLoaded: false,
+  historyLoading: false,
+  historyRequestToken: 0,
+  historyCursor: {
+    alertId: null,
+    actionId: null,
+  },
+  historyCatchingUp: false,
+  historyInitialTruncated: false,
   refreshMs: DEFAULT_REFRESH_MS,
   refreshTimer: null,
   timeZone: "browser",
@@ -63,6 +78,14 @@ function bindControls() {
   document.getElementById("silence-hide-past").addEventListener("change", (event) => {
     state.hidePastSilences = Boolean(event.target.checked);
     renderSilencesPage();
+  });
+  document.getElementById("history-filter").addEventListener("input", (event) => {
+    state.historyFilter = event.target.value.toLowerCase();
+    renderHistoryPage();
+  });
+  document.getElementById("history-state-filter").addEventListener("change", (event) => {
+    state.historyStateFilter = event.target.value;
+    renderHistoryPage();
   });
   document.getElementById("ack-button").addEventListener("click", submitAck);
   document.getElementById("unack-button").addEventListener("click", submitUnack);
@@ -142,6 +165,9 @@ function renderRoute() {
   if (state.route === "detail") {
     renderDetailPage();
   }
+  if (state.route === "history") {
+    maybeRefreshHistory();
+  }
 }
 
 function scheduleRefresh() {
@@ -172,6 +198,7 @@ function handleTimeZoneChange(event) {
   renderRulesPage();
   renderOutputsPage();
   renderSilencesPage();
+  renderHistoryPage();
   if (state.route === "detail") {
     renderDetailPage();
   }
@@ -204,6 +231,9 @@ async function refreshAll() {
     renderSilencesPage();
     if (state.route === "detail") {
       renderDetailPage();
+    }
+    if (state.route === "history") {
+      maybeRefreshHistory();
     }
     setRefreshStatus(`Updated ${new Date().toLocaleTimeString()}`, false);
   } catch (error) {
@@ -640,7 +670,7 @@ function renderHistory(history) {
       html: `
         <div class="history-item history-item-${escapeHtml(historyStateClass(event.current_state))}">
           <div class="history-meta" title="${escapeHtml(event.occurred_at || "-")}">${escapeHtml(formatDateTime(event.occurred_at))} event</div>
-          <div class="history-title">${escapeHtml((event.previous_state || "-") + " -> " + event.current_state)}</div>
+          <div class="history-title">${formatHistoryStateChange(event.previous_state, event.current_state, event.transition)}</div>
           <div>${escapeHtml(event.message || "")}</div>
         </div>
       `,
@@ -651,7 +681,7 @@ function renderHistory(history) {
       html: `
         <div class="history-item">
           <div class="history-meta" title="${escapeHtml(dispatch.occurred_at || "-")}">${escapeHtml(formatDateTime(dispatch.occurred_at))} output routing</div>
-          <div class="history-title">${escapeHtml((dispatch.previous_state || "-") + " -> " + dispatch.current_state)}</div>
+          <div class="history-title">${formatHistoryStateChange(dispatch.previous_state, dispatch.current_state, null)}</div>
           <div>Matched: ${escapeHtml((dispatch.matched_outputs || []).join(", ") || "-")}</div>
           <div>Delivered: ${escapeHtml((dispatch.delivered_outputs || []).join(", ") || "-")}</div>
           <div>Emit skipped: ${escapeHtml((dispatch.emit_skipped_outputs || []).join(", ") || "-")}</div>
@@ -661,6 +691,273 @@ function renderHistory(history) {
   ]
     .sort((left, right) => parseIsoTime(right.at) - parseIsoTime(left.at));
   container.innerHTML = entries.map((entry) => entry.html).join("") || `<div class="history-item">No history</div>`;
+}
+
+function maybeRefreshHistory() {
+  if (state.route !== "history" || state.historyLoading) {
+    return;
+  }
+  loadHistory();
+}
+
+async function loadHistory() {
+  const initialLoad = !state.historyLoaded;
+  const requestToken = ++state.historyRequestToken;
+  state.historyLoading = true;
+  renderHistoryPage();
+  try {
+    let requestIsInitial = initialLoad;
+    do {
+      const params = new URLSearchParams({ limit: String(HISTORY_BATCH_LIMIT) });
+      if (!requestIsInitial) {
+        params.set("after_alert_id", String(state.historyCursor.alertId ?? 0));
+        params.set("after_action_id", String(state.historyCursor.actionId ?? 0));
+      }
+      const payload = await getJson(`/alert-history?${params.toString()}`);
+      if (requestToken !== state.historyRequestToken) {
+        return;
+      }
+      state.historyEnabled = payload.enabled !== false;
+      state.historyEntries = requestIsInitial
+        ? mergeHistoryEntries([], payload.entries || [])
+        : mergeHistoryEntries(state.historyEntries, payload.entries || []);
+      state.historyCursor = {
+        alertId: payload.latest_alert_id ?? state.historyCursor.alertId ?? 0,
+        actionId: payload.latest_action_id ?? state.historyCursor.actionId ?? 0,
+      };
+      state.historyCatchingUp = Boolean(payload.alert_has_more || payload.action_has_more);
+      if (requestIsInitial) {
+        state.historyInitialTruncated = Boolean(payload.initial_truncated);
+      }
+      state.historyLoaded = true;
+      requestIsInitial = false;
+      document.getElementById("history-status").textContent = "";
+      if (state.historyCatchingUp) {
+        renderHistoryPage();
+      }
+    } while (state.historyCatchingUp);
+  } catch (error) {
+    if (requestToken === state.historyRequestToken) {
+      document.getElementById("history-status").textContent = `Load failed: ${error.message}`;
+    }
+  } finally {
+    if (requestToken === state.historyRequestToken) {
+      state.historyLoading = false;
+      renderHistoryPage();
+    }
+  }
+}
+
+function mergeHistoryEntries(existingEntries, freshEntries) {
+  const entriesById = new Map(
+    existingEntries.map((entry) => [`${entry.kind}:${entry.id}`, entry])
+  );
+  for (const entry of freshEntries) {
+    entriesById.set(`${entry.kind}:${entry.id}`, entry);
+  }
+  let entries = [...entriesById.values()];
+  const actionsByEvent = new Map(
+    entries
+      .filter((entry) => entry.kind === "operator_action" && ["ack", "unack"].includes(entry.action_type))
+      .map((entry) => [`${entry.action_type}:${entry.rule_id}:${entry.occurred_at}`, entry])
+  );
+  entries = entries.map((entry) => {
+    if (entry.kind !== "alert_event") {
+      return entry;
+    }
+    const actionType = entry.current_state === "ACKED" ? "ack" : entry.transition === "UNACK" ? "unack" : null;
+    const action = actionType ? actionsByEvent.get(`${actionType}:${entry.rule_id}:${entry.occurred_at}`) : null;
+    return action
+      ? { ...entry, action_type: action.action_type, operator: action.operator, reason: action.reason }
+      : entry;
+  });
+  const foldedActions = new Set(
+    entries
+      .filter((entry) => entry.kind === "alert_event" && ["ack", "unack"].includes(entry.action_type))
+      .map((entry) => `${entry.action_type}:${entry.rule_id}:${entry.occurred_at}`)
+  );
+  return entries
+    .filter(
+      (entry) => entry.kind !== "operator_action"
+        || !foldedActions.has(`${entry.action_type}:${entry.rule_id}:${entry.occurred_at}`)
+    )
+    .sort(
+      (left, right) => parseIsoTime(right.occurred_at) - parseIsoTime(left.occurred_at)
+        || String(left.kind).localeCompare(String(right.kind))
+        || Number(right.id) - Number(left.id)
+    )
+    .slice(0, HISTORY_ENTRY_LIMIT);
+}
+
+function renderHistoryPage() {
+  const tbody = document.getElementById("history-body");
+  const notice = document.getElementById("history-disabled-notice");
+  const status = document.getElementById("history-status");
+  if (!tbody || !notice || !status) {
+    return;
+  }
+
+  if (state.historyLoaded && !state.historyEnabled) {
+    notice.classList.remove("hidden");
+    tbody.innerHTML = "";
+    return;
+  }
+  notice.classList.add("hidden");
+
+  const rows = state.historyEntries.filter(historyEntryMatchesFilters);
+  tbody.innerHTML =
+    rows.map(renderHistoryRow).join("") ||
+    `<tr><td colspan="6" class="muted">${state.historyLoaded ? "No history" : "Loading..."}</td></tr>`;
+
+  if (!status.textContent) {
+    if (state.historyLoading && !state.historyLoaded) {
+      status.textContent = "Loading...";
+    } else if (state.historyLoaded) {
+      const qualifier = rows.length === state.historyEntries.length ? "" : ` (${rows.length} shown)`;
+      const note = state.historyCatchingUp
+        ? " · catching up"
+        : state.historyInitialTruncated
+          ? " · recent entries only"
+          : "";
+      status.textContent = `${state.historyEntries.length} entries loaded${qualifier}${note}`;
+    }
+  }
+}
+
+function historyEntryMatchesFilters(entry) {
+  if (state.historyStateFilter && entry.current_state !== state.historyStateFilter) {
+    return false;
+  }
+  const filter = state.historyFilter.trim();
+  if (!filter) {
+    return true;
+  }
+  return JSON.stringify([
+    entry.rule_id,
+    entry.previous_state,
+    entry.current_state,
+    entry.transition,
+    entry.owner,
+    entry.message,
+    entry.tags,
+    entry.matched_outputs,
+    entry.action_type,
+    entry.operator,
+    entry.reason,
+    entry.silence_id,
+    entry.details,
+  ]).toLowerCase().includes(filter);
+}
+
+function renderHistoryRow(entry) {
+  const hasCurrentAlert = entry.rule_id && state.alerts.some((alert) => alert.rule_id === entry.rule_id);
+  const ruleCell = hasCurrentAlert
+    ? `<a class="history-rule-link" href="#alert/${encodeURIComponent(entry.rule_id)}">${escapeHtml(entry.rule_id)}</a>`
+    : entry.rule_id
+      ? `<span title="This rule is not currently loaded">${escapeHtml(entry.rule_id)}</span>`
+      : `<span class="muted">-</span>`;
+  const timeCell = `<span title="${escapeHtml(entry.occurred_at || "-")}">${escapeHtml(formatDateTime(entry.occurred_at))}</span>`;
+
+  if (entry.kind === "alert_event") {
+    const detailParts = [];
+    if (entry.operator) {
+      detailParts.push(
+        `${historyActionLabel(entry.action_type)} by ${entry.operator}${entry.reason ? `: ${entry.reason}` : ""}`
+      );
+    }
+    if (entry.message) {
+      detailParts.push(entry.message);
+    }
+    return `
+      <tr>
+        <td>${timeCell}</td>
+        <td class="plugin-primary-cell"><div class="plugin-title">${ruleCell}</div></td>
+        <td>${formatHistoryStateChange(entry.previous_state, entry.current_state, entry.transition)}</td>
+        <td>${formatHistorySeverity(entry.previous_severity, entry.current_severity ?? entry.severity)}</td>
+        <td>${formatTagList(entry.tags, { empty: "-" })}</td>
+        <td class="history-detail">${detailParts.map((part) => `<div>${escapeHtml(part)}</div>`).join("") || `<span class="muted">-</span>`}</td>
+      </tr>
+    `;
+  }
+
+  return `
+      <tr>
+        <td>${timeCell}</td>
+        <td class="plugin-primary-cell"><div class="plugin-title">${ruleCell}</div></td>
+        <td><span class="meta-chip">${escapeHtml(historyActionLabel(entry.action_type))}</span></td>
+        <td>${formatOperatorActionSeverity(entry)}</td>
+        <td>${formatTagList(entry.details?.tags, { empty: "-" })}</td>
+        <td class="history-detail">${formatOperatorActionDetail(entry)}</td>
+      </tr>
+  `;
+}
+
+function formatOperatorActionSeverity(entry) {
+  const previousSeverity = entry.details?.previous_severity;
+  if (previousSeverity == null) {
+    return `<span class="muted">-</span>`;
+  }
+  const label = severityLabel(previousSeverity);
+  return `<span class="severity-badge severity-${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+}
+
+function formatOperatorActionDetail(entry) {
+  const details = entry.details || {};
+  const parts = [];
+  if (["create_silence", "cancel_silence"].includes(entry.action_type)) {
+    const targets = [
+      ...(details.rule_patterns || []),
+      ...(details.tags || []).map((tag) => `tag:${tag}`),
+    ];
+    if (targets.length) {
+      parts.push(`Targets: ${targets.join(", ")}`);
+    }
+    if (details.start_at || details.end_at) {
+      parts.push(`Window: ${formatDateTime(details.start_at)} – ${formatDateTime(details.end_at)}`);
+    }
+  } else if (entry.action_type === "rule_removed" && details.previous_state) {
+    parts.push(`Previous state: ${details.previous_state}`);
+  }
+  if (entry.silence_id) {
+    parts.push(`Silence: ${entry.silence_id}`);
+  }
+  parts.push(`${entry.operator || "unknown"}${entry.reason ? ": " + entry.reason : ""}`);
+  return parts.map((part) => `<div>${escapeHtml(part)}</div>`).join("");
+}
+
+function formatHistoryStateChange(previousState, currentState, transition) {
+  const previousPill = previousState
+    ? `<span class="state-pill state-${escapeHtml(previousState)}">${escapeHtml(previousState)}</span>`
+    : `<span class="state-pill history-state-initial">INITIAL</span>`;
+  const transitionLabel = transition
+    ? `<div class="history-transition-label">${escapeHtml(transition)}</div>`
+    : "";
+  return `
+    <div class="history-change-block">
+      <span class="history-state-change">
+        ${previousPill}
+        <span class="history-change-arrow" aria-hidden="true">→</span>
+        <span class="state-pill state-${escapeHtml(currentState)}">${escapeHtml(currentState)}</span>
+      </span>
+      ${transitionLabel}
+    </div>
+  `;
+}
+
+function formatHistorySeverity(previousSeverity, currentSeverity) {
+  const currentLabel = severityLabel(currentSeverity);
+  const currentBadge = `<span class="severity-badge severity-${escapeHtml(currentLabel)}">${escapeHtml(currentLabel)}</span>`;
+  if (previousSeverity == null || Number(previousSeverity) === Number(currentSeverity)) {
+    return currentBadge;
+  }
+  const previousLabel = severityLabel(previousSeverity);
+  return `
+    <span class="history-severity-change">
+      <span class="severity-badge severity-${escapeHtml(previousLabel)}">${escapeHtml(previousLabel)}</span>
+      <span aria-hidden="true">→</span>
+      ${currentBadge}
+    </span>
+  `;
 }
 
 function updateDetailActionAvailability(alert) {
@@ -1074,6 +1371,7 @@ function historyActionLabel(actionType) {
     unack: "Acknowledgement Removed",
     create_silence: "Silence Created",
     cancel_silence: "Silence Cancelled",
+    rule_removed: "Rule Removed",
   }[actionType] || "Operator Action";
 }
 

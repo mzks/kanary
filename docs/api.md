@@ -23,6 +23,11 @@ Use `--api-host` and `--api-port` to change the bind address.
 - `GET /history/{rule_id}`
   Returns alert events, output dispatch summaries, and operator actions for one rule.
   Output dispatches include `emit_skipped_outputs` for matched outputs skipped by `--no-output-emit`.
+- `GET /alert-history`
+  Returns alert events and operator actions across all rules as one newest-first timeline.
+  The first request returns up to `limit` recent rows from each history stream. Subsequent requests can pass `after_alert_id` and `after_action_id` to fetch only rows added after those IDs; `limit` is bounded to 500 per stream.
+  Filtering is performed by the Web viewer over its loaded history. The Web viewer folds ACK and UNACK actions into their corresponding alert events.
+  Initial evaluations that are already OK (`INITIAL -> OK`) are omitted; initially non-OK events are retained.
 - `GET /silences`
   Returns active, scheduled, and cancelled silences.
   The raw API does not add a separate `EXPIRED` state. The Web viewer and `kanaryctl` may derive `EXPIRED` locally for silences whose window has already ended.
