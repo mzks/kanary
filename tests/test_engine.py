@@ -10,6 +10,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 import textwrap
 import threading
+import time
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -2136,7 +2137,88 @@ class RuntimeExcludeTest(unittest.TestCase):
         self.assertEqual(snapshot.rules["example.rule"].matched_outputs, ["discord"])
 
 
+def _wait_until(predicate, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
 class RuntimeTargetedReloadTest(unittest.TestCase):
+    def test_rule_timer_scheduler_runs_and_tracks_rule_reload_and_removal(self) -> None:
+        evaluations: list[str] = []
+
+        class TimerSource:
+            source_id = "timer.source"
+            interval = 60.0
+
+            def poll(self):
+                return kanary.inputs([("value", 1, datetime.now(timezone.utc))])
+
+        class TimerRule(kanary.Rule):
+            rule_id = "timer.rule"
+            inputs = ["timer.source:value"]
+            severity = kanary.ERROR
+            tags = ["timer"]
+            evaluation_interval = 0.05
+
+            def evaluate(self, ctx):
+                evaluations.append("initial")
+                return kanary.ok("timer evaluated")
+
+        class ReloadedTimerRule(kanary.Rule):
+            rule_id = "timer.rule"
+            inputs = ["timer.source:value"]
+            severity = kanary.ERROR
+            tags = ["timer"]
+            evaluation_interval = 0.02
+
+            def evaluate(self, ctx):
+                evaluations.append("reloaded")
+                return kanary.ok("reloaded timer evaluated")
+
+        with TemporaryDirectory() as tmp:
+            runtime = EngineRuntime(RuntimeConfig(rule_directories=[Path(tmp)], api_port=0))
+            runtime.engine = kanary.Engine(
+                source_registry={"timer.source": TimerSource},
+                rule_registry={"timer.rule": TimerRule},
+                output_registry={},
+            )
+            runtime.engine.start()
+            source = runtime.engine.sources["timer.source"]
+            runtime.engine.evaluate_source("timer.source", source.poll())
+            source_poll_count = runtime.engine.source_states["timer.source"].poll_count
+            evaluations.clear()
+            runtime._rule_timer_thread = threading.Thread(target=runtime._rule_timer_loop, daemon=True)
+            runtime._rule_timer_thread.start()
+            try:
+                self.assertTrue(_wait_until(lambda: "initial" in evaluations, timeout=1.0))
+                self.assertEqual(
+                    runtime.engine.source_states["timer.source"].poll_count,
+                    source_poll_count,
+                )
+
+                runtime.engine.reload_rule_plugins(
+                    replacements={"timer.rule": ReloadedTimerRule},
+                    removed_rule_ids=set(),
+                )
+                self.assertTrue(_wait_until(lambda: "reloaded" in evaluations, timeout=1.0))
+
+                runtime.engine.reload_rule_plugins(
+                    replacements={},
+                    removed_rule_ids={"timer.rule"},
+                )
+                count_after_removal = len(evaluations)
+                time.sleep(0.15)
+                self.assertEqual(len(evaluations), count_after_removal)
+            finally:
+                runtime._stop_event.set()
+                runtime._rule_timer_thread.join(timeout=1.0)
+                runtime.api._server.server_close()
+                runtime.engine.shutdown()
+
     def _write_plugins(self, directory: Path, *, rule_threshold: int = 10, output_label: str = "v1") -> None:
         path = directory / "plugins.py"
         path.write_text(
