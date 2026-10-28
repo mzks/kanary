@@ -87,9 +87,13 @@ def poll(self):
 
 外部 API の一時的な通信失敗は、通常は例外として送出します。Kanary が Source の retry / reinit と plugin status を扱います。失敗を `no_data()` に変換すると、通信失敗と正常な空結果を区別できなくなります。
 
+起動時の`init()`に失敗したSourceは実行threadを開始せず、現在は自動復旧しません。依存先の復旧後に明示reloadまたはprocess restartが必要です。Ruleの`evaluate()`例外は監視対象のAlertを自動的に`FIRING`にはせず、そのRule pluginを`FAILED`にします。
+
 ### 外部 I/O、timestamp、poll 間隔
 
 HTTP、DB、socket などの外部 I/O には必ず timeout を設定します。timeout が無いと 1 回の poll が不定に止まり、次回の評価も遅れます。
+
+同じ制約は Output の `emit()` にも適用されます。`emit()` は短時間で完了し、外部 I/O には有限の timeout を設定してください。長時間待つ処理を `emit()` 内で同期実行すると、ほかのSource更新とRule評価も待たされます。遅延した追加処理には `OutputFollowups` を使い、永続配送が必要なら message broker へ短時間で投入するOutputを用意します。
 
 `Measurement.timestamp` には、可能なら取得時刻ではなく監視対象が実際に観測した時刻を渡します。Kanary が poll した時刻を入れると、古いデータを取得しても新しい値に見え、StaleRule や rate の判断が不正確になります。観測時刻を取得できない場合だけ、poll 時刻を使います。
 

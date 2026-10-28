@@ -66,6 +66,7 @@ class EngineRuntime:
         self._reload_thread: threading.Thread | None = None
         self._api_thread: threading.Thread | None = None
         self._silence_thread: threading.Thread | None = None
+        self._rule_timer_thread: threading.Thread | None = None
         self._silence_wakeup = threading.Event()
         self._source_threads: dict[str, threading.Thread] = {}
         self._source_stop_events: dict[str, threading.Event] = {}
@@ -108,6 +109,8 @@ class EngineRuntime:
         self._publish_runtime_plugin_overlay()
         logger.info("engine started with %d sources, %d rules, %d outputs", len(self.engine.sources), len(self.engine.rules), len(self.engine.outputs))
         self._sync_source_threads()
+        self._rule_timer_thread = threading.Thread(target=self._rule_timer_loop, daemon=True)
+        self._rule_timer_thread.start()
         self._silence_thread = threading.Thread(target=self._silence_boundary_loop, daemon=True)
         self._silence_thread.start()
         self._api_thread = threading.Thread(target=self.api.start, daemon=True)
@@ -126,6 +129,8 @@ class EngineRuntime:
             self._reload_thread.join(timeout=2.0)
         if self._silence_thread is not None:
             self._silence_thread.join(timeout=2.0)
+        if self._rule_timer_thread is not None:
+            self._rule_timer_thread.join(timeout=2.0)
         for stop_event in self._source_stop_events.values():
             stop_event.set()
         for wake_event in self._source_wake_events.values():
@@ -538,6 +543,37 @@ class EngineRuntime:
                 next_run_at = schedule.next_after(now)
                 continue
             wake_event.wait(float(source.interval))
+
+    def _rule_timer_loop(self) -> None:
+        deadlines: dict[str, float] = {}
+        scheduled_intervals: dict[str, float] = {}
+        while not self._stop_event.wait(0.1):
+            engine = self.engine
+            if engine is None:
+                continue
+            monotonic_now = time.monotonic()
+            configured: dict[str, float] = {}
+            for rule_id, rule in list(engine.rules.items()):
+                interval = getattr(rule, "evaluation_interval", None)
+                if interval is not None:
+                    configured[rule_id] = float(interval)
+            for rule_id in list(deadlines):
+                if rule_id not in configured:
+                    deadlines.pop(rule_id, None)
+                    scheduled_intervals.pop(rule_id, None)
+            for rule_id, interval in configured.items():
+                if scheduled_intervals.get(rule_id) != interval:
+                    scheduled_intervals[rule_id] = interval
+                    deadlines[rule_id] = monotonic_now + interval
+                deadline = deadlines.setdefault(rule_id, monotonic_now + interval)
+                if monotonic_now < deadline:
+                    continue
+                missed = int((monotonic_now - deadline) // interval) + 1
+                deadlines[rule_id] = deadline + missed * interval
+                try:
+                    engine.evaluate_rule_timer(rule_id)
+                except Exception:
+                    logger.exception("scheduled evaluation for rule '%s' failed", rule_id)
 
     def _poll_source_with_recovery(
         self,

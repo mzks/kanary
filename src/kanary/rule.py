@@ -236,6 +236,7 @@ class Rule:
     runbook: str | None = None
     depends_on: list[str] = []
     suppressed_by: list[str] = []
+    evaluation_interval: float | None = None
 
     def evaluate(self, ctx: RuleContext) -> Evaluation:
         raise NotImplementedError

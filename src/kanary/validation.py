@@ -1,6 +1,7 @@
 import ast
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
+import math
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +121,16 @@ def validate_registries(
         if not rule_cls.resolved_sources:
             report.warnings.append(f"rule '{rule_id}' currently resolves zero sources")
 
+        if (
+            getattr(rule_cls, "evaluation_interval", None) is not None
+            and len(rule_cls.resolved_sources) > 1
+            and getattr(rule_cls, "__kanary_evaluate_style__", "new") == "legacy"
+        ):
+            report.errors.append(
+                f"rule '{rule_id}' uses evaluation_interval with multiple sources; "
+                "use evaluate(ctx) instead of legacy evaluate(payload, ctx)"
+            )
+
         severity = getattr(rule_cls, "severity", None)
         if severity is not None and not isinstance(severity, Severity):
             report.errors.append(f"rule '{rule_id}' severity must be one of kanary.INFO/WARN/ERROR/CRITICAL")
@@ -216,6 +227,16 @@ def _validate_rule_settings(
         return report
     if isinstance(timeout, (int, float)) and timeout <= 0:
         report.errors.append(f"rule '{rule_id}' timeout must be a positive number")
+    evaluation_interval = getattr(rule_cls, "evaluation_interval", None)
+    if evaluation_interval is not None and (
+        isinstance(evaluation_interval, bool)
+        or not isinstance(evaluation_interval, (int, float))
+        or not math.isfinite(evaluation_interval)
+        or evaluation_interval <= 0
+    ):
+        report.errors.append(
+            f"rule '{rule_id}' evaluation_interval must be a positive finite number"
+        )
     return report
 
 

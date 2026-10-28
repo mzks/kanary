@@ -1793,6 +1793,38 @@ class RuleDirectoryLoaderTest(unittest.TestCase):
             report.errors,
         )
 
+    def test_inspect_rejects_invalid_evaluation_interval(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rule_file = Path(tmp) / "rules.py"
+            rule_file.write_text(
+                textwrap.dedent(
+                    """
+                    import kanary
+
+                    @kanary.source(source_id="example.source", interval=5.0)
+                    class ExampleSource:
+                        def poll(self):
+                            return kanary.SourceResult()
+
+                    @kanary.rule(
+                        rule_id="example.rule",
+                        inputs="example.source:value",
+                        evaluation_interval=True,
+                        severity=kanary.ERROR,
+                        tags=["example"],
+                    )
+                    class ExampleRule(kanary.StaleRule):
+                        timeout = 10.0
+                    """
+                )
+            )
+            _, report = kanary.RuleDirectoryLoader(tmp).inspect()
+
+        self.assertIn(
+            "rule 'example.rule' evaluation_interval must be a positive finite number",
+            report.errors,
+        )
+
     def test_inspect_sets_matched_outputs_on_rule_classes(self) -> None:
         with TemporaryDirectory() as tmp:
             rule_file = Path(tmp) / "rules.py"
@@ -3320,6 +3352,124 @@ class WebJavaScriptTest(unittest.TestCase):
 
 
 class SQLiteStoreTest(unittest.TestCase):
+    def test_restart_does_not_repeat_an_existing_firing_notification(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "kanary.db"
+            now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+            RecordingOutput.events = []
+
+            def make_engine():
+                return kanary.Engine(
+                    now_fn=lambda: now,
+                    source_registry={"postgres": SlowPostgresSource},
+                    rule_registry={"postgres.temperature.stale": SlowPostgresStale},
+                    output_registry={"recording": RecordingOutput},
+                    store=kanary.SQLiteStore(db_path),
+                )
+
+            first = make_engine()
+            first.start()
+            try:
+                source = first.sources["postgres"]
+                source.now = now - timedelta(minutes=20)
+                first.evaluate_source(source.source_id, source.poll({}), now=now)
+                self.assertEqual(len(RecordingOutput.events), 1)
+            finally:
+                first.shutdown()
+
+            RecordingOutput.events = []
+            restarted = make_engine()
+            restarted.start()
+            try:
+                source = restarted.sources["postgres"]
+                source.now = now - timedelta(minutes=20)
+                restarted.evaluate_source(source.source_id, source.poll({}), now=now)
+                self.assertEqual(RecordingOutput.events, [])
+            finally:
+                restarted.shutdown()
+
+    def test_timer_evaluation_uses_snapshot_without_updating_source_state(self) -> None:
+        now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+        engine = kanary.Engine(
+            now_fn=lambda: now,
+            source_registry={"postgres": SlowPostgresSource},
+            rule_registry={"postgres.temperature.stale": SlowPostgresStale},
+            output_registry={},
+        )
+        engine.start()
+        try:
+            source = engine.sources["postgres"]
+            source.now = now
+            engine.evaluate_source(source.source_id, source.poll({}), now=now)
+            state = engine.source_states["postgres"]
+            poll_count = state.poll_count
+            updated_at = state.updated_at
+            current_payload = state.current.payload
+
+            alerts = engine.evaluate_rule_timer(
+                "postgres.temperature.stale",
+                now=now + timedelta(minutes=20),
+            )
+
+            self.assertEqual(alerts["postgres.temperature.stale"].state, kanary.FIRING)
+            self.assertEqual(state.poll_count, poll_count)
+            self.assertEqual(state.updated_at, updated_at)
+            self.assertIs(state.current.payload, current_payload)
+        finally:
+            engine.shutdown()
+
+    def test_timer_evaluation_supports_multiple_source_contexts(self) -> None:
+        now = datetime(2026, 3, 17, 0, 20, tzinfo=timezone.utc)
+
+        class SourceA:
+            source_id = "source-a"
+            interval = 60.0
+
+            def poll(self):
+                return kanary.inputs([("value", 2, now)])
+
+        class SourceB:
+            source_id = "source-b"
+            interval = 60.0
+
+            def poll(self):
+                return kanary.inputs([("value", 3, now)])
+
+        class CombinedRule:
+            rule_id = "combined"
+            inputs = ["source-a:value", "source-b:value"]
+            severity = kanary.ERROR
+            tags = ["combined"]
+            evaluation_interval = 30.0
+
+            def evaluate(self, ctx):
+                total = ctx.value("source-a:value", 0) + ctx.value("source-b:value", 0)
+                source_values = {
+                    ctx.source_payload("source-a").get("channels", {}).get("value", {}).get("value"),
+                    ctx.source_payload("source-b").get("channels", {}).get("value", {}).get("value"),
+                }
+                return kanary.firing(
+                    "combined sources",
+                    extra={"total": total, "source_values": sorted(value for value in source_values if value is not None)},
+                )
+
+        engine = kanary.Engine(
+            now_fn=lambda: now,
+            source_registry={"source-a": SourceA, "source-b": SourceB},
+            rule_registry={"combined": CombinedRule},
+            output_registry={},
+        )
+        engine.start()
+        try:
+            engine.evaluate_source("source-a", engine.sources["source-a"].poll(), now=now)
+            engine.evaluate_source("source-b", engine.sources["source-b"].poll(), now=now)
+            alerts = engine.evaluate_rule_timer("combined", now=now + timedelta(seconds=30))
+            self.assertEqual(alerts["combined"].state, kanary.FIRING)
+            self.assertEqual(alerts["combined"].payload["total"], 5)
+            self.assertEqual(alerts["combined"].payload["source_values"], [2, 3])
+        finally:
+            engine.shutdown()
+
     def test_new_sqlite_store_sets_user_version(self) -> None:
         with TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kanary.db"
@@ -3949,7 +4099,7 @@ class OutputTest(unittest.TestCase):
     def test_output_plugin_receives_alert_event_on_state_change(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
-        self.assertEqual(len(RecordingOutput.events), 0)
+        RecordingOutput.events = []
 
         source.now = self.now - timedelta(seconds=10)
         with self.assertLogs("kanary.engine", level="INFO") as captured:
@@ -3970,6 +4120,7 @@ class OutputTest(unittest.TestCase):
         source = self.engine.sources["postgres"]
         source.temperature = 21
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        RecordingOutput.events = []
         threshold_events = [event for event in RecordingOutput.events if event.rule_id == "postgres.temperature.threshold"]
         self.assertEqual(len(threshold_events), 0)
 
@@ -3987,6 +4138,7 @@ class OutputTest(unittest.TestCase):
         source = self.engine.sources["postgres"]
         source.temperature = 29
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        RecordingOutput.events = []
 
         self.now = self.now + timedelta(seconds=5)
         source.temperature = 26.5
@@ -4086,6 +4238,7 @@ class OutputTest(unittest.TestCase):
     def test_output_delivers_firing_after_silence_is_cancelled(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+        RecordingOutput.events = []
         silence = self.engine.create_silence(
             operator="alice",
             reason="maintenance",
@@ -4143,7 +4296,7 @@ class OutputTest(unittest.TestCase):
     def test_ack_and_unack_emit_events(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
-        self.assertEqual(len(RecordingOutput.events), 0)
+        RecordingOutput.events = []
 
         self.now = self.now + timedelta(seconds=1)
         self.engine.acknowledge(
@@ -4168,7 +4321,7 @@ class OutputTest(unittest.TestCase):
     def test_reload_keeps_first_notification_after_reload(self) -> None:
         source = self.engine.sources["postgres"]
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
-        self.assertEqual(len(RecordingOutput.events), 0)
+        RecordingOutput.events = []
 
         self.engine.reload(
             source_registry=kanary.get_source_registry(),
@@ -4187,6 +4340,7 @@ class OutputTest(unittest.TestCase):
         source.now = self.now
         self.engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         self.assertEqual(self.engine.alerts["postgres.temperature.stale"].state, kanary.AlertState.OK)
+        RecordingOutput.events = []
 
         self.engine.reload(
             source_registry=kanary.get_source_registry(),
@@ -4288,6 +4442,7 @@ class OutputTest(unittest.TestCase):
         try:
             source = engine.sources["postgres"]
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            FakeSMTP.sent_messages = []
             source.now = self.now - timedelta(seconds=10)
             with self.assertLogs("kanary.engine", level="INFO") as captured:
                 engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
@@ -4312,6 +4467,7 @@ class OutputTest(unittest.TestCase):
         try:
             source = engine.sources["postgres"]
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            FakeSMTP.sent_messages = []
             source.now = self.now - timedelta(seconds=10)
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
             status = engine.plugin_states["output:broken-emit"]
@@ -4352,6 +4508,7 @@ class OutputTest(unittest.TestCase):
         try:
             source = engine.sources["postgres"]
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            FakeSMTP.sent_messages = []
             source.now = self.now - timedelta(seconds=10)
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
         finally:
@@ -4382,6 +4539,7 @@ class OutputTest(unittest.TestCase):
         try:
             source = engine.sources["postgres"]
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            NoUnackOutput.events = []
             engine.acknowledge("postgres.temperature.stale", operator="alice", reason="checking")
             engine.unacknowledge("postgres.temperature.stale", operator="alice", reason="re-open")
         finally:
@@ -4409,6 +4567,7 @@ class OutputTest(unittest.TestCase):
             source = engine.sources["postgres"]
             source.temperature = 29
             engine.evaluate_source(source.source_id, source.poll({}), now=self.now)
+            NoDeescalationOutput.events = []
 
             self.now = self.now + timedelta(seconds=5)
             source.temperature = 26.5

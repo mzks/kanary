@@ -22,13 +22,17 @@ class KanaryPluginSource:
         with urlopen(self.plugins_url, timeout=self.timeout_seconds) as response:
             payload = json.loads(response.read().decode())
 
+        if not isinstance(payload, dict) or not isinstance(payload.get("plugins"), list):
+            raise ValueError("/plugins response must contain a 'plugins' list")
         now = datetime.now(timezone.utc)
-        plugins = payload.get("plugins", [])
+        plugins = payload["plugins"]
+        if any(not isinstance(plugin, dict) for plugin in plugins):
+            raise ValueError("each /plugins entry must be an object")
         inputs = [("heartbeat", 1, now)]
 
         for plugin_type in ("source", "rule", "output"):
             typed_plugins = [plugin for plugin in plugins if plugin.get("type") == plugin_type]
-            failed_plugins = [plugin for plugin in typed_plugins if plugin.get("state") == "failed"]
+            failed_plugins = [plugin for plugin in typed_plugins if plugin.get("state") == "FAILED"]
             latest_failure_at = max(
                 (
                     _parse_plugin_timestamp(plugin.get("last_failure_at"))
@@ -66,6 +70,7 @@ class KanaryPluginSource:
     severity=kanary.ERROR,
     tags=["kanary", "internal", "plugins"],
     owner="expert_kanary",
+    evaluation_interval=30.0,
 )
 class KanaryPluginSourceHeartbeatStale(kanary.StaleRule):
     timeout = 2 * kanary.minute
@@ -86,7 +91,7 @@ def make_plugin_type_failure_rule(
         metadata = ctx.metadata(default={}) or {}
         failed_plugins = metadata.get("failed_plugins", [])
         if count is None:
-            return kanary.ok(f"{measurement} is missing")
+            return kanary.firing(f"{measurement} is missing", severity=severity)
         if count <= 0:
             return kanary.ok(f"no failed {plugin_type} plugins")
         summaries = []

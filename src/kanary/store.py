@@ -17,6 +17,7 @@ from .models import Acknowledgement, AlertEvent, Silence
 class RestoredState:
     acknowledgements: dict[str, Acknowledgement] = field(default_factory=dict)
     silences: dict[str, Silence] = field(default_factory=dict)
+    latest_rule_states: dict[str, tuple[AlertState, Severity]] = field(default_factory=dict)
 
 
 class NullStore:
@@ -336,7 +337,29 @@ class SQLiteStore:
                     cancel_reason=row["cancel_reason"],
                 )
 
-            return RestoredState(acknowledgements=acknowledgements, silences=silences)
+            latest_rule_states = {
+                row["rule_id"]: (
+                    AlertState(row["current_state"]),
+                    Severity(int(row["current_severity"])),
+                )
+                for row in conn.execute(
+                    """
+                    SELECT ae.rule_id, ae.current_state, ae.current_severity
+                    FROM alert_events AS ae
+                    JOIN (
+                        SELECT rule_id, MAX(id) AS max_id
+                        FROM alert_events
+                        GROUP BY rule_id
+                    ) latest ON latest.max_id = ae.id
+                    """
+                )
+            }
+
+            return RestoredState(
+                acknowledgements=acknowledgements,
+                silences=silences,
+                latest_rule_states=latest_rule_states,
+            )
 
     def append_alert_event(self, event: AlertEvent, *, definition_file: str | None, matched_outputs: list[str]) -> None:
         conn = self._require_conn()

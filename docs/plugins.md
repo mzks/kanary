@@ -418,6 +418,20 @@ Pushes wake the normal source scheduler by default. Set `wake_on_push = False` o
 - checks measurement age via its timestamp
 - when multiple inputs are matched, any stale or timestamp-missing input fires the rule
 
+Rules are normally evaluated when one of their Sources updates. Set `evaluation_interval` to a positive number of seconds to also evaluate a Rule on an independent fixed interval:
+
+```python
+@kanary.rule(
+    rule_id="kanary.peer.heartbeat.stale",
+    inputs="kanary.peer:heartbeat",
+    evaluation_interval=30.0,
+)
+class PeerHeartbeatStale(kanary.StaleRule):
+    timeout = 120.0
+```
+
+Scheduled evaluation uses saved Source snapshots and does not poll or update a Source. For a multi-Source Rule, use `ctx.inputs()` or `ctx.source_payload("source-id")`; argument-less `ctx.source_payload()` remains ambiguous. Wildcards only select inputs that exist in a snapshot and do not declare a required input set. Check required inputs explicitly in custom Rule code.
+
 #### RateRule
 
 - computes a rate from current and previous snapshots and evaluates it as a range
