@@ -87,9 +87,13 @@ def poll(self):
 
 For temporary external API communication failures, normally raise an exception. Kanary handles Source retry / reinitialization and plugin status. Turning failures into `no_data()` loses the distinction between a communication failure and a valid empty result.
 
+A Source whose `init()` fails during startup does not get a runtime thread and is not currently recovered automatically; reload or restart it after its dependency recovers. An exception from Rule `evaluate()` marks the Rule plugin `FAILED`; it does not automatically turn the monitored Alert into `FIRING`.
+
 ### External I/O, Timestamps, and Poll Intervals
 
 Always set timeouts for external I/O such as HTTP, database, and socket operations. Without one, a poll can block indefinitely and delay the next evaluation.
+
+The same constraint applies to Output `emit()`: it must complete promptly and use finite timeouts for external I/O. Synchronous waiting in `emit()` delays other Source updates and Rule evaluations. Use `OutputFollowups` for delayed follow-up work, or an Output that quickly publishes to a message broker when durable delivery is required.
 
 When possible, set `Measurement.timestamp` to the time when the monitored system actually observed the value, rather than the retrieval time. Using Kanary's poll time makes old data appear fresh, which makes StaleRule and rate calculations inaccurate. Use the poll time only when no observation time is available.
 

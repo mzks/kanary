@@ -69,6 +69,7 @@ class Engine:
         self.outputs = self._instantiate_outputs()
         self.plugin_states: dict[str, PluginStatus] = {}
         self.alerts: dict[str, Alert] = {}
+        self._restored_rule_states: dict[str, tuple[AlertState, Severity]] = {}
         self._rule_evaluations: dict[str, _RuleEvaluation] = {}
         self.acknowledgements: dict[str, Acknowledgement] = {}
         self.silences: dict[str, Silence] = {}
@@ -224,6 +225,11 @@ class Engine:
                 if rule_id in self.rules
             }
             self.silences = restored.silences
+            self._restored_rule_states = {
+                rule_id: state
+                for rule_id, state in restored.latest_rule_states.items()
+                if rule_id in self.rules
+            }
             for source in self.sources.values():
                 try:
                     self._initialize_source(source)
@@ -264,6 +270,36 @@ class Engine:
                 if self._is_rule_excluded(rule.rule_id):
                     continue
                 self._evaluate_rule(rule, source_payload, source_state, current_time)
+            return dict(self.alerts)
+
+    def evaluate_rule_timer(
+        self,
+        rule_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Alert]:
+        """Evaluate one rule from saved source snapshots without polling a Source."""
+        with self._lock:
+            rule = self.rules.get(rule_id)
+            if rule is None or self._is_rule_excluded(rule_id):
+                return dict(self.alerts)
+            current_time = now or self._now_fn()
+            resolved_sources = tuple(getattr(rule, "resolved_sources", []))
+            if not resolved_sources:
+                return dict(self.alerts)
+            if getattr(rule.__class__, "__kanary_evaluate_style__", "new") == "legacy":
+                if len(resolved_sources) != 1:
+                    raise ValueError(
+                        f"timer evaluation for legacy rule '{rule_id}' requires exactly one source"
+                    )
+                source_payload = dict(self.source_states[resolved_sources[0]].current.payload)
+            else:
+                source_payload = (
+                    dict(self.source_states[resolved_sources[0]].current.payload)
+                    if len(resolved_sources) == 1
+                    else {}
+                )
+            self._evaluate_rule_from_snapshots(rule, source_payload, current_time)
             return dict(self.alerts)
 
     def reload(
@@ -1122,6 +1158,17 @@ class Engine:
         evaluated_at: datetime,
     ) -> None:
         previous = self.alerts.get(rule.rule_id)
+        restored = self._restored_rule_states.pop(rule.rule_id, None) if previous is None else None
+        comparison_previous = previous
+        if comparison_previous is None and restored is not None:
+            restored_state, restored_severity = restored
+            comparison_previous = Alert(
+                rule_id=rule.rule_id,
+                state=restored_state,
+                severity=restored_severity,
+                owner=rule.owner,
+                tags=tuple(rule.tags),
+            )
         acknowledgement = self.acknowledgements.get(rule.rule_id)
         acked_at = acknowledgement.created_at if acknowledgement and state == AlertState.ACKED else None
         acked_by = acknowledgement.operator if acknowledgement and state == AlertState.ACKED else None
@@ -1154,7 +1201,7 @@ class Engine:
         self.alerts[rule.rule_id] = alert
 
         event = self._derive_alert_event(
-            previous=previous,
+            previous=comparison_previous,
             alert=alert,
             occurred_at=now,
         )
@@ -1166,7 +1213,9 @@ class Engine:
                 matched_outputs=list(getattr(rule, "matched_outputs", [])),
             )
 
-        if event is not None and previous is not None:
+        if event is not None and (
+            comparison_previous is not None or alert.state == AlertState.FIRING
+        ):
             self._emit_alert_event(event)
 
     def _store_rule_evaluation(
@@ -1805,6 +1854,48 @@ class Engine:
             status.last_failure_at = now
             status.last_updated_at = now
             logger.exception("rule '%s' failed", rule.rule_id)
+
+    def _evaluate_rule_from_snapshots(
+        self,
+        rule: Rule,
+        source_payload: dict[str, object],
+        now: datetime,
+    ) -> None:
+        status = self._plugin_status("rule", rule.rule_id)
+        try:
+            ctx = RuleContext(
+                now=now,
+                source_id=None,
+                source_state=None,
+                source_states=self.source_states,
+                declared_inputs=tuple(getattr(rule, "inputs", [])),
+                resolved_sources=tuple(getattr(rule, "resolved_sources", [])),
+                previous_alert=self.alerts.get(rule.rule_id),
+            )
+            evaluation = rule.normalize_evaluation(
+                self._call_rule_evaluate(rule, source_payload, ctx),
+                source_payload,
+            )
+            stored_evaluation = self._store_rule_evaluation(rule, evaluation, now)
+            self._apply_effective_evaluation(rule, stored_evaluation, now)
+            self._set_plugin_ready(status)
+            status.init_ok = True
+            status.last_error = None
+            status.last_error_detail = None
+            status.run_count += 1
+            status.last_run_at = now
+            status.last_success_at = now
+            status.last_updated_at = now
+        except Exception as exc:
+            self._set_plugin_failed(status)
+            status.init_ok = True
+            status.last_error = str(exc)
+            status.last_error_detail = traceback.format_exc()
+            status.run_count += 1
+            status.last_run_at = now
+            status.last_failure_at = now
+            status.last_updated_at = now
+            logger.exception("timer evaluation for rule '%s' failed", rule.rule_id)
 
     def _evaluate_rule_preview(
         self,

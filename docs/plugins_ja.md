@@ -419,6 +419,20 @@ push 後は既定で通常の source scheduler を起こします。次の regul
 - measurement の timestamp の古さを判定
 - 複数 input に一致した場合は、どれか 1 つでも stale または timestamp 欠落なら `FIRING`
 
+通常、Ruleは関連Sourceの更新時に評価されます。正の秒数を`evaluation_interval`へ指定すると、それとは独立した固定間隔でも評価します。
+
+```python
+@kanary.rule(
+    rule_id="kanary.peer.heartbeat.stale",
+    inputs="kanary.peer:heartbeat",
+    evaluation_interval=30.0,
+)
+class PeerHeartbeatStale(kanary.StaleRule):
+    timeout = 120.0
+```
+
+定期評価は保存済みSource snapshotを使い、Sourceのpollや状態更新を行いません。複数SourceのRuleでは`ctx.inputs()`または`ctx.source_payload("source-id")`を使います。引数なしの`ctx.source_payload()`は曖昧なままです。wildcardはsnapshotに存在するinputだけを選択し、必須input集合を宣言しません。必須inputはcustom Rule内で明示的に確認してください。
+
 #### RateRule
 
 - current / previous から rate を計算して範囲評価
