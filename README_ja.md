@@ -35,7 +35,7 @@ uv run python -m kanary ./demo
 release imageはGitHub Container Registryで公開しています。`linux/amd64`と`linux/arm64`に対応しています。
 
 ```bash
-docker pull ghcr.io/mzks/kanary:0.7.0
+docker pull ghcr.io/mzks/kanary:0.7.2
 ```
 
 plugin directoryをread-onlyでmountし、SQLiteのstate databaseはnamed volumeへ保存します。
@@ -45,7 +45,7 @@ docker run --name kanary --restart unless-stopped \
   -p 8000:8000 \
   -v "$(pwd)/plugins:/etc/kanary/plugins:ro" \
   -v kanary-data:/var/lib/kanary \
-  ghcr.io/mzks/kanary:0.7.0
+  ghcr.io/mzks/kanary:0.7.2
 ```
 
 このimageは、次と同等のcommandを実行します。
@@ -56,7 +56,7 @@ kanary /etc/kanary/plugins \
   --api-port 8000
 ```
 
-container起動後、`http://127.0.0.1:8000/viewer`を開きます。`0.7.0`は導入するrelease versionへ置き換えてください。tag付きreleaseでは`latest`も公開されます。
+container起動後、`http://127.0.0.1:8000/viewer`を開きます。`0.7.2`は導入するrelease versionへ置き換えてください。tag付きreleaseでは`latest`も公開されます。
 
 ## 最初にやること
 

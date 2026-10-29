@@ -43,7 +43,7 @@ uv run python -m kanary ./demo
 Published release images are available from GitHub Container Registry for `linux/amd64` and `linux/arm64`:
 
 ```bash
-docker pull ghcr.io/mzks/kanary:0.7.0
+docker pull ghcr.io/mzks/kanary:0.7.2
 ```
 
 Mount a plugin directory read-only and keep the SQLite state database in a named volume:
@@ -53,7 +53,7 @@ docker run --name kanary --restart unless-stopped \
   -p 8000:8000 \
   -v "$(pwd)/plugins:/etc/kanary/plugins:ro" \
   -v kanary-data:/var/lib/kanary \
-  ghcr.io/mzks/kanary:0.7.0
+  ghcr.io/mzks/kanary:0.7.2
 ```
 
 The image runs the equivalent of:
@@ -64,7 +64,7 @@ kanary /etc/kanary/plugins \
   --api-port 8000
 ```
 
-Open `http://127.0.0.1:8000/viewer` after the container starts. Replace `0.7.0` with the release you intend to deploy; `latest` is also published for tagged releases.
+Open `http://127.0.0.1:8000/viewer` after the container starts. Replace `0.7.2` with the release you intend to deploy; `latest` is also published for tagged releases.
 
 ## What To Do First
 
