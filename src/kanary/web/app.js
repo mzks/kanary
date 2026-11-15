@@ -38,8 +38,13 @@ const state = {
   timeZone: "browser",
 };
 
+const OPERATOR_STORAGE_KEY = "kanary.viewer.operator";
+const MOBILE_MEDIA_QUERY = "(max-width: 760px)";
+
 function init() {
   bindControls();
+  initializeOperatorInputs();
+  initializeMobileCollapsibles();
   initializeTimeZone();
   restoreRoute();
   scheduleRefresh();
@@ -49,6 +54,7 @@ function init() {
 
 function bindControls() {
   document.getElementById("refresh-now-button").addEventListener("click", refreshAll);
+  document.getElementById("topbar-settings-toggle").addEventListener("click", toggleTopbarSettings);
   document.getElementById("refresh-interval").addEventListener("change", handleRefreshIntervalChange);
   document.getElementById("timezone-select").addEventListener("change", handleTimeZoneChange);
   document.getElementById("alert-filter").addEventListener("input", (event) => {
@@ -92,6 +98,14 @@ function bindControls() {
   document.getElementById("ack-operator").addEventListener("input", syncActionButtonState);
   document.getElementById("ack-reason").addEventListener("input", syncActionButtonState);
   document.getElementById("silence-for-button").addEventListener("click", submitSilenceFor);
+  document.getElementById("silence-for-minutes").addEventListener("input", syncSilencePresetState);
+  for (const button of document.querySelectorAll("[data-silence-minutes]")) {
+    button.addEventListener("click", () => {
+      document.getElementById("silence-for-minutes").value = button.dataset.silenceMinutes;
+      syncSilencePresetState();
+    });
+  }
+  syncSilencePresetState();
   document.getElementById("silence-window-button").addEventListener("click", submitSilenceWindow);
   document.getElementById("admin-duration-button").addEventListener("click", submitAdminDurationSilence);
   document.getElementById("admin-window-button").addEventListener("click", submitAdminWindowSilence);
@@ -110,6 +124,66 @@ function bindControls() {
   for (const element of document.querySelectorAll("[data-close-alert-state]")) {
     element.addEventListener("click", closeAlertStateModal);
   }
+}
+
+// Remember the operator name in this browser and keep every operator field in sync.
+function initializeOperatorInputs() {
+  const inputs = [...document.querySelectorAll(".operator-input")];
+  let saved = "";
+  try {
+    saved = window.localStorage.getItem(OPERATOR_STORAGE_KEY) || "";
+  } catch (error) {
+    saved = "";
+  }
+  for (const input of inputs) {
+    if (saved && !input.value) {
+      input.value = saved;
+    }
+    input.addEventListener("input", () => {
+      const value = input.value;
+      for (const other of inputs) {
+        if (other !== input) {
+          other.value = value;
+        }
+      }
+      try {
+        window.localStorage.setItem(OPERATOR_STORAGE_KEY, value.trim());
+      } catch (error) {
+        // Storage may be unavailable (private mode); syncing still works.
+      }
+    });
+  }
+}
+
+function savedOperator() {
+  try {
+    return window.localStorage.getItem(OPERATOR_STORAGE_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+// Secondary detail sections start collapsed on phones and open elsewhere.
+function initializeMobileCollapsibles() {
+  if (!window.matchMedia || !window.matchMedia(MOBILE_MEDIA_QUERY).matches) {
+    return;
+  }
+  for (const element of document.querySelectorAll("details[data-mobile-collapsed]")) {
+    element.open = false;
+  }
+}
+
+function syncSilencePresetState() {
+  const minutes = document.getElementById("silence-for-minutes").value;
+  for (const button of document.querySelectorAll("[data-silence-minutes]")) {
+    button.classList.toggle("active", button.dataset.silenceMinutes === minutes);
+  }
+}
+
+function toggleTopbarSettings() {
+  const topbar = document.querySelector(".topbar");
+  const open = topbar.classList.toggle("settings-open");
+  document.getElementById("topbar-settings-toggle").setAttribute("aria-expanded", String(open));
 }
 
 function initializeTimeZone() {
@@ -161,6 +235,9 @@ function renderRoute() {
   for (const link of document.querySelectorAll(".nav-link")) {
     link.classList.toggle("active", link.dataset.route === state.route);
   }
+  revealActiveNavLink();
+  document.querySelector(".topbar").classList.remove("settings-open");
+  document.getElementById("topbar-settings-toggle").setAttribute("aria-expanded", "false");
 
   if (state.route === "detail") {
     renderDetailPage();
@@ -168,6 +245,17 @@ function renderRoute() {
   if (state.route === "history") {
     maybeRefreshHistory();
   }
+}
+
+function revealActiveNavLink() {
+  // On narrow screens the sidebar becomes a horizontally scrolling tab bar.
+  const sidebar = document.querySelector(".sidebar");
+  const active = sidebar && sidebar.querySelector(".nav-link.active");
+  if (!active || sidebar.scrollWidth <= sidebar.clientWidth) {
+    return;
+  }
+  const left = active.offsetLeft - (sidebar.clientWidth - active.offsetWidth) / 2;
+  sidebar.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
 }
 
 function scheduleRefresh() {
@@ -355,13 +443,19 @@ function renderDashboardPage() {
       className: "silenced",
       ...activeAlertAgeNote(activeAlerts, "SILENCED", "Muted by operator action"),
     },
-    { label: "FAILED PLUGINS", value: failedPlugins, note: "Runtime components in failed state", className: "failed" },
+    {
+      label: "FAILED PLUGINS",
+      shortLabel: "FAILED",
+      value: failedPlugins,
+      note: "Runtime components in failed state",
+      className: "failed",
+    },
   ];
   document.getElementById("dashboard-cards").innerHTML = cards
     .map(
       (card) => `
-        <article class="hero-card ${card.className}">
-          <div class="hero-label">${escapeHtml(card.label)}</div>
+        <article class="hero-card ${card.className}${card.value ? "" : " hero-card-zero"}">
+          <div class="hero-label"${card.shortLabel ? ` data-short-label="${escapeHtml(card.shortLabel)}"` : ""}><span class="hero-label-text">${escapeHtml(card.label)}</span></div>
           <strong>${escapeHtml(String(card.value))}</strong>
           <div class="hero-note"${card.noteTitle ? ` title="${escapeHtml(card.noteTitle)}"` : ""}>${escapeHtml(card.note)}</div>
         </article>
@@ -372,7 +466,7 @@ function renderDashboardPage() {
   document.getElementById("dashboard-severity-breakdown").innerHTML = ["CRITICAL", "ERROR", "WARN", "INFO"]
     .map(
       (label) => `
-        <span class="severity-chip severity-chip-${label}">
+        <span class="severity-chip severity-chip-${label}${severityCounts[label] ? "" : " severity-chip-zero"}">
           <span class="severity-chip-label">${escapeHtml(label)}</span>
           <strong>${escapeHtml(String(severityCounts[label] || 0))}</strong>
         </span>
@@ -390,15 +484,15 @@ function renderDashboardPage() {
     .sort(compareAlerts)
     .map(
       (alert) => `
-        <article class="alert-card">
+        <article class="alert-card alert-card-state-${escapeHtml(alert.state)} alert-card-severity-${severityLabel(alert.severity)}" data-card-rule="${escapeHtml(alert.rule_id)}">
           <div class="alert-card-header">
             <div>
-              <div class="alert-card-title">${escapeHtml(alert.rule_id)}</div>
+              <div class="alert-card-title">${breakableIdentifier(alert.rule_id)}</div>
               <div class="alert-card-meta">
                 <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
                 <span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span>
-                <span>${escapeHtml(alert.acked_by || "Unacked")}</span>
-                <span title="${escapeHtml(alert.active_since || "-")}">Active since ${escapeHtml(formatRelativeTime(alert.active_since))}</span>
+                <span class="${alert.acked_by ? "alert-card-acked-by" : "alert-card-unacked"}">${escapeHtml(alert.acked_by || "Unacked")}</span>
+                <span class="alert-card-age" title="${escapeHtml(alert.active_since || "-")}"><span class="alert-card-age-prefix">Active since </span>${escapeHtml(formatRelativeTime(alert.active_since))}</span>
               </div>
             </div>
             <button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Open</button>
@@ -413,8 +507,14 @@ function renderDashboardPage() {
     )
     .join("");
 
-  for (const button of container.querySelectorAll("[data-open-rule]")) {
-    button.addEventListener("click", () => openDetail(button.dataset.openRule));
+  for (const card of container.querySelectorAll("[data-card-rule]")) {
+    card.addEventListener("click", (event) => {
+      // Let links inside the message work normally.
+      if (event.target.closest("a")) {
+        return;
+      }
+      openDetail(card.dataset.cardRule);
+    });
   }
 }
 
@@ -427,16 +527,16 @@ function renderAlertsPage() {
   tbody.innerHTML = alerts
     .map(
       (alert) => `
-        <tr>
-          <td class="plugin-primary-cell">
-            <div class="plugin-title">${escapeHtml(alert.rule_id)}</div>
+        <tr class="alert-row alert-row-severity-${severityLabel(alert.severity)}" data-row-rule="${escapeHtml(alert.rule_id)}">
+          <td class="plugin-primary-cell cell-name">
+            <div class="plugin-title">${breakableIdentifier(alert.rule_id)}</div>
           </td>
-          <td>${formatAlertStateCell(alert)}</td>
-          <td><span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span></td>
-          <td>${formatTagList(alert.tags, { empty: "-" })}</td>
-          <td>${formatChipList(alert.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
-          <td>${renderLinkedText(alert.message || "-")}</td>
-          <td class="action-cell"><button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Detail</button></td>
+          <td class="cell-state">${formatAlertStateCell(alert)}</td>
+          <td class="cell-severity"><span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span></td>
+          <td class="cell-tags">${formatTagList(alert.tags, { empty: "-" })}</td>
+          <td class="cell-outputs">${formatChipList(alert.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
+          <td class="cell-message">${renderLinkedText(alert.message || "-")}</td>
+          <td class="action-cell cell-action"><button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Detail</button></td>
         </tr>
       `
     )
@@ -444,6 +544,15 @@ function renderAlertsPage() {
 
   for (const button of tbody.querySelectorAll("[data-open-rule]")) {
     button.addEventListener("click", () => openDetail(button.dataset.openRule));
+  }
+  // On phones the table is shown as cards without the Detail button: tap the row instead.
+  for (const tableRow of tbody.querySelectorAll("[data-row-rule]")) {
+    tableRow.addEventListener("click", (event) => {
+      if (!window.matchMedia(MOBILE_MEDIA_QUERY).matches || event.target.closest("a, button")) {
+        return;
+      }
+      openDetail(tableRow.dataset.rowRule);
+    });
   }
   for (const button of tbody.querySelectorAll("[data-open-alert-state]")) {
     button.addEventListener("click", () => openAlertStateModal(button.dataset.openAlertState));
@@ -464,21 +573,23 @@ async function renderDetailPage() {
   empty.classList.add("hidden");
   content.classList.remove("hidden");
 
+  // Row classes let the phone layout reorder rows and hide secondary or empty ones.
+  const emptyClass = (value) => (value ? "" : " detail-row-empty");
   document.getElementById("detail-summary").innerHTML = [
-    row("Rule", alert.rule_id),
-    row("State", `<span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>`, true),
-    row("Severity", severityLabel(alert.severity)),
-    row("Active Since", alert.active_since ? `${formatRelativeTime(alert.active_since)} (${formatDateTime(alert.active_since)})` : "-"),
-    row("Acked By", alert.acked_by || "-"),
-    row("Owner", alert.owner || "-"),
-    row("Tags", formatTagList(alert.tags, { empty: "-" }), true),
-    row("Silences", (alert.active_silence_ids || []).join(", ") || "-"),
-    row("Outputs", (alert.matched_outputs || []).join(", ") || "-"),
-    row("Description", renderLinkedText(alert.description || "-"), true),
-    row("Runbook", renderLinkedText(alert.runbook || "-"), true),
-    row("File", formatDefinitionFile(alert.definition_file), true),
-    row("Source", `<button class="button button-secondary" id="detail-source-button">View Rule Source</button>`, true),
-    row("Message", renderLinkedText(alert.message || "-"), true),
+    row("Rule", alert.rule_id, false, "detail-row-secondary"),
+    row("State", `<span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>`, true, "detail-row-state"),
+    row("Severity", severityLabel(alert.severity), false, "detail-row-severity"),
+    row("Active Since", alert.active_since ? `${formatRelativeTime(alert.active_since)} (${formatDateTime(alert.active_since)})` : "-", false, "detail-row-active"),
+    row("Acked By", alert.acked_by || "-", false, `detail-row-acked${emptyClass(alert.acked_by)}`),
+    row("Owner", alert.owner || "-", false, `detail-row-owner${emptyClass(alert.owner)}`),
+    row("Tags", formatTagList(alert.tags, { empty: "-" }), true, `detail-row-tags${emptyClass((alert.tags || []).length)}`),
+    row("Silences", (alert.active_silence_ids || []).join(", ") || "-", false, `detail-row-silences${emptyClass((alert.active_silence_ids || []).length)}`),
+    row("Outputs", (alert.matched_outputs || []).join(", ") || "-", false, "detail-row-secondary"),
+    row("Description", renderLinkedText(alert.description || "-"), true, `detail-row-description${emptyClass(alert.description)}`),
+    row("Runbook", renderLinkedText(alert.runbook || "-"), true, `detail-row-runbook${emptyClass(alert.runbook)}`),
+    row("File", formatDefinitionFile(alert.definition_file), true, "detail-row-secondary"),
+    row("Source", `<button class="button button-secondary" id="detail-source-button">View Rule Source</button>`, true, "detail-row-secondary"),
+    row("Message", renderLinkedText(alert.message || "-"), true, "detail-row-message"),
   ].join("");
   document.getElementById("detail-source-button").addEventListener("click", () => openSourceModal("rule", alert.rule_id));
   updateDetailActionAvailability(alert);
@@ -502,14 +613,14 @@ function renderSourcesPage() {
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td class="plugin-primary-cell">
-            <div class="plugin-title">${escapeHtml(plugin.plugin_id)}</div>
+          <td class="plugin-primary-cell cell-name">
+            <div class="plugin-title">${breakableIdentifier(plugin.plugin_id)}</div>
           </td>
-          <td>${formatPluginRuntime(plugin)}</td>
-          <td>${formatPlainDescription(plugin.description)}</td>
-          <td>${formatSourceInfo(plugin)}</td>
-          <td class="action-cell"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button></td>
-          <td class="action-cell"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button></td>
+          <td class="cell-runtime">${formatPluginRuntime(plugin)}</td>
+          <td class="cell-description">${formatPlainDescription(plugin.description)}</td>
+          <td class="cell-info">${formatSourceInfo(plugin)}</td>
+          <td class="action-cell cell-apply"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button></td>
+          <td class="action-cell cell-source"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button></td>
         </tr>
       `
     )
@@ -536,17 +647,17 @@ function renderRulesPage() {
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td class="plugin-primary-cell">
-            <div class="plugin-title">${escapeHtml(plugin.plugin_id)}</div>
+          <td class="plugin-primary-cell cell-name">
+            <div class="plugin-title">${breakableIdentifier(plugin.plugin_id)}</div>
           </td>
-          <td>${formatPluginRuntime(plugin)}</td>
-          <td>${formatPlainDescription(plugin.description)}</td>
-          <td>${formatInputList(plugin.inputs)}</td>
-          <td>${formatTagList(plugin.tags, { empty: "-" })}</td>
-          <td>${formatChipList(plugin.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
-          <td>${formatRuleInfo(plugin)}</td>
-          <td class="action-cell"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button></td>
-          <td class="action-cell"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button></td>
+          <td class="cell-runtime">${formatPluginRuntime(plugin)}</td>
+          <td class="cell-description">${formatPlainDescription(plugin.description)}</td>
+          <td class="cell-inputs">${formatInputList(plugin.inputs)}</td>
+          <td class="cell-tags">${formatTagList(plugin.tags, { empty: "-" })}</td>
+          <td class="cell-outputs">${formatChipList(plugin.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
+          <td class="cell-info">${formatRuleInfo(plugin)}</td>
+          <td class="action-cell cell-apply"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button></td>
+          <td class="action-cell cell-source"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button></td>
         </tr>
       `
     )
@@ -577,17 +688,17 @@ function renderOutputsPage() {
     .map(
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
-          <td class="plugin-primary-cell">
-            <div class="plugin-title">${escapeHtml(plugin.plugin_id)}</div>
+          <td class="plugin-primary-cell cell-name">
+            <div class="plugin-title">${breakableIdentifier(plugin.plugin_id)}</div>
           </td>
-          <td>${formatPluginRuntime(plugin)}</td>
-          <td>${formatMinimumSeverity(plugin.minimum_severity)}</td>
-          <td>${formatChipList(plugin.include_tags, { empty: "*", tagColors: true })}</td>
-          <td>${formatChipList(plugin.exclude_tags, { empty: "-", tagColors: true })}</td>
-          <td>${formatPlainDescription(plugin.description)}</td>
-          <td>${formatOutputInfo(plugin)}</td>
-          <td class="action-cell"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button></td>
-          <td class="action-cell"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button></td>
+          <td class="cell-runtime">${formatPluginRuntime(plugin)}</td>
+          <td class="cell-severity">${formatMinimumSeverity(plugin.minimum_severity)}</td>
+          <td class="cell-include">${formatChipList(plugin.include_tags, { empty: "*", tagColors: true })}</td>
+          <td class="cell-exclude">${formatChipList(plugin.exclude_tags, { empty: "-", tagColors: true })}</td>
+          <td class="cell-description">${formatPlainDescription(plugin.description)}</td>
+          <td class="cell-info">${formatOutputInfo(plugin)}</td>
+          <td class="action-cell cell-apply"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button></td>
+          <td class="action-cell cell-source"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button></td>
         </tr>
       `
     )
@@ -614,14 +725,14 @@ function renderSilencesPage() {
       const targets = [...(silence.rule_patterns || []), ...(silence.tags || []).map((tag) => `#${tag}`)].join(", ") || "-";
       const status = silenceDisplayStatus(silence);
       return `
-        <tr>
-          <td>${escapeHtml(shortId(silence.silence_id))}</td>
-          <td><span class="state-pill state-${escapeHtml(statusToColor(status))}">${escapeHtml(status)}</span></td>
-          <td title="${escapeHtml((silence.start_at || "-") + " -> " + (silence.end_at || "-"))}">${escapeHtml(formatWindow(silence.start_at, silence.end_at))}</td>
-          <td>${escapeHtml(targets)}</td>
-          <td>${escapeHtml(silence.created_by || "-")}</td>
-          <td>${escapeHtml(silence.reason || "-")}</td>
-          <td class="action-cell">${silence.cancelled_at || status === "EXPIRED" ? "" : `<button class="button button-danger" data-cancel-silence="${escapeHtml(silence.silence_id)}">Cancel</button>`}</td>
+        <tr class="silence-row">
+          <td class="cell-id">${escapeHtml(shortId(silence.silence_id))}</td>
+          <td class="cell-state"><span class="state-pill state-${escapeHtml(statusToColor(status))}">${escapeHtml(status)}</span></td>
+          <td class="cell-window" title="${escapeHtml((silence.start_at || "-") + " -> " + (silence.end_at || "-"))}">${escapeHtml(formatWindow(silence.start_at, silence.end_at))}</td>
+          <td class="cell-name"><span class="silence-targets">${breakableIdentifier(targets)}</span></td>
+          <td class="cell-operator">${escapeHtml(silence.created_by || "-")}</td>
+          <td class="cell-reason">${escapeHtml(silence.reason || "-")}</td>
+          <td class="action-cell cell-action">${silence.cancelled_at || status === "EXPIRED" ? "" : `<button class="button button-danger" data-cancel-silence="${escapeHtml(silence.silence_id)}">Cancel</button>`}</td>
         </tr>
       `;
     })
@@ -629,7 +740,7 @@ function renderSilencesPage() {
 
   for (const button of tbody.querySelectorAll("[data-cancel-silence]")) {
     button.addEventListener("click", async () => {
-      const operator = window.prompt("Operator for cancelling this silence", "Keita");
+      const operator = window.prompt("Operator for cancelling this silence", savedOperator() || "");
       if (!operator) {
         return;
       }
@@ -852,9 +963,9 @@ function historyEntryMatchesFilters(entry) {
 function renderHistoryRow(entry) {
   const hasCurrentAlert = entry.rule_id && state.alerts.some((alert) => alert.rule_id === entry.rule_id);
   const ruleCell = hasCurrentAlert
-    ? `<a class="history-rule-link" href="#alert/${encodeURIComponent(entry.rule_id)}">${escapeHtml(entry.rule_id)}</a>`
+    ? `<a class="history-rule-link" href="#alert/${encodeURIComponent(entry.rule_id)}">${breakableIdentifier(entry.rule_id)}</a>`
     : entry.rule_id
-      ? `<span title="This rule is not currently loaded">${escapeHtml(entry.rule_id)}</span>`
+      ? `<span title="This rule is not currently loaded">${breakableIdentifier(entry.rule_id)}</span>`
       : `<span class="muted">-</span>`;
   const timeCell = `<span title="${escapeHtml(entry.occurred_at || "-")}">${escapeHtml(formatDateTime(entry.occurred_at))}</span>`;
 
@@ -869,25 +980,25 @@ function renderHistoryRow(entry) {
       detailParts.push(entry.message);
     }
     return `
-      <tr>
-        <td>${timeCell}</td>
-        <td class="plugin-primary-cell"><div class="plugin-title">${ruleCell}</div></td>
-        <td>${formatHistoryStateChange(entry.previous_state, entry.current_state, entry.transition)}</td>
-        <td>${formatHistorySeverity(entry.previous_severity, entry.current_severity ?? entry.severity)}</td>
-        <td>${formatTagList(entry.tags, { empty: "-" })}</td>
-        <td class="history-detail">${detailParts.map((part) => `<div>${escapeHtml(part)}</div>`).join("") || `<span class="muted">-</span>`}</td>
+      <tr class="history-row">
+        <td class="cell-time">${timeCell}</td>
+        <td class="plugin-primary-cell cell-name"><div class="plugin-title">${ruleCell}</div></td>
+        <td class="cell-change">${formatHistoryStateChange(entry.previous_state, entry.current_state, entry.transition)}</td>
+        <td class="cell-severity">${formatHistorySeverity(entry.previous_severity, entry.current_severity ?? entry.severity)}</td>
+        <td class="cell-tags">${formatTagList(entry.tags, { empty: "-" })}</td>
+        <td class="history-detail cell-detail">${detailParts.map((part) => `<div>${escapeHtml(part)}</div>`).join("") || `<span class="muted">-</span>`}</td>
       </tr>
     `;
   }
 
   return `
-      <tr>
-        <td>${timeCell}</td>
-        <td class="plugin-primary-cell"><div class="plugin-title">${ruleCell}</div></td>
-        <td><span class="meta-chip">${escapeHtml(historyActionLabel(entry.action_type))}</span></td>
-        <td>${formatOperatorActionSeverity(entry)}</td>
-        <td>${formatTagList(entry.details?.tags, { empty: "-" })}</td>
-        <td class="history-detail">${formatOperatorActionDetail(entry)}</td>
+      <tr class="history-row history-row-action">
+        <td class="cell-time">${timeCell}</td>
+        <td class="plugin-primary-cell cell-name"><div class="plugin-title">${ruleCell}</div></td>
+        <td class="cell-change"><span class="meta-chip">${escapeHtml(historyActionLabel(entry.action_type))}</span></td>
+        <td class="cell-severity">${formatOperatorActionSeverity(entry)}</td>
+        <td class="cell-tags">${formatTagList(entry.details?.tags, { empty: "-" })}</td>
+        <td class="history-detail cell-detail">${formatOperatorActionDetail(entry)}</td>
       </tr>
   `;
 }
@@ -1462,11 +1573,11 @@ function getSelectedAlert() {
   return state.alerts.find((alert) => alert.rule_id === state.selectedRuleId);
 }
 
-function row(label, value, raw = false) {
+function row(label, value, raw = false, className = "") {
   return `
-    <div class="detail-row">
+    <div class="detail-row${className ? ` ${className}` : ""}">
       <div class="detail-label">${escapeHtml(label)}</div>
-      <div>${raw ? value : escapeHtml(value)}</div>
+      <div class="detail-value">${raw ? value : escapeHtml(value)}</div>
     </div>
   `;
 }
@@ -1503,6 +1614,12 @@ function formatDateTime(value) {
     options.timeZoneName = "short";
   }
   return parsed.toLocaleString(undefined, options);
+}
+
+// Escape an identifier such as a rule_id and allow line breaks after separators,
+// so long dotted names wrap at word boundaries instead of mid-word.
+function breakableIdentifier(value) {
+  return escapeHtml(String(value ?? "")).replace(/([._\-/:])/g, "$1<wbr>");
 }
 
 function formatRelativeTime(value) {

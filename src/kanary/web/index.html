@@ -13,7 +13,15 @@
           <h1>KANARY Viewer</h1>
           <p class="subtitle">Alarm dashboard, operator workflow, and runtime inspection for the local KANARY node.</p>
         </div>
-        <div class="topbar-controls">
+        <button
+          id="topbar-settings-toggle"
+          class="topbar-settings-toggle"
+          type="button"
+          aria-controls="topbar-controls"
+          aria-expanded="false"
+          aria-label="Viewer settings"
+        >&#9881;</button>
+        <div class="topbar-controls" id="topbar-controls">
           <label class="compact-control">
             <span>Timezone</span>
             <select id="timezone-select">
@@ -112,7 +120,7 @@
                 </div>
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table data-table-cards" data-cards-for="alerts-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -137,7 +145,7 @@
                   <div class="panel-kicker">Alert Detail</div>
                   <h2 id="detail-title">Alert</h2>
                 </div>
-                <a href="#alerts" class="button button-secondary">Back to Alerts</a>
+                <a href="#alerts" class="button button-secondary detail-back-button">Back to Alerts</a>
               </div>
               <div id="detail-empty" class="muted">Select an alert from Dashboard or Alerts.</div>
               <div id="detail-content" class="hidden">
@@ -148,7 +156,7 @@
                     <h3>Acknowledge</h3>
                     <label>
                       Operator
-                      <input id="ack-operator" type="text" placeholder="Keita" />
+                      <input id="ack-operator" class="operator-input" type="text" placeholder="Keita" autocomplete="username" />
                     </label>
                     <label>
                       Reason
@@ -165,12 +173,18 @@
                     <h3>Silence For</h3>
                     <label>
                       Operator
-                      <input id="silence-for-operator" type="text" placeholder="Keita" />
+                      <input id="silence-for-operator" class="operator-input" type="text" placeholder="Keita" autocomplete="username" />
                     </label>
                     <label>
                       Minutes
-                      <input id="silence-for-minutes" type="number" min="1" value="10" />
+                      <input id="silence-for-minutes" type="number" min="1" value="10" inputmode="numeric" />
                     </label>
+                    <div class="silence-presets" role="group" aria-label="Silence duration presets">
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="10">10m</button>
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="60">1h</button>
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="240">4h</button>
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="1440">1d</button>
+                    </div>
                     <label>
                       Reason
                       <input id="silence-for-reason" type="text" placeholder="Maintenance or triage" />
@@ -178,11 +192,11 @@
                     <button id="silence-for-button" class="button">Create Silence</button>
                   </section>
 
-                  <section class="panel-subsection">
-                    <h3>Silence Window</h3>
+                  <details class="panel-subsection detail-collapsible" data-mobile-collapsed open>
+                    <summary><h3>Silence Window</h3></summary>
                     <label>
                       Operator
-                      <input id="silence-window-operator" type="text" placeholder="Keita" />
+                      <input id="silence-window-operator" class="operator-input" type="text" placeholder="Keita" autocomplete="username" />
                     </label>
                     <label>
                       Start
@@ -197,19 +211,19 @@
                       <input id="silence-window-reason" type="text" placeholder="Scheduled maintenance" />
                     </label>
                     <button id="silence-window-button" class="button">Create Window</button>
-                  </section>
+                  </details>
                 </div>
 
                 <div class="split-panels">
-                  <section class="panel-subsection">
-                    <h3>History</h3>
+                  <details class="panel-subsection detail-collapsible" data-mobile-collapsed open>
+                    <summary><h3>History</h3></summary>
                     <div id="history-content" class="history-list"></div>
-                  </section>
+                  </details>
 
-                  <section class="panel-subsection">
-                    <h3>Payload</h3>
+                  <details class="panel-subsection detail-collapsible" data-mobile-collapsed open>
+                    <summary><h3>Payload</h3></summary>
                     <pre id="payload-content" class="code-block"></pre>
-                  </section>
+                  </details>
                 </div>
               </div>
             </section>
@@ -238,7 +252,7 @@
                 History is disabled. Start KANARY with <code>--state-db /path/to/kanary.db</code> or set <code>KANARY_SQLITE_PATH</code> to persist alert and operator history.
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table data-table-cards" data-cards-for="history-body">
                   <thead>
                     <tr>
                       <th>Time</th>
@@ -270,7 +284,7 @@
                 </div>
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table data-table-cards" data-cards-for="sources-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -299,7 +313,7 @@
                 </div>
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table data-table-cards" data-cards-for="rules-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -332,7 +346,7 @@
               </div>
               <div id="outputs-summary"></div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table data-table-cards" data-cards-for="outputs-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -368,7 +382,7 @@
                 </div>
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table data-table-cards" data-cards-for="silences-body">
                   <thead>
                     <tr>
                       <th>ID</th>
@@ -400,7 +414,7 @@
                     <h3>Silence For</h3>
                     <label>
                       Operator
-                      <input id="admin-duration-operator" type="text" placeholder="Keita" />
+                      <input id="admin-duration-operator" class="operator-input" type="text" placeholder="Keita" autocomplete="username" />
                     </label>
                     <label>
                       Rule Pattern
@@ -429,7 +443,7 @@
                     <h3>Silence Window</h3>
                     <label>
                       Operator
-                      <input id="admin-window-operator" type="text" placeholder="Keita" />
+                      <input id="admin-window-operator" class="operator-input" type="text" placeholder="Keita" autocomplete="username" />
                     </label>
                     <label>
                       Rule Pattern
