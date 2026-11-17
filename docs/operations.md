@@ -60,6 +60,7 @@ Main arguments:
 - `--node-id`
 - `--exclude`
 - `--disable-default-viewer`
+- `--viewer-title`
 - `--no-output-emit`
 
 Environment variables:
@@ -68,6 +69,7 @@ Environment variables:
 - `KANARY_API_URL`
 - `KANARY_API_HOST`
 - `KANARY_NODE_ID`
+- `KANARY_VIEWER_TITLE`
 
 Kanary itself does not require any environment variables. Source-specific connection settings belong to each source implementation.
 

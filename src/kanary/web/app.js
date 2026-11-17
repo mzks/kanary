@@ -24,6 +24,7 @@ const state = {
   historyFilter: "",
   historyStateFilter: "",
   historyEnabled: true,
+  dataLoaded: false,
   historyLoaded: false,
   historyLoading: false,
   historyRequestToken: 0,
@@ -43,13 +44,22 @@ const MOBILE_MEDIA_QUERY = "(max-width: 760px)";
 
 function init() {
   bindControls();
+  bindDelegatedActions();
   initializeOperatorInputs();
   initializeMobileCollapsibles();
   initializeTimeZone();
+  renderTimeZoneHints();
+  document.getElementById("refresh-interval").value = String(state.refreshMs);
   restoreRoute();
   scheduleRefresh();
   refreshAll();
   window.addEventListener("hashchange", handleRouteChange);
+  // Stop polling while the tab is in the background; catch up when it returns.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      refreshAll();
+    }
+  });
 }
 
 function bindControls() {
@@ -93,11 +103,17 @@ function bindControls() {
     state.historyStateFilter = event.target.value;
     renderHistoryPage();
   });
-  document.getElementById("ack-button").addEventListener("click", submitAck);
+
+  // Forms: Enter submits and the browser checks required fields before our handlers run.
+  bindFormSubmit("ack-form", submitAck);
+  bindFormSubmit("silence-for-form", submitSilenceFor);
+  bindFormSubmit("silence-window-form", submitSilenceWindow);
+  bindFormSubmit("admin-duration-form", submitAdminDurationSilence);
+  bindFormSubmit("admin-window-form", submitAdminWindowSilence);
+  bindFormSubmit("cancel-silence-form", submitCancelSilence);
   document.getElementById("unack-button").addEventListener("click", submitUnack);
   document.getElementById("ack-operator").addEventListener("input", syncActionButtonState);
   document.getElementById("ack-reason").addEventListener("input", syncActionButtonState);
-  document.getElementById("silence-for-button").addEventListener("click", submitSilenceFor);
   document.getElementById("silence-for-minutes").addEventListener("input", syncSilencePresetState);
   for (const button of document.querySelectorAll("[data-silence-minutes]")) {
     button.addEventListener("click", () => {
@@ -106,24 +122,240 @@ function bindControls() {
     });
   }
   syncSilencePresetState();
-  document.getElementById("silence-window-button").addEventListener("click", submitSilenceWindow);
-  document.getElementById("admin-duration-button").addEventListener("click", submitAdminDurationSilence);
-  document.getElementById("admin-window-button").addEventListener("click", submitAdminWindowSilence);
   document.getElementById("admin-reload-dirty-button").addEventListener("click", reloadDirtyPlugins);
   document.getElementById("admin-reload-all-button").addEventListener("click", reloadAllPlugins);
   document.getElementById("admin-restart-engine-button").addEventListener("click", restartEngine);
-  document.getElementById("source-modal-close").addEventListener("click", closeSourceModal);
-  document.getElementById("plugin-info-modal-close").addEventListener("click", closePluginInfoModal);
-  document.getElementById("alert-state-modal-close").addEventListener("click", closeAlertStateModal);
-  for (const element of document.querySelectorAll("[data-close-source]")) {
-    element.addEventListener("click", closeSourceModal);
+  initializeDialogs();
+  initializeScrollableRegions();
+}
+
+function bindFormSubmit(formId, handler) {
+  document.getElementById(formId).addEventListener("submit", (event) => {
+    event.preventDefault();
+    handler();
+  });
+}
+
+// One listener for every button/link rendered into the tables and cards, so
+// re-rendering never has to re-bind and unchanged markup can be left alone.
+function bindDelegatedActions() {
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    // The header title is a home link; when already home it just returns to the top.
+    if (target.closest(".brand-link") && state.route === "dashboard") {
+      event.preventDefault();
+      window.scrollTo({ top: 0, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      return;
+    }
+    const closeButton = target.closest("[data-close-dialog]");
+    if (closeButton) {
+      closeButton.closest("dialog")?.close();
+      return;
+    }
+    const stateButton = target.closest("[data-open-alert-state]");
+    if (stateButton) {
+      openAlertStateModal(stateButton.dataset.openAlertState);
+      return;
+    }
+    const openRule = target.closest("[data-open-rule]");
+    if (openRule) {
+      openDetail(openRule.dataset.openRule);
+      return;
+    }
+    const applyButton = target.closest("[data-apply-plugin]");
+    if (applyButton) {
+      applyPlugin(applyButton.dataset.pluginType, applyButton.dataset.applyPlugin);
+      return;
+    }
+    const sourceButton = target.closest("[data-open-source]");
+    if (sourceButton) {
+      openSourceModal(sourceButton.dataset.sourceType, sourceButton.dataset.openSource);
+      return;
+    }
+    const infoButton = target.closest("[data-open-plugin-info]");
+    if (infoButton) {
+      openPluginInfoModal(infoButton.dataset.pluginType, infoButton.dataset.pluginId);
+      return;
+    }
+    const cancelButton = target.closest("[data-cancel-silence]");
+    if (cancelButton) {
+      openCancelSilenceDialog(cancelButton.dataset.cancelSilence);
+      return;
+    }
+    // Whole-card / whole-row taps are a convenience; links and buttons inside keep their own behavior.
+    if (target.closest("a, button, input, select, summary")) {
+      return;
+    }
+    const card = target.closest("[data-card-rule]");
+    if (card) {
+      openDetail(card.dataset.cardRule);
+      return;
+    }
+    const tableRow = target.closest("[data-row-rule]");
+    if (tableRow && window.matchMedia(MOBILE_MEDIA_QUERY).matches) {
+      openDetail(tableRow.dataset.rowRule);
+    }
+  });
+  // <details> toggle does not bubble; capture it to remember expanded tracebacks.
+  document.addEventListener(
+    "toggle",
+    (event) => {
+      const detail = event.target;
+      if (!(detail instanceof Element) || !detail.matches("[data-plugin-error-detail]")) {
+        return;
+      }
+      const pluginId = detail.dataset.pluginErrorDetail;
+      if (detail.open) {
+        state.expandedPluginErrors.add(pluginId);
+      } else {
+        state.expandedPluginErrors.delete(pluginId);
+      }
+    },
+    true
+  );
+}
+
+// Native <dialog>: Esc / back gesture close it; closedby="any" adds click-outside where supported.
+function initializeDialogs() {
+  if (typeof HTMLDialogElement === "undefined" || "closedBy" in HTMLDialogElement.prototype) {
+    return;
   }
-  for (const element of document.querySelectorAll("[data-close-plugin-info]")) {
-    element.addEventListener("click", closePluginInfoModal);
+  const outside = (event, dialog) => {
+    const rect = dialog.getBoundingClientRect();
+    return (
+      event.clientX < rect.left ||
+      event.clientX > rect.right ||
+      event.clientY < rect.top ||
+      event.clientY > rect.bottom
+    );
+  };
+  for (const dialog of document.querySelectorAll('dialog[closedby="any"]')) {
+    let pressedOutside = false;
+    dialog.addEventListener("pointerdown", (event) => {
+      pressedOutside = outside(event, dialog);
+    });
+    dialog.addEventListener("pointerup", (event) => {
+      if (pressedOutside && outside(event, dialog)) {
+        dialog.close();
+      }
+    });
   }
-  for (const element of document.querySelectorAll("[data-close-alert-state]")) {
-    element.addEventListener("click", closeAlertStateModal);
+}
+
+// Scrollable table regions need tabindex so keyboard users can scroll them,
+// but only while they actually overflow. Otherwise (e.g. the phone card
+// layout) a tap would focus the whole region and leave a focus ring on it.
+function syncScrollableRegions() {
+  for (const region of document.querySelectorAll(".table-wrap")) {
+    const scrollable = region.scrollWidth > region.clientWidth + 1;
+    if (scrollable) {
+      region.setAttribute("tabindex", "0");
+    } else {
+      region.removeAttribute("tabindex");
+    }
   }
+}
+
+function initializeScrollableRegions() {
+  if (typeof ResizeObserver === "undefined") {
+    window.addEventListener("resize", syncScrollableRegions);
+    return;
+  }
+  const observer = new ResizeObserver(() => syncScrollableRegions());
+  for (const region of document.querySelectorAll(".table-wrap")) {
+    observer.observe(region);
+    const table = region.querySelector("table");
+    if (table) {
+      observer.observe(table);
+    }
+  }
+}
+
+function showDialog(id) {
+  const dialog = document.getElementById(id);
+  if (!dialog.open) {
+    dialog.showModal();
+  }
+  return dialog;
+}
+
+// Update markup in place: unchanged nodes are left alone and changed ones are
+// patched, so periodic refreshes keep keyboard focus, text selection, open
+// <details>, and a button the user is about to press. Rows/cards carry data-key
+// so they are matched by identity when the order changes.
+const lastRenderedHtml = new WeakMap();
+function setHtml(element, html) {
+  if (!element || lastRenderedHtml.get(element) === html) {
+    return;
+  }
+  lastRenderedHtml.set(element, html);
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  morphChildren(element, template.content);
+}
+
+function nodeKey(node) {
+  return node.nodeType === 1 ? node.getAttribute("data-key") : null;
+}
+
+function morphChildren(parent, source) {
+  const oldNodes = [...parent.childNodes];
+  const oldByKey = new Map();
+  for (const node of oldNodes) {
+    const key = nodeKey(node);
+    if (key !== null) {
+      oldByKey.set(key, node);
+    }
+  }
+  const used = new Set();
+  const newNodes = [...source.childNodes];
+  newNodes.forEach((newNode, index) => {
+    const key = nodeKey(newNode);
+    let match = key !== null ? oldByKey.get(key) : oldNodes[index];
+    if (match && (used.has(match) || nodeKey(match) !== key || !sameNodeKind(match, newNode))) {
+      match = null;
+    }
+    const reference = parent.childNodes[index] || null;
+    if (match) {
+      used.add(match);
+      morphNode(match, newNode);
+      if (match !== reference) {
+        parent.insertBefore(match, reference);
+      }
+    } else {
+      parent.insertBefore(newNode, reference);
+    }
+  });
+  while (parent.childNodes.length > newNodes.length) {
+    parent.removeChild(parent.lastChild);
+  }
+}
+
+function sameNodeKind(left, right) {
+  return left.nodeType === right.nodeType && left.nodeName === right.nodeName;
+}
+
+function morphNode(target, source) {
+  if (target.nodeType !== 1) {
+    if (target.nodeValue !== source.nodeValue) {
+      target.nodeValue = source.nodeValue;
+    }
+    return;
+  }
+  for (const attribute of [...target.attributes]) {
+    if (!source.hasAttribute(attribute.name)) {
+      target.removeAttribute(attribute.name);
+    }
+  }
+  for (const attribute of [...source.attributes]) {
+    if (target.getAttribute(attribute.name) !== attribute.value) {
+      target.setAttribute(attribute.name, attribute.value);
+    }
+  }
+  morphChildren(target, source);
 }
 
 // Remember the operator name in this browser and keep every operator field in sync.
@@ -215,12 +447,20 @@ function restoreRoute() {
 }
 
 function handleRouteChange() {
+  const previousRoute = state.route;
+  const previousRuleId = state.selectedRuleId;
   const hash = window.location.hash.replace(/^#/, "");
   if (hash.startsWith("alert/")) {
     state.route = "detail";
     state.selectedRuleId = decodeURIComponent(hash.slice("alert/".length));
   } else {
     state.route = hash || "dashboard";
+  }
+  // A new page starts at the top. Otherwise a scroll offset from a long page
+  // leaves a short page showing only background (iOS Safari clamps the
+  // offset late, so the content seems to vanish for a moment).
+  if (state.route !== previousRoute || state.selectedRuleId !== previousRuleId) {
+    window.scrollTo(0, 0);
   }
   renderRoute();
 }
@@ -233,17 +473,52 @@ function renderRoute() {
   page.classList.remove("hidden");
 
   for (const link of document.querySelectorAll(".nav-link")) {
-    link.classList.toggle("active", link.dataset.route === state.route);
+    const current = link.dataset.route === state.route;
+    link.classList.toggle("active", current);
+    if (current) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
   }
   revealActiveNavLink();
   document.querySelector(".topbar").classList.remove("settings-open");
   document.getElementById("topbar-settings-toggle").setAttribute("aria-expanded", "false");
 
-  if (state.route === "detail") {
-    renderDetailPage();
-  }
+  renderActivePage();
   if (state.route === "history") {
     maybeRefreshHistory();
+  }
+}
+
+// Only the visible page is rendered; the others render when navigated to.
+function renderActivePage() {
+  switch (state.route) {
+    case "alerts":
+      renderAlertsPage();
+      break;
+    case "detail":
+      renderDetailPage();
+      break;
+    case "history":
+      renderHistoryPage();
+      break;
+    case "sources":
+      renderSourcesPage();
+      break;
+    case "rules":
+      renderRulesPage();
+      break;
+    case "outputs":
+      renderOutputsPage();
+      break;
+    case "silences":
+      renderSilencesPage();
+      break;
+    case "admin":
+      break;
+    default:
+      renderDashboardPage();
   }
 }
 
@@ -254,8 +529,24 @@ function revealActiveNavLink() {
   if (!active || sidebar.scrollWidth <= sidebar.clientWidth) {
     return;
   }
-  const left = active.offsetLeft - (sidebar.clientWidth - active.offsetWidth) / 2;
-  sidebar.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+  // Leave the bar alone when the active tab is already fully visible, so a tap
+  // never slides the tabs under the finger. Otherwise scroll just enough to
+  // bring it in (with a small margin), e.g. after navigating from elsewhere.
+  const margin = 16;
+  const viewLeft = sidebar.scrollLeft;
+  const viewRight = viewLeft + sidebar.clientWidth;
+  const tabLeft = active.offsetLeft;
+  const tabRight = tabLeft + active.offsetWidth;
+  let left;
+  if (tabLeft < viewLeft) {
+    left = tabLeft - margin;
+  } else if (tabRight > viewRight) {
+    left = tabRight - sidebar.clientWidth + margin;
+  } else {
+    return;
+  }
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  sidebar.scrollTo({ left: Math.max(0, left), behavior: reduceMotion ? "auto" : "smooth" });
 }
 
 function scheduleRefresh() {
@@ -264,7 +555,11 @@ function scheduleRefresh() {
     state.refreshTimer = null;
   }
   if (state.refreshMs > 0) {
-    state.refreshTimer = window.setInterval(refreshAll, state.refreshMs);
+    state.refreshTimer = window.setInterval(() => {
+      if (!document.hidden) {
+        refreshAll();
+      }
+    }, state.refreshMs);
   }
 }
 
@@ -280,19 +575,30 @@ function handleRefreshIntervalChange(event) {
 
 function handleTimeZoneChange(event) {
   state.timeZone = event.target.value || "browser";
-  renderDashboardPage();
-  renderAlertsPage();
-  renderSourcesPage();
-  renderRulesPage();
-  renderOutputsPage();
-  renderSilencesPage();
-  renderHistoryPage();
-  if (state.route === "detail") {
-    renderDetailPage();
+  renderTimeZoneHints();
+  renderActivePage();
+}
+
+function renderTimeZoneHints() {
+  const label = timeZoneDisplayLabel();
+  for (const hint of document.querySelectorAll("[data-timezone-hint]")) {
+    hint.textContent = `(${label})`;
   }
 }
 
+let refreshInFlight = null;
 async function refreshAll() {
+  // A slow network must not stack up overlapping polls.
+  if (refreshInFlight) {
+    return refreshInFlight;
+  }
+  refreshInFlight = refreshAllNow().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+async function refreshAllNow() {
   try {
     const [alertsPayload, pluginsPayload, silencesPayload, metaPayload] = await Promise.all([
       getJson("/alerts"),
@@ -304,6 +610,7 @@ async function refreshAll() {
     state.plugins = pluginsPayload.plugins || [];
     state.silences = silencesPayload.silences || [];
     state.meta = metaPayload || null;
+    state.dataLoaded = true;
 
     if (state.selectedRuleId && !state.alerts.find((alert) => alert.rule_id === state.selectedRuleId)) {
       state.selectedRuleId = null;
@@ -311,15 +618,7 @@ async function refreshAll() {
 
     renderBuildMeta();
     renderSidebarPluginStatus();
-    renderDashboardPage();
-    renderAlertsPage();
-    renderSourcesPage();
-    renderRulesPage();
-    renderOutputsPage();
-    renderSilencesPage();
-    if (state.route === "detail") {
-      renderDetailPage();
-    }
+    renderActivePage();
     if (state.route === "history") {
       maybeRefreshHistory();
     }
@@ -451,7 +750,7 @@ function renderDashboardPage() {
       className: "failed",
     },
   ];
-  document.getElementById("dashboard-cards").innerHTML = cards
+  setHtml(document.getElementById("dashboard-cards"), cards
     .map(
       (card) => `
         <article class="hero-card ${card.className}${card.value ? "" : " hero-card-zero"}">
@@ -461,9 +760,9 @@ function renderDashboardPage() {
         </article>
       `
     )
-    .join("");
+    .join(""));
 
-  document.getElementById("dashboard-severity-breakdown").innerHTML = ["CRITICAL", "ERROR", "WARN", "INFO"]
+  setHtml(document.getElementById("dashboard-severity-breakdown"), ["CRITICAL", "ERROR", "WARN", "INFO"]
     .map(
       (label) => `
         <span class="severity-chip severity-chip-${label}${severityCounts[label] ? "" : " severity-chip-zero"}">
@@ -472,22 +771,22 @@ function renderDashboardPage() {
         </span>
       `
     )
-    .join("");
+    .join(""));
 
   const container = document.getElementById("dashboard-active-alerts");
   if (activeAlerts.length === 0) {
-    container.innerHTML = `<div class="muted">No firing, acknowledged, or silenced alerts. No news is good news. Relax! ;)</div>`;
+    setHtml(container, `<div class="muted">No firing, acknowledged, or silenced alerts. No news is good news. Relax! ;)</div>`);
     return;
   }
 
-  container.innerHTML = activeAlerts
+  setHtml(container, activeAlerts
     .sort(compareAlerts)
     .map(
       (alert) => `
-        <article class="alert-card alert-card-state-${escapeHtml(alert.state)} alert-card-severity-${severityLabel(alert.severity)}" data-card-rule="${escapeHtml(alert.rule_id)}">
+        <article class="alert-card alert-card-state-${escapeHtml(alert.state)} alert-card-severity-${severityLabel(alert.severity)}" data-key="${escapeAttribute(alert.rule_id)}" data-card-rule="${escapeHtml(alert.rule_id)}">
           <div class="alert-card-header">
             <div>
-              <div class="alert-card-title">${breakableIdentifier(alert.rule_id)}</div>
+              <div class="alert-card-title"><a class="rule-link" href="#alert/${encodeURIComponent(alert.rule_id)}">${breakableIdentifier(alert.rule_id)}</a></div>
               <div class="alert-card-meta">
                 <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
                 <span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span>
@@ -495,7 +794,7 @@ function renderDashboardPage() {
                 <span class="alert-card-age" title="${escapeHtml(alert.active_since || "-")}"><span class="alert-card-age-prefix">Active since </span>${escapeHtml(formatRelativeTime(alert.active_since))}</span>
               </div>
             </div>
-            <button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Open</button>
+            <button type="button" class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Open</button>
           </div>
           <div class="alert-card-message">${renderLinkedText(alert.message || "-")}</div>
           <div class="alert-card-meta">
@@ -505,17 +804,7 @@ function renderDashboardPage() {
         </article>
       `
     )
-    .join("");
-
-  for (const card of container.querySelectorAll("[data-card-rule]")) {
-    card.addEventListener("click", (event) => {
-      // Let links inside the message work normally.
-      if (event.target.closest("a")) {
-        return;
-      }
-      openDetail(card.dataset.cardRule);
-    });
-  }
+    .join(""));
 }
 
 function renderAlertsPage() {
@@ -524,39 +813,23 @@ function renderAlertsPage() {
     .filter(matchesAlertFilter)
     .sort(compareAlerts);
 
-  tbody.innerHTML = alerts
+  setHtml(tbody, alerts
     .map(
       (alert) => `
-        <tr class="alert-row alert-row-severity-${severityLabel(alert.severity)}" data-row-rule="${escapeHtml(alert.rule_id)}">
+        <tr class="alert-row alert-row-severity-${severityLabel(alert.severity)}" data-key="${escapeAttribute(alert.rule_id)}" data-row-rule="${escapeHtml(alert.rule_id)}">
           <td class="plugin-primary-cell cell-name">
-            <div class="plugin-title">${breakableIdentifier(alert.rule_id)}</div>
+            <div class="plugin-title"><a class="rule-link" href="#alert/${encodeURIComponent(alert.rule_id)}">${breakableIdentifier(alert.rule_id)}</a></div>
           </td>
           <td class="cell-state">${formatAlertStateCell(alert)}</td>
           <td class="cell-severity"><span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span></td>
           <td class="cell-tags">${formatTagList(alert.tags, { empty: "-" })}</td>
           <td class="cell-outputs">${formatChipList(alert.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
           <td class="cell-message">${renderLinkedText(alert.message || "-")}</td>
-          <td class="action-cell cell-action"><button class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Detail</button></td>
+          <td class="action-cell cell-action"><button type="button" class="button button-secondary" data-open-rule="${escapeHtml(alert.rule_id)}">Detail</button></td>
         </tr>
       `
     )
-    .join("");
-
-  for (const button of tbody.querySelectorAll("[data-open-rule]")) {
-    button.addEventListener("click", () => openDetail(button.dataset.openRule));
-  }
-  // On phones the table is shown as cards without the Detail button: tap the row instead.
-  for (const tableRow of tbody.querySelectorAll("[data-row-rule]")) {
-    tableRow.addEventListener("click", (event) => {
-      if (!window.matchMedia(MOBILE_MEDIA_QUERY).matches || event.target.closest("a, button")) {
-        return;
-      }
-      openDetail(tableRow.dataset.rowRule);
-    });
-  }
-  for (const button of tbody.querySelectorAll("[data-open-alert-state]")) {
-    button.addEventListener("click", () => openAlertStateModal(button.dataset.openAlertState));
-  }
+    .join("") || emptyTableRow(7, "No alerts"));
 }
 
 async function renderDetailPage() {
@@ -575,7 +848,7 @@ async function renderDetailPage() {
 
   // Row classes let the phone layout reorder rows and hide secondary or empty ones.
   const emptyClass = (value) => (value ? "" : " detail-row-empty");
-  document.getElementById("detail-summary").innerHTML = [
+  setHtml(document.getElementById("detail-summary"), [
     row("Rule", alert.rule_id, false, "detail-row-secondary"),
     row("State", `<span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>`, true, "detail-row-state"),
     row("Severity", severityLabel(alert.severity), false, "detail-row-severity"),
@@ -588,19 +861,24 @@ async function renderDetailPage() {
     row("Description", renderLinkedText(alert.description || "-"), true, `detail-row-description${emptyClass(alert.description)}`),
     row("Runbook", renderLinkedText(alert.runbook || "-"), true, `detail-row-runbook${emptyClass(alert.runbook)}`),
     row("File", formatDefinitionFile(alert.definition_file), true, "detail-row-secondary"),
-    row("Source", `<button class="button button-secondary" id="detail-source-button">View Rule Source</button>`, true, "detail-row-secondary"),
+    row("Source", `<button type="button" class="button button-secondary" data-open-source="${escapeAttribute(alert.rule_id)}" data-source-type="rule">View Rule Source</button>`, true, "detail-row-secondary"),
     row("Message", renderLinkedText(alert.message || "-"), true, "detail-row-message"),
-  ].join("");
-  document.getElementById("detail-source-button").addEventListener("click", () => openSourceModal("rule", alert.rule_id));
+  ].join(""));
   updateDetailActionAvailability(alert);
 
   document.getElementById("payload-content").textContent = JSON.stringify(alert.payload || {}, null, 2);
 
+  // Ignore responses that arrive after the user moved to another alert.
+  const requestedRuleId = alert.rule_id;
   try {
-    const history = await getJson(`/history/${encodeURIComponent(alert.rule_id)}`);
-    renderHistory(history);
+    const history = await getJson(`/history/${encodeURIComponent(requestedRuleId)}`);
+    if (state.route === "detail" && state.selectedRuleId === requestedRuleId) {
+      renderHistory(history);
+    }
   } catch (error) {
-    document.getElementById("history-content").innerHTML = `<div class="history-item">History failed: ${escapeHtml(error.message)}</div>`;
+    if (state.route === "detail" && state.selectedRuleId === requestedRuleId) {
+      setHtml(document.getElementById("history-content"), `<div class="history-item">History failed: ${escapeHtml(describeError(error))}</div>`);
+    }
   }
 }
 
@@ -609,33 +887,23 @@ function renderSourcesPage() {
   const plugins = state.plugins
     .filter((plugin) => plugin.type === "source")
     .filter((plugin) => matchesPluginFilter(plugin, state.sourceFilter));
-  tbody.innerHTML = plugins
+  setHtml(tbody, plugins
     .map(
       (plugin) => `
-        <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
+        <tr class="${escapeHtml(pluginTableRowClass(plugin))}" data-key="${escapeAttribute(`${plugin.type}:${plugin.plugin_id}`)}">
           <td class="plugin-primary-cell cell-name">
             <div class="plugin-title">${breakableIdentifier(plugin.plugin_id)}</div>
           </td>
           <td class="cell-runtime">${formatPluginRuntime(plugin)}</td>
           <td class="cell-description">${formatPlainDescription(plugin.description)}</td>
           <td class="cell-info">${formatSourceInfo(plugin)}</td>
-          <td class="action-cell cell-apply"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button></td>
-          <td class="action-cell cell-source"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button></td>
+          <td class="action-cell cell-apply"><button type="button" class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="source">Apply</button></td>
+          <td class="action-cell cell-source"><button type="button" class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="source">Source</button></td>
         </tr>
       `
     )
-    .join("");
+    .join("") || emptyTableRow(6, "No source plugins"));
 
-  for (const button of tbody.querySelectorAll("[data-apply-plugin]")) {
-    button.addEventListener("click", () => applyPlugin(button.dataset.pluginType, button.dataset.applyPlugin));
-  }
-  for (const button of tbody.querySelectorAll("[data-open-source]")) {
-    button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
-  }
-  for (const button of tbody.querySelectorAll("[data-open-plugin-info]")) {
-    button.addEventListener("click", () => openPluginInfoModal(button.dataset.pluginType, button.dataset.pluginId));
-  }
-  bindPluginErrorDetailToggles(tbody);
 }
 
 function renderRulesPage() {
@@ -643,10 +911,10 @@ function renderRulesPage() {
   const plugins = state.plugins
     .filter((plugin) => plugin.type === "rule")
     .filter((plugin) => matchesPluginFilter(plugin, state.ruleFilter));
-  tbody.innerHTML = plugins
+  setHtml(tbody, plugins
     .map(
       (plugin) => `
-        <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
+        <tr class="${escapeHtml(pluginTableRowClass(plugin))}" data-key="${escapeAttribute(`${plugin.type}:${plugin.plugin_id}`)}">
           <td class="plugin-primary-cell cell-name">
             <div class="plugin-title">${breakableIdentifier(plugin.plugin_id)}</div>
           </td>
@@ -656,23 +924,13 @@ function renderRulesPage() {
           <td class="cell-tags">${formatTagList(plugin.tags, { empty: "-" })}</td>
           <td class="cell-outputs">${formatChipList(plugin.matched_outputs, { empty: "-", chipClass: "meta-chip meta-chip-output", family: "output" })}</td>
           <td class="cell-info">${formatRuleInfo(plugin)}</td>
-          <td class="action-cell cell-apply"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button></td>
-          <td class="action-cell cell-source"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button></td>
+          <td class="action-cell cell-apply"><button type="button" class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="rule">Apply</button></td>
+          <td class="action-cell cell-source"><button type="button" class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="rule">Source</button></td>
         </tr>
       `
     )
-    .join("");
+    .join("") || emptyTableRow(9, "No rule plugins"));
 
-  for (const button of tbody.querySelectorAll("[data-apply-plugin]")) {
-    button.addEventListener("click", () => applyPlugin(button.dataset.pluginType, button.dataset.applyPlugin));
-  }
-  for (const button of tbody.querySelectorAll("[data-open-source]")) {
-    button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
-  }
-  for (const button of tbody.querySelectorAll("[data-open-plugin-info]")) {
-    button.addEventListener("click", () => openPluginInfoModal(button.dataset.pluginType, button.dataset.pluginId));
-  }
-  bindPluginErrorDetailToggles(tbody);
 }
 
 function renderOutputsPage() {
@@ -684,10 +942,10 @@ function renderOutputsPage() {
     .sort(comparePluginHealth);
   summary.innerHTML = "";
 
-  tbody.innerHTML = outputs
+  setHtml(tbody, outputs
     .map(
       (plugin) => `
-        <tr class="${escapeHtml(pluginTableRowClass(plugin))}">
+        <tr class="${escapeHtml(pluginTableRowClass(plugin))}" data-key="${escapeAttribute(`${plugin.type}:${plugin.plugin_id}`)}">
           <td class="plugin-primary-cell cell-name">
             <div class="plugin-title">${breakableIdentifier(plugin.plugin_id)}</div>
           </td>
@@ -697,69 +955,83 @@ function renderOutputsPage() {
           <td class="cell-exclude">${formatChipList(plugin.exclude_tags, { empty: "-", tagColors: true })}</td>
           <td class="cell-description">${formatPlainDescription(plugin.description)}</td>
           <td class="cell-info">${formatOutputInfo(plugin)}</td>
-          <td class="action-cell cell-apply"><button class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button></td>
-          <td class="action-cell cell-source"><button class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button></td>
+          <td class="action-cell cell-apply"><button type="button" class="button button-compact" data-apply-plugin="${escapeHtml(plugin.plugin_id)}" data-plugin-type="output">Apply</button></td>
+          <td class="action-cell cell-source"><button type="button" class="button button-secondary button-compact" data-open-source="${escapeHtml(plugin.plugin_id)}" data-source-type="output">Source</button></td>
         </tr>
       `
     )
-    .join("");
+    .join("") || emptyTableRow(9, "No output plugins"));
 
-  for (const button of tbody.querySelectorAll("[data-apply-plugin]")) {
-    button.addEventListener("click", () => applyPlugin(button.dataset.pluginType, button.dataset.applyPlugin));
-  }
-  for (const button of tbody.querySelectorAll("[data-open-source]")) {
-    button.addEventListener("click", () => openSourceModal(button.dataset.sourceType, button.dataset.openSource));
-  }
-  for (const button of tbody.querySelectorAll("[data-open-plugin-info]")) {
-    button.addEventListener("click", () => openPluginInfoModal(button.dataset.pluginType, button.dataset.pluginId));
-  }
-  bindPluginErrorDetailToggles(tbody);
 }
 
 function renderSilencesPage() {
   const tbody = document.getElementById("silences-body");
-  tbody.innerHTML = state.silences
+  setHtml(tbody, state.silences
     .filter(matchesSilenceFilter)
     .sort(compareSilenceRows)
     .map((silence) => {
       const targets = [...(silence.rule_patterns || []), ...(silence.tags || []).map((tag) => `#${tag}`)].join(", ") || "-";
       const status = silenceDisplayStatus(silence);
       return `
-        <tr class="silence-row">
+        <tr class="silence-row" data-key="${escapeAttribute(silence.silence_id)}">
           <td class="cell-id">${escapeHtml(shortId(silence.silence_id))}</td>
           <td class="cell-state"><span class="state-pill state-${escapeHtml(statusToColor(status))}">${escapeHtml(status)}</span></td>
           <td class="cell-window" title="${escapeHtml((silence.start_at || "-") + " -> " + (silence.end_at || "-"))}">${escapeHtml(formatWindow(silence.start_at, silence.end_at))}</td>
           <td class="cell-name"><span class="silence-targets">${breakableIdentifier(targets)}</span></td>
           <td class="cell-operator">${escapeHtml(silence.created_by || "-")}</td>
           <td class="cell-reason">${escapeHtml(silence.reason || "-")}</td>
-          <td class="action-cell cell-action">${silence.cancelled_at || status === "EXPIRED" ? "" : `<button class="button button-danger" data-cancel-silence="${escapeHtml(silence.silence_id)}">Cancel</button>`}</td>
+          <td class="action-cell cell-action">${silence.cancelled_at || status === "EXPIRED" ? "" : `<button type="button" class="button button-danger" data-cancel-silence="${escapeHtml(silence.silence_id)}">Cancel</button>`}</td>
         </tr>
       `;
     })
-    .join("");
+    .join("") || emptyTableRow(7, state.hidePastSilences ? "No active silences" : "No silences"));
 
-  for (const button of tbody.querySelectorAll("[data-cancel-silence]")) {
-    button.addEventListener("click", async () => {
-      const operator = window.prompt("Operator for cancelling this silence", savedOperator() || "");
-      if (!operator) {
-        return;
-      }
-      const reason = window.prompt("Reason for cancelling this silence", "") || "";
-      await postJson(`/silences/${button.dataset.cancelSilence}/cancel`, { operator, reason });
-      refreshAll();
-    });
+}
+
+function emptyTableRow(columns, message) {
+  return `<tr class="empty-row" data-key="empty"><td colspan="${columns}" class="muted">${escapeHtml(state.dataLoaded ? message : "Loading...")}</td></tr>`;
+}
+
+function openCancelSilenceDialog(silenceId) {
+  const silence = state.silences.find((item) => item.silence_id === silenceId);
+  const targets = silence
+    ? [...(silence.rule_patterns || []), ...(silence.tags || []).map((tag) => `#${tag}`)].join(", ")
+    : "";
+  const form = document.getElementById("cancel-silence-form");
+  form.dataset.silenceId = silenceId;
+  document.getElementById("cancel-silence-meta").textContent = `${shortId(silenceId)}${targets ? ` · ${targets}` : ""}`;
+  document.getElementById("cancel-silence-reason").value = "";
+  const operatorInput = document.getElementById("cancel-silence-operator");
+  if (!operatorInput.value) {
+    operatorInput.value = savedOperator();
   }
+  showDialog("cancel-silence-dialog");
+}
+
+async function submitCancelSilence() {
+  const form = document.getElementById("cancel-silence-form");
+  const silenceId = form.dataset.silenceId;
+  const operator = document.getElementById("cancel-silence-operator").value.trim();
+  const reason = document.getElementById("cancel-silence-reason").value.trim();
+  if (!silenceId || !operator) {
+    return;
+  }
+  await runPendingAction("cancel-silence", ["cancel-silence-submit"], async () => {
+    await postJson(`/silences/${encodeURIComponent(silenceId)}/cancel`, { operator, reason });
+    document.getElementById("cancel-silence-dialog").close();
+    await refreshAll();
+  });
 }
 
 function renderHistory(history) {
   const container = document.getElementById("history-content");
   if (history.enabled === false) {
-    container.innerHTML = `
+    setHtml(container, `
       <div class="history-item">
         <div class="history-meta">History is disabled</div>
         <div>Start KANARY with <code>--state-db /path/to/kanary.db</code> or set <code>KANARY_SQLITE_PATH</code> to persist alert and operator history.</div>
       </div>
-    `;
+    `);
     return;
   }
   const entries = [
@@ -801,7 +1073,7 @@ function renderHistory(history) {
     })),
   ]
     .sort((left, right) => parseIsoTime(right.at) - parseIsoTime(left.at));
-  container.innerHTML = entries.map((entry) => entry.html).join("") || `<div class="history-item">No history</div>`;
+  setHtml(container, entries.map((entry) => entry.html).join("") || `<div class="history-item">No history</div>`);
 }
 
 function maybeRefreshHistory() {
@@ -910,15 +1182,17 @@ function renderHistoryPage() {
 
   if (state.historyLoaded && !state.historyEnabled) {
     notice.classList.remove("hidden");
-    tbody.innerHTML = "";
+    setHtml(tbody, "");
     return;
   }
   notice.classList.add("hidden");
 
   const rows = state.historyEntries.filter(historyEntryMatchesFilters);
-  tbody.innerHTML =
+  setHtml(
+    tbody,
     rows.map(renderHistoryRow).join("") ||
-    `<tr><td colspan="6" class="muted">${state.historyLoaded ? "No history" : "Loading..."}</td></tr>`;
+      `<tr class="empty-row" data-key="empty"><td colspan="6" class="muted">${state.historyLoaded ? "No history" : "Loading..."}</td></tr>`
+  );
 
   if (!status.textContent) {
     if (state.historyLoading && !state.historyLoaded) {
@@ -966,7 +1240,7 @@ function renderHistoryRow(entry) {
     ? `<a class="history-rule-link" href="#alert/${encodeURIComponent(entry.rule_id)}">${breakableIdentifier(entry.rule_id)}</a>`
     : entry.rule_id
       ? `<span title="This rule is not currently loaded">${breakableIdentifier(entry.rule_id)}</span>`
-      : `<span class="muted">-</span>`;
+      : `<span class="muted empty-placeholder">-</span>`;
   const timeCell = `<span title="${escapeHtml(entry.occurred_at || "-")}">${escapeHtml(formatDateTime(entry.occurred_at))}</span>`;
 
   if (entry.kind === "alert_event") {
@@ -986,7 +1260,7 @@ function renderHistoryRow(entry) {
         <td class="cell-change">${formatHistoryStateChange(entry.previous_state, entry.current_state, entry.transition)}</td>
         <td class="cell-severity">${formatHistorySeverity(entry.previous_severity, entry.current_severity ?? entry.severity)}</td>
         <td class="cell-tags">${formatTagList(entry.tags, { empty: "-" })}</td>
-        <td class="history-detail cell-detail">${detailParts.map((part) => `<div>${escapeHtml(part)}</div>`).join("") || `<span class="muted">-</span>`}</td>
+        <td class="history-detail cell-detail">${detailParts.map((part) => `<div>${escapeHtml(part)}</div>`).join("") || `<span class="muted empty-placeholder">-</span>`}</td>
       </tr>
     `;
   }
@@ -1006,7 +1280,7 @@ function renderHistoryRow(entry) {
 function formatOperatorActionSeverity(entry) {
   const previousSeverity = entry.details?.previous_severity;
   if (previousSeverity == null) {
-    return `<span class="muted">-</span>`;
+    return `<span class="muted empty-placeholder">-</span>`;
   }
   const label = severityLabel(previousSeverity);
   return `<span class="severity-badge severity-${escapeHtml(label)}">${escapeHtml(label)}</span>`;
@@ -1302,18 +1576,10 @@ async function openSourceModal(pluginType, pluginId) {
   try {
     const payload = await getJson(`/plugins/${encodeURIComponent(pluginType)}/${encodeURIComponent(pluginId)}/source`);
     renderSourceModal(payload);
-    const modal = document.getElementById("source-modal");
-    modal.classList.remove("hidden");
-    modal.setAttribute("aria-hidden", "false");
+    showDialog("source-modal");
   } catch (error) {
-    window.alert(`Source view failed: ${error.message}`);
+    window.alert(`Source view failed: ${describeError(error)}`);
   }
-}
-
-function closeSourceModal() {
-  const modal = document.getElementById("source-modal");
-  modal.classList.add("hidden");
-  modal.setAttribute("aria-hidden", "true");
 }
 
 function openPluginInfoModal(pluginType, pluginId) {
@@ -1323,15 +1589,7 @@ function openPluginInfoModal(pluginType, pluginId) {
     return;
   }
   renderPluginInfoModal(plugin);
-  const modal = document.getElementById("plugin-info-modal");
-  modal.classList.remove("hidden");
-  modal.setAttribute("aria-hidden", "false");
-}
-
-function closePluginInfoModal() {
-  const modal = document.getElementById("plugin-info-modal");
-  modal.classList.add("hidden");
-  modal.setAttribute("aria-hidden", "true");
+  showDialog("plugin-info-modal");
 }
 
 function openAlertStateModal(ruleId) {
@@ -1341,15 +1599,7 @@ function openAlertStateModal(ruleId) {
     return;
   }
   renderAlertStateModal(alert);
-  const modal = document.getElementById("alert-state-modal");
-  modal.classList.remove("hidden");
-  modal.setAttribute("aria-hidden", "false");
-}
-
-function closeAlertStateModal() {
-  const modal = document.getElementById("alert-state-modal");
-  modal.classList.add("hidden");
-  modal.setAttribute("aria-hidden", "true");
+  showDialog("alert-state-modal");
 }
 
 function renderSourceModal(payload) {
@@ -1471,7 +1721,7 @@ function formatAlertStateCell(alert) {
   return `
     <div class="state-with-detail">
       <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
-      ${hasDetails ? `<button class="state-detail-button" data-open-alert-state="${escapeAttribute(alert.rule_id)}" aria-label="Show state details for ${escapeAttribute(alert.rule_id)}">i</button>` : ""}
+      ${hasDetails ? `<button type="button" class="state-detail-button" data-open-alert-state="${escapeAttribute(alert.rule_id)}" aria-label="Show state details for ${escapeAttribute(alert.rule_id)}">i</button>` : ""}
     </div>
   `;
 }
@@ -1761,8 +2011,39 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Interpret a <input type="datetime-local"> value in the time zone selected in
+// the viewer (not always the browser's), so what the operator types matches
+// what the rest of the viewer displays.
 function localDateTimeToIso(value) {
-  return new Date(value).toISOString();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(value || ""));
+  if (!match || state.timeZone === "browser") {
+    return new Date(value).toISOString();
+  }
+  const [, year, month, day, hours, minutes, seconds] = match.map((part) => (part === undefined ? "0" : part));
+  const asUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hours), Number(minutes), Number(seconds));
+  return new Date(asUtc - selectedOffsetMinutes() * 60 * 1000).toISOString();
+}
+
+function selectedOffsetMinutes() {
+  if (state.timeZone === "UTC") {
+    return 0;
+  }
+  const match = /^offset:([+-])(\d{2}):(\d{2})$/.exec(state.timeZone);
+  if (!match) {
+    return 0;
+  }
+  const sign = match[1] === "+" ? 1 : -1;
+  return sign * (Number(match[2]) * 60 + Number(match[3]));
+}
+
+function timeZoneDisplayLabel() {
+  if (state.timeZone === "browser") {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "browser time";
+  }
+  if (state.timeZone === "UTC") {
+    return "UTC";
+  }
+  return `UTC${state.timeZone.slice("offset:".length)}`;
 }
 
 function severityLabel(value) {
@@ -1843,7 +2124,7 @@ function formatTagList(tags, options = {}) {
 function formatChipList(values, options = {}) {
   const items = Array.isArray(values) ? values.filter(Boolean) : [];
   if (items.length === 0) {
-    return options.empty ? `<span class="muted">${escapeHtml(options.empty)}</span>` : "";
+    return options.empty ? `<span class="muted empty-placeholder">${escapeHtml(options.empty)}</span>` : "";
   }
   return `
     <div class="tag-list">
@@ -1890,7 +2171,7 @@ function hashString(value) {
 }
 
 function formatInfoButton(pluginType, pluginId) {
-  return `<button class="button button-secondary button-compact button-info" data-open-plugin-info="1" data-plugin-type="${escapeAttribute(pluginType)}" data-plugin-id="${escapeAttribute(pluginId)}">Info</button>`;
+  return `<button type="button" class="button button-secondary button-compact button-info" data-open-plugin-info="1" data-plugin-type="${escapeAttribute(pluginType)}" data-plugin-id="${escapeAttribute(pluginId)}">Info</button>`;
 }
 
 function alertHasStateDetails(alert) {
@@ -2037,19 +2318,6 @@ function baseName(value) {
   return String(value || "").split("/").pop() || String(value || "");
 }
 
-function bindPluginErrorDetailToggles(container) {
-  for (const detail of container.querySelectorAll("[data-plugin-error-detail]")) {
-    const pluginId = detail.dataset.pluginErrorDetail;
-    detail.addEventListener("toggle", () => {
-      if (detail.open) {
-        state.expandedPluginErrors.add(pluginId);
-      } else {
-        state.expandedPluginErrors.delete(pluginId);
-      }
-    });
-  }
-}
-
 function statusToColor(status) {
   if (status === "ACTIVE") return "SILENCED";
   if (status === "EXPIRED") return "SUPPRESSED";
@@ -2114,6 +2382,26 @@ async function postJson(path, body) {
   return response.json();
 }
 
+function reportActionError(error) {
+  const message = describeError(error);
+  setRefreshStatus(`Action failed: ${message}`, true);
+  window.alert(`Action failed: ${message}`);
+}
+
+// Server errors arrive as JSON text such as {"error": "..."}; show just the message.
+function describeError(error) {
+  const raw = String(error && error.message ? error.message : error || "Unknown error");
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.error === "string") {
+      return parsed.error;
+    }
+  } catch (parseError) {
+    // Not JSON; use the raw text.
+  }
+  return raw;
+}
+
 async function runPendingAction(actionKey, buttonIds, callback) {
   if (state.pendingActions.has(actionKey)) {
     return;
@@ -2130,6 +2418,9 @@ async function runPendingAction(actionKey, buttonIds, callback) {
   }
   try {
     await callback();
+  } catch (error) {
+    // Surface failures (network, validation, server errors) instead of failing silently.
+    reportActionError(error);
   } finally {
     state.pendingActions.delete(actionKey);
     buttons.forEach((button, index) => {
@@ -2150,6 +2441,7 @@ function syncActionButtonState() {
     { actionKey: "detail-silence-window", buttonId: "silence-window-button" },
     { actionKey: "admin-silence-duration", buttonId: "admin-duration-button" },
     { actionKey: "admin-silence-window", buttonId: "admin-window-button" },
+    { actionKey: "cancel-silence", buttonId: "cancel-silence-submit" },
     { actionKey: "reload-dirty", buttonId: "admin-reload-dirty-button" },
     { actionKey: "reload-all", buttonId: "admin-reload-all-button" },
     { actionKey: "reload-full", buttonId: "admin-restart-engine-button" },

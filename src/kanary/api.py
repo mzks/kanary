@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ast
 from importlib import metadata as importlib_metadata
@@ -13,7 +14,7 @@ from typing import Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .engine import Engine
-from .constants import AlertState
+from .constants import DEFAULT_VIEWER_TITLE, AlertState
 
 WEB_ROOT = Path(__file__).with_name("web")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,11 +30,13 @@ class ControlAPI:
         host: str = "0.0.0.0",
         port: int = 8000,
         enable_default_viewer: bool = True,
+        viewer_title: str = DEFAULT_VIEWER_TITLE,
     ) -> None:
         self._engine_getter = engine_getter
         self._reload_callback = reload_callback
         self._meta_getter = meta_getter or (lambda: {})
         self._enable_default_viewer = enable_default_viewer
+        self._viewer_title = viewer_title.strip() or DEFAULT_VIEWER_TITLE
         self.host = host
         self.port = port
         self._server = ThreadingHTTPServer((host, port), self._build_handler())
@@ -58,7 +61,7 @@ class ControlAPI:
                     if not self.server.control_api._enable_default_viewer:
                         self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                         return
-                    self._write_file(WEB_ROOT / "index.html", "text/html; charset=utf-8")
+                    self._write_viewer_index()
                     return
 
                 if request_path == "/viewer/app.js":
@@ -522,6 +525,21 @@ class ControlAPI:
                     return
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _write_viewer_index(self) -> None:
+                try:
+                    html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                title = escape(self.server.control_api._viewer_title, quote=True)
+                html = html.replace(f">{DEFAULT_VIEWER_TITLE}<", f">{title}<")
+                body = html.encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)

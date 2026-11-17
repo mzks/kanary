@@ -48,6 +48,7 @@ kanary ./plugins \
 - `--node-id`
 - `--exclude`
 - `--disable-default-viewer`
+- `--viewer-title`
 - `--no-output-emit`
 
 主な環境変数:
@@ -56,6 +57,7 @@ kanary ./plugins \
 - `KANARY_API_URL`
 - `KANARY_API_HOST`
 - `KANARY_NODE_ID`
+- `KANARY_VIEWER_TITLE`
 
 Kanary 本体に必須の環境変数はありません。接続情報などは各 `Source` 実装側で定義します。
 

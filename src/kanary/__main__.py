@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tomllib
 
+from .constants import DEFAULT_VIEWER_TITLE
 from .loader import RuleDirectoryLoader
 from .runtime import AUTO_RELOAD_CHOICES, DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
 
@@ -96,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the built-in default Web viewer while keeping the HTTP API enabled.",
     )
     run_parser.add_argument(
+        "--viewer-title",
+        default=os.environ.get("KANARY_VIEWER_TITLE", DEFAULT_VIEWER_TITLE),
+        help=f"Title shown in the built-in Web viewer header and browser tab. Defaults to KANARY_VIEWER_TITLE or '{DEFAULT_VIEWER_TITLE}'.",
+    )
+    run_parser.add_argument(
         "--no-output-emit",
         action="store_true",
         help="Load, initialize, and route Output plugins without calling emit().",
@@ -170,6 +176,7 @@ def main() -> int:
             api_host=args.api_host,
             api_port=args.api_port,
             enable_default_viewer=not args.disable_default_viewer,
+            viewer_title=args.viewer_title,
             output_emit_enabled=not args.no_output_emit,
             state_db_path=Path(args.state_db) if args.state_db else None,
             node_id=args.node_id,

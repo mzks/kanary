@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from .api import ControlAPI
+from .constants import DEFAULT_VIEWER_TITLE
 from .engine import Engine
 from .filtering import apply_excludes
 from .loader import RuleDirectoryLoader
@@ -35,6 +36,7 @@ class RuntimeConfig:
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     enable_default_viewer: bool = True
+    viewer_title: str = DEFAULT_VIEWER_TITLE
     output_emit_enabled: bool = True
     print_alerts: bool = False
     exclude_plugins: list[str] | None = None
@@ -86,6 +88,7 @@ class EngineRuntime:
             host=config.api_host,
             port=config.api_port,
             enable_default_viewer=config.enable_default_viewer,
+            viewer_title=config.viewer_title,
         )
 
     def start(self) -> None:

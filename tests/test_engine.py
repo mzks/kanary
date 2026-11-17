@@ -2938,6 +2938,30 @@ class ControlAPIIntegrationTest(unittest.TestCase):
             thread.join(timeout=2.0)
             engine.shutdown()
 
+    def test_viewer_title_can_be_customized(self) -> None:
+        engine = kanary.Engine(output_registry={})
+        engine.start()
+        api = kanary.ControlAPI(
+            engine_getter=lambda: engine,
+            reload_callback=lambda: True,
+            host="127.0.0.1",
+            port=0,
+            viewer_title="Detector <Alarms> & Co",
+        )
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        try:
+            port = api._server.server_address[1]
+            with urlopen(f"http://127.0.0.1:{port}/viewer") as response:
+                body = response.read().decode()
+            self.assertIn("<title>Detector &lt;Alarms&gt; &amp; Co</title>", body)
+            self.assertIn('href="#dashboard">Detector &lt;Alarms&gt; &amp; Co</a>', body)
+            self.assertNotIn("KANARY Viewer", body)
+        finally:
+            api.shutdown()
+            thread.join(timeout=2.0)
+            engine.shutdown()
+
     def test_viewer_can_be_disabled(self) -> None:
         engine = kanary.Engine(output_registry={})
         engine.start()

@@ -1,5 +1,7 @@
 from enum import IntEnum, StrEnum
 
+DEFAULT_VIEWER_TITLE = "KANARY Viewer"
+
 
 class Severity(IntEnum):
     INFO = 10
