@@ -387,6 +387,8 @@ process restart を行ってください。
   runtime logging level を指定します。
 - `--disable-default-viewer`
   組み込み Web viewer だけを無効化します。HTTP API は引き続き有効です。
+- `--viewer-title`
+  Web viewer のヘッダーとブラウザタブに表示するタイトルを指定します。複数ノードを見分けたいときに使います。既定は `KANARY Viewer` で、`KANARY_VIEWER_TITLE` があればその値を使います。
 
 主な環境変数:
 

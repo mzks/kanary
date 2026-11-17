@@ -392,6 +392,8 @@ Common runtime options:
   Runtime logging level.
 - `--disable-default-viewer`
   Disables only the built-in Web viewer. The HTTP API stays enabled.
+- `--viewer-title`
+  Title shown in the Web viewer header and browser tab, useful to tell several nodes apart. Default: `KANARY Viewer`, or `KANARY_VIEWER_TITLE` if set.
 
 Common environment variables:
 

@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#e7dcc5" />
     <title>KANARY Viewer</title>
     <link rel="stylesheet" href="/viewer/styles.css" />
   </head>
@@ -10,10 +11,17 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-block">
-          <h1>KANARY Viewer</h1>
+          <h1><a class="brand-link" href="#dashboard">KANARY Viewer</a></h1>
           <p class="subtitle">Alarm dashboard, operator workflow, and runtime inspection for the local KANARY node.</p>
         </div>
-        <div class="topbar-controls">
+        <button
+          id="topbar-settings-toggle"
+          class="topbar-settings-toggle"
+          type="button"
+          aria-controls="topbar-controls"
+          aria-expanded="false"
+        >Settings<span class="topbar-settings-chevron" aria-hidden="true">&#9662;</span></button>
+        <div class="topbar-controls" id="topbar-controls">
           <label class="compact-control">
             <span>Timezone</span>
             <select id="timezone-select">
@@ -34,7 +42,7 @@
               <option value="0">Manual</option>
             </select>
           </label>
-          <button id="refresh-now-button" class="button button-secondary">Refresh Now</button>
+          <button id="refresh-now-button" type="button" class="button button-secondary">Refresh Now</button>
           <span id="refresh-status" class="muted">Waiting for first refresh</span>
         </div>
       </header>
@@ -45,7 +53,7 @@
       </div>
 
       <div class="workspace">
-        <nav class="sidebar">
+        <nav class="sidebar" aria-label="Primary">
           <a href="#dashboard" class="nav-link" data-route="dashboard"><span class="nav-link-title">Dashboard</span></a>
           <a href="#alerts" class="nav-link" data-route="alerts"><span class="nav-link-title">Alerts</span></a>
           <a href="#history" class="nav-link" data-route="history"><span class="nav-link-title">History</span></a>
@@ -81,7 +89,7 @@
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Priority View</div>
-                  <h2>Open Alerts</h2>
+                  <h2 id="dashboard-heading">Open Alerts</h2>
                 </div>
                 <div class="dashboard-aside">
                   <span class="muted" id="dashboard-summary">Only FIRING, ACKED, and SILENCED alerts are shown here.</span>
@@ -97,11 +105,11 @@
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Full Inventory</div>
-                  <h2>All Alerts</h2>
+                  <h2 id="alerts-heading">All Alerts</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="alert-filter" type="search" placeholder="Filter by rule, state, message, output. Supports glob." />
-                  <select id="state-filter">
+                  <input id="alert-filter" type="search" aria-label="Filter alerts" placeholder="Filter by rule, state, message, output. Supports glob." />
+                  <select id="state-filter" aria-label="Filter alerts by state">
                     <option value="">All states</option>
                     <option value="FIRING">FIRING</option>
                     <option value="ACKED">ACKED</option>
@@ -111,8 +119,8 @@
                   </select>
                 </div>
               </div>
-              <div class="table-wrap">
-                <table class="data-table">
+              <div class="table-wrap" role="region" aria-labelledby="alerts-heading">
+                <table class="data-table data-table-cards" data-cards-for="alerts-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -137,79 +145,87 @@
                   <div class="panel-kicker">Alert Detail</div>
                   <h2 id="detail-title">Alert</h2>
                 </div>
-                <a href="#alerts" class="button button-secondary">Back to Alerts</a>
+                <a href="#alerts" class="button button-secondary detail-back-button">Back to Alerts</a>
               </div>
               <div id="detail-empty" class="muted">Select an alert from Dashboard or Alerts.</div>
               <div id="detail-content" class="hidden">
                 <div id="detail-summary" class="detail-grid"></div>
 
                 <div class="detail-actions">
-                  <section class="panel-subsection">
-                    <h3>Acknowledge</h3>
+                  <form id="ack-form" class="panel-subsection action-form" aria-labelledby="ack-heading">
+                    <h3 id="ack-heading">Acknowledge</h3>
                     <label>
                       Operator
-                      <input id="ack-operator" type="text" placeholder="Keita" />
+                      <input id="ack-operator" class="operator-input" type="text" placeholder="Your name" autocomplete="name" required />
                     </label>
                     <label>
                       Reason
                       <input id="ack-reason" type="text" placeholder="Investigating the issue" />
                     </label>
                     <div class="inline-actions">
-                      <button id="ack-button" class="button">ACK</button>
-                      <button id="unack-button" class="button button-secondary">UNACK</button>
+                      <button id="ack-button" type="submit" class="button">ACK</button>
+                      <button id="unack-button" type="button" class="button button-secondary">UNACK</button>
                     </div>
                     <div id="ack-notice" class="action-notice hidden" role="status" aria-live="polite"></div>
-                  </section>
+                  </form>
 
-                  <section class="panel-subsection">
-                    <h3>Silence For</h3>
+                  <form id="silence-for-form" class="panel-subsection action-form" aria-labelledby="silence-for-heading">
+                    <h3 id="silence-for-heading">Silence For</h3>
                     <label>
                       Operator
-                      <input id="silence-for-operator" type="text" placeholder="Keita" />
+                      <input id="silence-for-operator" class="operator-input" type="text" placeholder="Your name" autocomplete="name" required />
                     </label>
                     <label>
                       Minutes
-                      <input id="silence-for-minutes" type="number" min="1" value="10" />
+                      <input id="silence-for-minutes" type="number" min="1" value="10" required />
                     </label>
+                    <div class="silence-presets" role="group" aria-label="Silence duration presets">
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="10">10m</button>
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="60">1h</button>
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="240">4h</button>
+                      <button type="button" class="button button-secondary button-compact" data-silence-minutes="1440">1d</button>
+                    </div>
                     <label>
                       Reason
                       <input id="silence-for-reason" type="text" placeholder="Maintenance or triage" />
                     </label>
-                    <button id="silence-for-button" class="button">Create Silence</button>
-                  </section>
+                    <button id="silence-for-button" type="submit" class="button">Create Silence</button>
+                  </form>
 
-                  <section class="panel-subsection">
-                    <h3>Silence Window</h3>
+                  <details class="panel-subsection detail-collapsible" data-mobile-collapsed open>
+                    <summary class="collapsible-summary">Silence Window</summary>
+                    <form id="silence-window-form" class="action-form" aria-label="Silence window">
                     <label>
                       Operator
-                      <input id="silence-window-operator" type="text" placeholder="Keita" />
+                      <input id="silence-window-operator" class="operator-input" type="text" placeholder="Your name" autocomplete="name" required />
                     </label>
                     <label>
-                      Start
-                      <input id="silence-window-start" type="datetime-local" />
+                      <span>Start <span class="field-hint" data-timezone-hint></span></span>
+                      <input id="silence-window-start" type="datetime-local" required />
                     </label>
                     <label>
-                      End
-                      <input id="silence-window-end" type="datetime-local" />
+                      <span>End <span class="field-hint" data-timezone-hint></span></span>
+                      <input id="silence-window-end" type="datetime-local" required />
                     </label>
                     <label>
                       Reason
                       <input id="silence-window-reason" type="text" placeholder="Scheduled maintenance" />
                     </label>
-                    <button id="silence-window-button" class="button">Create Window</button>
-                  </section>
+                    <button id="silence-window-button" type="submit" class="button">Create Window</button>
+                    </form>
+                  </details>
                 </div>
 
                 <div class="split-panels">
-                  <section class="panel-subsection">
-                    <h3>History</h3>
+                  <details class="panel-subsection detail-collapsible" data-mobile-collapsed open>
+                    <summary class="collapsible-summary">History</summary>
                     <div id="history-content" class="history-list"></div>
-                  </section>
+                  </details>
 
-                  <section class="panel-subsection">
-                    <h3>Payload</h3>
+                  <details class="panel-subsection detail-collapsible" data-mobile-collapsed open>
+                    <summary class="collapsible-summary">Payload</summary>
                     <pre id="payload-content" class="code-block"></pre>
-                  </section>
+                  </details>
                 </div>
               </div>
             </section>
@@ -220,11 +236,11 @@
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Timeline</div>
-                  <h2>Alarm History</h2>
+                  <h2 id="history-heading">Alarm History</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="history-filter" type="search" placeholder="Filter loaded history" />
-                  <select id="history-state-filter">
+                  <input id="history-filter" type="search" aria-label="Filter history" placeholder="Filter loaded history" />
+                  <select id="history-state-filter" aria-label="Filter history by state">
                     <option value="">All states</option>
                     <option value="FIRING">FIRING</option>
                     <option value="ACKED">ACKED</option>
@@ -237,8 +253,8 @@
               <div id="history-disabled-notice" class="muted hidden">
                 History is disabled. Start KANARY with <code>--state-db /path/to/kanary.db</code> or set <code>KANARY_SQLITE_PATH</code> to persist alert and operator history.
               </div>
-              <div class="table-wrap">
-                <table class="data-table">
+              <div class="table-wrap" role="region" aria-labelledby="history-heading">
+                <table class="data-table data-table-cards" data-cards-for="history-body">
                   <thead>
                     <tr>
                       <th>Time</th>
@@ -263,14 +279,14 @@
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Runtime Health</div>
-                  <h2>Source Plugins</h2>
+                  <h2 id="sources-heading">Source Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="source-filter" type="search" placeholder="Filter by source, state, description, file, error. Supports glob." />
+                  <input id="source-filter" type="search" aria-label="Filter sources" placeholder="Filter by source, state, description, file, error. Supports glob." />
                 </div>
               </div>
-              <div class="table-wrap">
-                <table class="data-table">
+              <div class="table-wrap" role="region" aria-labelledby="sources-heading">
+                <table class="data-table data-table-cards" data-cards-for="sources-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -292,14 +308,14 @@
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Runtime Health</div>
-                  <h2>Rule Plugins</h2>
+                  <h2 id="rules-heading">Rule Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="rule-filter" type="search" placeholder="Filter by rule, input, tag, owner, file, error. Supports glob." />
+                  <input id="rule-filter" type="search" aria-label="Filter rules" placeholder="Filter by rule, input, tag, owner, file, error. Supports glob." />
                 </div>
               </div>
-              <div class="table-wrap">
-                <table class="data-table">
+              <div class="table-wrap" role="region" aria-labelledby="rules-heading">
+                <table class="data-table data-table-cards" data-cards-for="rules-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -324,15 +340,15 @@
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Delivery Layer</div>
-                  <h2>Output Plugins</h2>
+                  <h2 id="outputs-heading">Output Plugins</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="output-filter" type="search" placeholder="Filter by output, policy, description, file, error. Supports glob." />
+                  <input id="output-filter" type="search" aria-label="Filter outputs" placeholder="Filter by output, policy, description, file, error. Supports glob." />
                 </div>
               </div>
               <div id="outputs-summary"></div>
-              <div class="table-wrap">
-                <table class="data-table">
+              <div class="table-wrap" role="region" aria-labelledby="outputs-heading">
+                <table class="data-table data-table-cards" data-cards-for="outputs-body">
                   <thead>
                     <tr>
                       <th>Name</th>
@@ -357,18 +373,18 @@
               <div class="panel-header">
                 <div>
                   <div class="panel-kicker">Operator Scheduling</div>
-                  <h2>Silences</h2>
+                  <h2 id="silences-heading">Silences</h2>
                 </div>
                 <div class="toolbar">
-                  <input id="silence-filter" type="search" placeholder="Filter by id, status, target, operator, reason. Supports glob." />
+                  <input id="silence-filter" type="search" aria-label="Filter silences" placeholder="Filter by id, status, target, operator, reason. Supports glob." />
                   <label class="toolbar-checkbox">
                     <input id="silence-hide-past" type="checkbox" checked />
                     <span>Hide cancelled and expired</span>
                   </label>
                 </div>
               </div>
-              <div class="table-wrap">
-                <table class="data-table">
+              <div class="table-wrap" role="region" aria-labelledby="silences-heading">
+                <table class="data-table data-table-cards" data-cards-for="silences-body">
                   <thead>
                     <tr>
                       <th>ID</th>
@@ -377,7 +393,7 @@
                       <th>Targets</th>
                       <th>By</th>
                       <th>Reason</th>
-                      <th></th>
+                      <th><span class="visually-hidden">Actions</span></th>
                     </tr>
                   </thead>
                   <tbody id="silences-body"></tbody>
@@ -396,11 +412,11 @@
                   </div>
                 </div>
                 <div class="admin-forms">
-                  <section class="panel-subsection">
-                    <h3>Silence For</h3>
+                  <form id="admin-duration-form" class="panel-subsection action-form" aria-labelledby="admin-duration-heading">
+                    <h3 id="admin-duration-heading">Silence For</h3>
                     <label>
                       Operator
-                      <input id="admin-duration-operator" type="text" placeholder="Keita" />
+                      <input id="admin-duration-operator" class="operator-input" type="text" placeholder="Your name" autocomplete="name" required />
                     </label>
                     <label>
                       Rule Pattern
@@ -412,24 +428,24 @@
                     </label>
                     <label>
                       Minutes
-                      <input id="admin-duration-minutes" type="number" min="1" value="30" />
+                      <input id="admin-duration-minutes" type="number" min="1" value="30" required />
                     </label>
                     <label>
-                      Optional Start
+                      <span>Optional Start <span class="field-hint" data-timezone-hint></span></span>
                       <input id="admin-duration-start" type="datetime-local" />
                     </label>
                     <label>
                       Reason
                       <input id="admin-duration-reason" type="text" placeholder="Planned work" />
                     </label>
-                    <button id="admin-duration-button" class="button">Create Duration Silence</button>
-                  </section>
+                    <button id="admin-duration-button" type="submit" class="button">Create Duration Silence</button>
+                  </form>
 
-                  <section class="panel-subsection">
-                    <h3>Silence Window</h3>
+                  <form id="admin-window-form" class="panel-subsection action-form" aria-labelledby="admin-window-heading">
+                    <h3 id="admin-window-heading">Silence Window</h3>
                     <label>
                       Operator
-                      <input id="admin-window-operator" type="text" placeholder="Keita" />
+                      <input id="admin-window-operator" class="operator-input" type="text" placeholder="Your name" autocomplete="name" required />
                     </label>
                     <label>
                       Rule Pattern
@@ -440,19 +456,19 @@
                       <input id="admin-window-tags" type="text" placeholder="sqlite" />
                     </label>
                     <label>
-                      Start
-                      <input id="admin-window-start" type="datetime-local" />
+                      <span>Start <span class="field-hint" data-timezone-hint></span></span>
+                      <input id="admin-window-start" type="datetime-local" required />
                     </label>
                     <label>
-                      End
-                      <input id="admin-window-end" type="datetime-local" />
+                      <span>End <span class="field-hint" data-timezone-hint></span></span>
+                      <input id="admin-window-end" type="datetime-local" required />
                     </label>
                     <label>
                       Reason
                       <input id="admin-window-reason" type="text" placeholder="Scheduled maintenance" />
                     </label>
-                    <button id="admin-window-button" class="button">Create Window Silence</button>
-                  </section>
+                    <button id="admin-window-button" type="submit" class="button">Create Window Silence</button>
+                  </form>
                 </div>
               </section>
 
@@ -465,9 +481,9 @@
                 </div>
                 <div class="admin-actions">
                   <div class="inline-actions">
-                    <button id="admin-reload-dirty-button" class="button">Apply Dirty</button>
-                    <button id="admin-reload-all-button" class="button button-secondary">Reload All</button>
-                    <button id="admin-restart-engine-button" class="button button-danger">Restart Engine</button>
+                    <button id="admin-reload-dirty-button" type="button" class="button">Apply Dirty</button>
+                    <button id="admin-reload-all-button" type="button" class="button button-secondary">Reload All</button>
+                    <button id="admin-restart-engine-button" type="button" class="button button-danger">Restart Engine</button>
                   </div>
                   <div class="note-block">
                     <strong>Operational note</strong>
@@ -481,50 +497,65 @@
         </main>
       </div>
 
-      <div id="source-modal" class="modal hidden" aria-hidden="true">
-        <div class="modal-backdrop" data-close-source></div>
-        <div class="modal-panel">
-          <div class="modal-header">
-            <div>
-              <div class="panel-kicker">Read Only Source</div>
-              <h2 id="source-modal-title">Plugin Source</h2>
-              <div id="source-modal-meta" class="muted"></div>
-            </div>
-            <button id="source-modal-close" class="button button-secondary">Close</button>
+      <dialog id="source-modal" class="modal-panel" aria-labelledby="source-modal-title" closedby="any">
+        <div class="modal-header">
+          <div>
+            <div class="panel-kicker">Read Only Source</div>
+            <h2 id="source-modal-title">Plugin Source</h2>
+            <div id="source-modal-meta" class="muted"></div>
           </div>
-          <div id="source-modal-body" class="source-viewer"></div>
+          <button type="button" class="button button-secondary" data-close-dialog>Close</button>
         </div>
-      </div>
+        <div id="source-modal-body" class="source-viewer"></div>
+      </dialog>
 
-      <div id="plugin-info-modal" class="modal hidden" aria-hidden="true">
-        <div class="modal-backdrop" data-close-plugin-info></div>
-        <div class="modal-panel modal-panel-narrow">
-          <div class="modal-header">
-            <div>
-              <div class="panel-kicker">Plugin Metadata</div>
-              <h2 id="plugin-info-modal-title">Plugin Info</h2>
-              <div id="plugin-info-modal-meta" class="muted"></div>
-            </div>
-            <button id="plugin-info-modal-close" class="button button-secondary button-compact">Close</button>
+      <dialog id="plugin-info-modal" class="modal-panel modal-panel-narrow" aria-labelledby="plugin-info-modal-title" closedby="any">
+        <div class="modal-header">
+          <div>
+            <div class="panel-kicker">Plugin Metadata</div>
+            <h2 id="plugin-info-modal-title">Plugin Info</h2>
+            <div id="plugin-info-modal-meta" class="muted"></div>
           </div>
-          <div id="plugin-info-modal-body" class="info-viewer"></div>
+          <button type="button" class="button button-secondary button-compact" data-close-dialog>Close</button>
         </div>
-      </div>
+        <div id="plugin-info-modal-body" class="info-viewer"></div>
+      </dialog>
 
-      <div id="alert-state-modal" class="modal hidden" aria-hidden="true">
-        <div class="modal-backdrop" data-close-alert-state></div>
-        <div class="modal-panel modal-panel-narrow">
+      <dialog id="alert-state-modal" class="modal-panel modal-panel-narrow" aria-labelledby="alert-state-modal-title" closedby="any">
+        <div class="modal-header">
+          <div>
+            <div class="panel-kicker">Alert State</div>
+            <h2 id="alert-state-modal-title">Alert Details</h2>
+            <div id="alert-state-modal-meta" class="muted"></div>
+          </div>
+          <button type="button" class="button button-secondary button-compact" data-close-dialog>Close</button>
+        </div>
+        <div id="alert-state-modal-body" class="info-viewer"></div>
+      </dialog>
+
+      <dialog id="cancel-silence-dialog" class="modal-panel modal-panel-narrow modal-panel-form" aria-labelledby="cancel-silence-title">
+        <form id="cancel-silence-form" class="action-form">
           <div class="modal-header">
             <div>
-              <div class="panel-kicker">Alert State</div>
-              <h2 id="alert-state-modal-title">Alert Details</h2>
-              <div id="alert-state-modal-meta" class="muted"></div>
+              <div class="panel-kicker">Silence</div>
+              <h2 id="cancel-silence-title">Cancel this silence?</h2>
+              <div id="cancel-silence-meta" class="muted"></div>
             </div>
-            <button id="alert-state-modal-close" class="button button-secondary button-compact">Close</button>
           </div>
-          <div id="alert-state-modal-body" class="info-viewer"></div>
-        </div>
-      </div>
+          <label>
+            Operator
+            <input id="cancel-silence-operator" class="operator-input" type="text" placeholder="Your name" autocomplete="name" required />
+          </label>
+          <label>
+            Reason
+            <input id="cancel-silence-reason" type="text" placeholder="Optional" />
+          </label>
+          <div class="inline-actions dialog-actions">
+            <button type="button" class="button button-secondary" data-close-dialog autofocus>Keep silence</button>
+            <button id="cancel-silence-submit" type="submit" class="button button-danger">Cancel silence</button>
+          </div>
+        </form>
+      </dialog>
     </div>
 
     <script src="/viewer/app.js"></script>
