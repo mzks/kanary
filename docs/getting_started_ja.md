@@ -124,7 +124,7 @@ helper class を使うときは通常 `evaluate()` を書かず、class 変数�
 
 - `StaleRule`: `inputs`, `timeout`
 - `RangeRule`: `inputs`, `low`, `high`, `hysteresis`
-- `RateRule`: `inputs`, `per_seconds`, `high`, `low`
+- `RateRule`: `inputs`, `high`, `low`（毎秒あたり。例: `1.0 / kanary.minute`）
 - `ThresholdRule`: `inputs`, `direction`, `thresholds`, `hysteresis`
 
 環境が許せば, `openssl speed -multi 8` などのコマンドで負荷をかければ, アラームの発火をテストできます.
@@ -200,9 +200,9 @@ kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 
 ## 8. 進んだ機能
 
-### BufferedSource
+### 履歴を持つ（kanary.Buffer）
 
-`kanary.BufferedSource` は source plugin の中で短い履歴を扱う helper です。`history()`, `latest()`, `average_value()`, `rate()` などを使えます。
+10 分平均や傾向など、最近の sample から計算した値を出すには、`init()` で `kanary.Buffer` を作り（`self.buffer = kanary.Buffer(size=1024, seconds=kanary.hour)`）、`poll()` で生の値を追加して（`self.buffer.add(("pressure", value))`。`kanary.inputs()` と同じ形）、`self.buffer["name"]` から計算した input を返します。例: `self.buffer["pressure"].window(600).mean()`。helper class を含むどの source でも使えます（`self.buffer.add(super().poll())`）。`kanary new --show buffered` を参照してください。
 
 ### Remote Kanary node の読み込み
 
@@ -216,8 +216,6 @@ kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 `kanary.MailOutput` を使うと SMTP 出力を短く書けます。ローカルで試すなら Mailpit が便利です。
 
 ```python
-import json
-
 @kanary.output(output_id="mail", include_tags=["getting-started"])
 class MailAlert(kanary.MailOutput):
     smtp_host = "127.0.0.1"
@@ -227,43 +225,13 @@ class MailAlert(kanary.MailOutput):
     recipients = ["operator@example.test"]
     subject_prefix = "[KANARY getting-started]"
 
-    def _subject(self, event):
-        marker = event.transition.value if event.transition is not None else event.current_state.value
-        return (
-            f"{self.subject_prefix} "
-            f"{marker} {kanary.severity_label(event.effective_severity)} {event.rule_id}"
-        )
-
-    def _body(self, event):
-        lines = [
-            f"Rule: {event.rule_id}",
-            f"Occurred At: {event.occurred_at.isoformat()}",
-            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
-            f"State: {event.current_state.value}",
-            (
-                "Previous Severity: "
-                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
-            ),
-            f"Severity: {kanary.severity_label(event.current_severity)}",
-            f"Transition: {event.transition.value if event.transition else '-'}",
-            f"Owner: {event.owner or '-'}",
-            f"Tags: {', '.join(event.tags) if event.tags else '-'}",
-            f"Message: {event.message or '-'}",
-        ]
-        if event.payload:
-            lines.extend(
-                [
-                    "",
-                    "Payload:",
-                    json.dumps(event.payload, ensure_ascii=False, indent=2, sort_keys=True),
-                ]
-            )
-        return "\n".join(lines)
 ```
 
 ```bash
 docker run --rm -p 1025:1025 -p 8025:8025 axllent/mailpit
 ```
+
+mail には plain text と、色付きの見出し、rule の message、state・severity・owner・tag・判定した値の表を持つ HTML の両方が入ります。変えるときは `subject(event)`、`body(event)`、`html(event)`（`None` を返すと plain text だけ）を上書きします。`viewer_url` を設定すると viewer への link が付きます。
 
 Web UI:
 
@@ -284,6 +252,24 @@ kanaryctl --base-url http://127.0.0.1:8000 silence-for --operator operator_name 
 `ACK`されていても, アラームの状態がOKにもどれば自動的に解除されます.
 
 scheduled silence は、Source の次回 poll を待たずに開始・終了時刻で `SILENCED` を更新します。境界では poll を追加実行せず、silence 中を含む最後の通常 Rule 評価結果へ戻します。process を再起動してから対象 Rule がまだ一度も評価されていない場合だけ、最初の poll まで state は更新されません。
+
+### Template から plugin を作る
+
+`kanary new` は template から plugin file を作ります。各 template は動く plugin で、すべての option を comment 付きで示しているので、reference としても使えます。`kanary new --list`（または `kanary new --help`）で template の一覧表が出ます。Source / Rule / Output のどれを作るかは template 名で決まります。
+
+```bash
+kanary new --list
+kanary new -t source postgres.wide -o ./plugins/
+kanary new -t range oil.temperature.high -o ./plugins/postgres_wide.py -a
+kanary new -t followups oncall --stdout
+kanary new --show ping
+```
+
+- 一覧は BASIC（よく使う出発点で、helper class 1 つでほぼ設定だけ: `command`、`ping`、`tcp`、`http-status`、`file`、`http-json`、`prometheus`、`sql-wide`、`sql-long`、`http-push`、`mqtt`、`plugin-health`、`range`、`threshold`、`expected`、`stale`、`webhook`、`slack`、`mattermost`、`discord`、`file-log`、`mail`、素の `source` / `rule` / `output`）と ADVANCED（使う場面が限られる helper、独自 logic、複数機能の組み合わせ: `ssh`、`log-count`、`push`、`buffered`、`trend`、`spike`、`frozen`、`remote`、`rate`、`difference`、`k-of-n`、`aggregate`、`count`、`multi-source`、`command-output`、`followups`、`delayed`、`quiet-hours`、`oncall`）に分かれています。
+- `--show TEMPLATE` は何も書き出さずに template を表示します。全 template を目次付きで 1 ページにまとめたものが [docs/templates.md](templates.md) にあります。
+- template の実 file は `src/kanary/templates/` にあります。
+- `-o` には file か、末尾 `/` の directory を指定します。省略時は current directory の `<plugin_id>.py` です。PLUGIN_ID を `.py` で終えるとそれが file 名になり、拡張子を除いた部分が id になります。
+- 既存 file を黙って上書きすることはありません。`-a` で追記（import は統合）、`--force` で上書きします。
 
 ### Lint
 単純なlinterが用意されています. pluginをpushする前に, 単純な確認を行うことが可能です.

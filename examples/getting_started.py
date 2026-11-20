@@ -93,35 +93,3 @@ class MailAlert(kanary.MailOutput):
     recipients = ["operator@example.test"]
     subject_prefix = "[KANARY getting-started]"
 
-    def _subject(self, event):
-        marker = event.transition.value if event.transition is not None else event.current_state.value
-        return (
-            f"{self.subject_prefix} "
-            f"{marker} {kanary.severity_label(event.effective_severity)} {event.rule_id}"
-        )
-
-    def _body(self, event):
-        lines = [
-            f"Rule: {event.rule_id}",
-            f"Occurred At: {event.occurred_at.isoformat()}",
-            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
-            f"State: {event.current_state.value}",
-            (
-                "Previous Severity: "
-                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
-            ),
-            f"Severity: {kanary.severity_label(event.current_severity)}",
-            f"Transition: {event.transition.value if event.transition else '-'}",
-            f"Owner: {event.owner or '-'}",
-            f"Tags: {', '.join(event.tags) if event.tags else '-'}",
-            f"Message: {event.message or '-'}",
-        ]
-        if event.payload:
-            lines.extend(
-                [
-                    "",
-                    "Payload:",
-                    json.dumps(event.payload, ensure_ascii=False, indent=2, sort_keys=True),
-                ]
-            )
-        return "\n".join(lines)

@@ -20,6 +20,10 @@ WEB_ROOT = Path(__file__).with_name("web")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+class PollUnavailableError(RuntimeError):
+    """A test poll could not run: the source is not running, or it took too long."""
+
+
 class ControlAPI:
     def __init__(
         self,
@@ -27,6 +31,7 @@ class ControlAPI:
         engine_getter: Callable[[], Engine | None],
         reload_callback: Callable[..., object],
         meta_getter: Callable[[], dict[str, object]] | None = None,
+        test_poll_callback: Callable[[str], dict[str, object]] | None = None,
         host: str = "0.0.0.0",
         port: int = 8000,
         enable_default_viewer: bool = True,
@@ -35,6 +40,8 @@ class ControlAPI:
         self._engine_getter = engine_getter
         self._reload_callback = reload_callback
         self._meta_getter = meta_getter or (lambda: {})
+        # Runs test_poll() on the source's own thread (EngineRuntime.test_poll); without it, engine.test_poll.
+        self._test_poll_callback = test_poll_callback
         self._enable_default_viewer = enable_default_viewer
         self._viewer_title = viewer_title.strip() or DEFAULT_VIEWER_TITLE
         self.host = host
@@ -166,9 +173,10 @@ class ControlAPI:
                         return
 
                     alerts = []
-                    for alert in engine.alerts.values():
-                        rule = engine.rules.get(alert.rule_id)
-                        alerts.append(_viewer_alert_payload(engine, alert, rule))
+                    with engine._lock:  # held only briefly: evaluations never wait on I/O
+                        for alert in engine.alerts.values():
+                            rule = engine.rules.get(alert.rule_id)
+                            alerts.append(_viewer_alert_payload(engine, alert, rule))
                     self._write_json(HTTPStatus.OK, {"alerts": alerts})
                     return
 
@@ -182,9 +190,10 @@ class ControlAPI:
                         return
 
                     alerts = []
-                    for alert in engine.alerts.values():
-                        rule = engine.rules.get(alert.rule_id)
-                        alerts.append(_export_alert_payload(engine, alert, rule))
+                    with engine._lock:
+                        for alert in engine.alerts.values():
+                            rule = engine.rules.get(alert.rule_id)
+                            alerts.append(_export_alert_payload(engine, alert, rule))
                     self._write_json(
                         HTTPStatus.OK,
                         {"node_id": engine.node_id, "alerts": alerts},
@@ -270,7 +279,7 @@ class ControlAPI:
                         return
 
                     plugins = []
-                    for status in engine.plugin_states.values():
+                    for status in list(engine.plugin_states.values()):
                         plugin = _resolve_plugin(engine, status.plugin_type, status.plugin_id)
                         plugin_class = plugin if isinstance(plugin, type) else plugin.__class__ if plugin is not None else None
                         definition_file = (
@@ -306,6 +315,8 @@ class ControlAPI:
                                 "exclude_states": list(getattr(plugin, "exclude_states", [])) if status.plugin_type == "output" and plugin is not None else [],
                                 "exclude_transitions": list(getattr(plugin, "exclude_transitions", [])) if status.plugin_type == "output" and plugin is not None else [],
                                 "minimum_severity": _plugin_minimum_severity(plugin, status.plugin_type),
+                                "warning": status.warning,
+                                **(engine.output_backlog(status.plugin_id) if status.plugin_type == "output" else {}),
                             }
                         )
                     plugins.sort(key=lambda row: (row["type"], row["plugin_id"]))
@@ -345,10 +356,14 @@ class ControlAPI:
 
                 if self.path.startswith("/test-poll/"):
                     source_id = unquote(self.path[len("/test-poll/") :]).strip("/")
+                    test_poll = self.server.control_api._test_poll_callback
                     try:
-                        payload = engine.test_poll(source_id)
+                        payload = test_poll(source_id) if test_poll is not None else engine.test_poll(source_id)
                     except KeyError:
                         self._write_json(HTTPStatus.NOT_FOUND, {"error": "source not found"})
+                        return
+                    except PollUnavailableError as exc:
+                        self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
                         return
                     except Exception as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

@@ -1709,9 +1709,21 @@ function matchesSilenceFilter(silence) {
 }
 
 function formatPluginRuntime(plugin) {
+  // Outputs send on their own thread: show what is still waiting, and what was dropped.
+  const extras = [];
+  if (plugin.warning) {
+    extras.push(`<span class="state-pill plugin-state-SLOW" title="${escapeAttribute(plugin.warning)}">SLOW</span>`);
+  }
+  if (plugin.queued > 0) {
+    extras.push(`<span class="state-pill plugin-state-QUEUED" title="Events waiting to be sent">${escapeHtml(String(plugin.queued))} queued</span>`);
+  }
+  if (plugin.dropped > 0) {
+    extras.push(`<span class="state-pill plugin-state-FAILED" title="Events dropped because too many were waiting, or at shutdown">${escapeHtml(String(plugin.dropped))} dropped</span>`);
+  }
   return `
     <div class="plugin-runtime-block runtime-badge-group">
       <span class="state-pill plugin-state-${escapeHtml(plugin.state)}">${escapeHtml(plugin.state)}</span>
+      ${extras.join("")}
     </div>
   `;
 }
@@ -2239,6 +2251,8 @@ function pluginInfoRows(plugin) {
   if (plugin.type === "output") {
     rows.push(
       ["Emit Count", String(plugin.run_count || 0), false],
+      ["Queued", String(plugin.queued || 0), false],
+      ["Dropped", String(plugin.dropped || 0), false],
       ["Last Failure", plugin.last_failure_at ? formatDateTime(plugin.last_failure_at) : "-", false],
       ["Minimum Severity", plugin.minimum_severity || "-", false],
       ["Include Tags", (plugin.include_tags || []).join(", ") || "*", false],
@@ -2246,6 +2260,9 @@ function pluginInfoRows(plugin) {
       ["Exclude States", (plugin.exclude_states || []).join(", ") || "-", false],
       ["Exclude Transitions", (plugin.exclude_transitions || []).join(", ") || "-", false],
     );
+  }
+  if (plugin.warning) {
+    rows.push(["Warning", plugin.warning, false]);
   }
   if (plugin.last_error) {
     rows.push(["Last Error", plugin.last_error, false]);

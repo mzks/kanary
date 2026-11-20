@@ -7,12 +7,12 @@ import re
 from typing import Any
 from urllib.request import Request, urlopen
 
-from .constants import ACKED, OK, AlertState, Severity
-from .models import Evaluation, Measurement, SourceResult
-from .patterns import matches_any_tag, matches_excluded_tag
-from .registry import get_source_registry, register_rule
-from .rule import Rule, RuleContext
-from .source import Source
+from ..constants import OK, AlertState, Severity
+from ..models import Evaluation, Measurement, SourceResult
+from ..patterns import matches_any_tag, matches_excluded_tag
+from ..registry import get_source_registry, register_rule
+from ..rule import Rule, RuleContext
+from ..source import Source
 
 
 class RemoteKanarySource(Source):
@@ -146,14 +146,6 @@ class RemoteAlarm(Rule):
             message=metadata.get("message"),
             severity=remote_severity,
         )
-
-    @classmethod
-    def default_rule_id(cls) -> str | None:
-        source_id = getattr(cls, "source", None)
-        remote_alarm_id = getattr(cls, "remote_alarm_id", None)
-        if not source_id or not remote_alarm_id:
-            return None
-        return f"{source_id}.{remote_alarm_id}"
 
     def acknowledge_remote(self, engine: Any, *, operator: str, reason: str | None = None) -> None:
         if not self.propagate_ack:

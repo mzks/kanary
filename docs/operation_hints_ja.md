@@ -12,7 +12,7 @@ plugin は Source / Rule / Output ごとに独立して load・実行されま�
 kanary lint ./plugins
 ```
 
-`lint ok` は「directory を import して定義を検査できた」ことを示します。外部接続、通知内容、閾値、decorator の typo を含むすべての動作を保証するものではありません。plugin module の import 時には任意の Python code が実行されるため、外部接続や書込みは `init()` / `poll()` / `emit()` に置き、module top level では行わないでください。
+`lint ok` は「directory を import して定義を検査できた」ことを示します。外部接続、通知内容、閾値を含むすべての動作を保証するものではありません。decorator 引数の未知の名前（属性名の typo など）や、decorator と class 本体で値が食い違う場合は warning になりますが、class 属性名の typo は検出できません。plugin module の import 時には任意の Python code が実行されるため、外部接続や書込みは `init()` / `poll()` / `emit()` に置き、module top level では行わないでください。
 
 本番と同じ plugin と入力を使って routing を確認するには、別 port・別 node ID で shadow instance を起動します。
 
@@ -93,7 +93,9 @@ def poll(self):
 
 HTTP、DB、socket などの外部 I/O には必ず timeout を設定します。timeout が無いと 1 回の poll が不定に止まり、次回の評価も遅れます。
 
-同じ制約は Output の `emit()` にも適用されます。`emit()` は短時間で完了し、外部 I/O には有限の timeout を設定してください。長時間待つ処理を `emit()` 内で同期実行すると、ほかのSource更新とRule評価も待たされます。遅延した追加処理には `OutputFollowups` を使い、永続配送が必要なら message broker へ短時間で投入するOutputを用意します。
+Output の `emit()` はその output 専用の thread で動くので、送信先が遅くても Source の更新、Rule の評価、他の Output は待たされません。それでも有限の timeout は必要です。`emit()` が待っている間、この output の後続の event はその後ろで待ちます（最大 1000 件。超えると古いものから捨てます）。遅延した追加処理には `OutputFollowups` を使い、永続配送が必要なら message broker へ短時間で投入するOutputを用意します。
+
+Rule の `evaluate()` は事情が違います。rule は 1 つずつ評価されるので、遅い `evaluate()` は他のすべての評価を遅らせます。I/O をしないでください。100 ms を超えると log に出し、`SLOW` と表示します。
 
 `Measurement.timestamp` には、可能なら取得時刻ではなく監視対象が実際に観測した時刻を渡します。Kanary が poll した時刻を入れると、古いデータを取得しても新しい値に見え、StaleRule や rate の判断が不正確になります。観測時刻を取得できない場合だけ、poll 時刻を使います。
 
@@ -253,6 +255,6 @@ class OperationsFollowupOutput:
             followups.now(self.post_mailing_list)
 ```
 
-`now()` は現在の event を渡して同期実行します。callback の例外は `emit()` に伝播するため、通常の Output retry / reinit の対象です。`after()` は最初の followup 登録時刻からの絶対 offset で実行され、callback にはその時点で最後に受け取った event が渡されます。
+`now()` は現在の event を渡して同期実行します。callback の例外は `emit()` に伝播するため、通常の Output retry / reinit の対象です。`after()` は最初の followup 登録時刻からの絶対 offset で実行され、callback にはその時点で最後に受け取った event が渡されます。callback は output の thread で `emit()` と `emit()` の間に実行され、`emit()` と重なりません。
 
 `SILENCED` と `SUPPRESSED` で followup を取り消すには、それらの event を受け取る必要があるため `exclude_states=[]` を指定しています。followup は memory 上だけに保持され、process restart / plugin reload では失われます。`terminate()` で必ず `close()` を呼びます。完全な例は [output_followups.py](../examples/output_followups.py) にあります。

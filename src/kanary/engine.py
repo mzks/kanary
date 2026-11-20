@@ -1,7 +1,10 @@
 from collections.abc import Mapping
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatch
+from functools import partial
 import logging
 import socket
 import time
@@ -10,16 +13,129 @@ from uuid import uuid4
 import threading
 from typing import Callable
 
+from .helpers.buffer import discarding_changes
+from .dispatch import SHUTDOWN_DRAIN_SECONDS, OutputWorker, current_worker
 from .constants import AlertState, DEESCALATED, ESCALATED, Severity, TransitionKind, UNACK
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
-from .output import Output, prepare_output_class
-from .registry import get_output_registry, get_rule_registry, get_source_registry
-from .rule import Rule, RuleContext, normalize_rule_inputs, prepare_rule_class, resolve_rule_sources
+from .output import Output
+from .models import normalize_source_output
+from .registry import (
+    get_output_registry,
+    get_rule_registry,
+    get_source_registry,
+    prepare_output_class,
+    prepare_rule_class,
+    prepare_source_class,
+)
+from .selectors import normalize_rule_inputs, resolve_rule_sources
+from .rule import Rule, RuleContext
 from .signature_compat import invoke_compat
 from .store import NullStore
-from .source import Source, normalize_source_output, prepare_source_class
+from .source import Source
 
 logger = logging.getLogger("kanary.engine")
+
+# A rule's evaluate() runs while every other evaluation waits; slower than this is reported.
+SLOW_EVALUATE_SECONDS = 0.1
+# How long a test fire waits for the outputs to send before answering "still queued".
+TEST_FIRE_WAIT_SECONDS = 30.0
+# How long a reload waits for a new output's init() (which runs after the send in progress).
+OUTPUT_INIT_WAIT_SECONDS = 60.0
+
+
+def _retry_delay(attempt: int) -> float:
+    """Seconds to wait before retry number attempt of a failed emit() (1, 4, 9, ...)."""
+    return float(attempt ** 2)
+
+
+def _plain_sleep(seconds: float) -> bool:
+    time.sleep(seconds)
+    return False
+
+
+def _wait_for(futures: list[Future], timeout: float | None) -> None:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    for future in futures:
+        try:
+            future.result(None if deadline is None else max(0.0, deadline - time.monotonic()))
+        except FutureTimeoutError:
+            logger.warning("an output init() is still running after %.0f s; its status updates when it ends", timeout)
+        except Exception:
+            logger.exception("output init job failed")
+
+
+class _Dispatch:
+    """Where one alert event went; recorded once every output has finished with it."""
+
+    def __init__(
+        self,
+        engine: "Engine",
+        event: AlertEvent,
+        *,
+        matched: list[str],
+        filtered: list[str],
+        uninitialized: list[str],
+        emit_skipped: list[str],
+        pending: list[str],
+    ) -> None:
+        self._engine = engine
+        self.event = event
+        self.matched = matched
+        self.filtered = filtered
+        self.uninitialized = uninitialized
+        self.emit_skipped = emit_skipped
+        self.delivered: list[str] = []
+        self.failed: list[str] = []
+        self._pending = set(pending)
+        self._lock = threading.Lock()
+        self._started = False
+        self._finished = False
+        self.done = threading.Event()
+
+    def start(self) -> None:
+        with self._lock:
+            self._started = True
+            finish = not self._pending and not self._finished
+            self._finished = self._finished or finish
+        if finish:
+            self._finish()
+
+    def report(self, output_id: str, delivered: bool, reason: str | None = None) -> None:
+        with self._lock:
+            if output_id not in self._pending:
+                return
+            self._pending.discard(output_id)
+            (self.delivered if delivered else self.failed).append(output_id)
+            finish = self._started and not self._pending and not self._finished
+            self._finished = self._finished or finish
+        if not delivered and reason:
+            logger.warning("output '%s' did not send %s %s: %s", output_id, self.event.rule_id, self.event.current_state.value, reason)
+        if finish:
+            self._finish()
+
+    def _finish(self) -> None:
+        self._engine._record_dispatch(self)
+        self.done.set()
+
+    def summary(self) -> dict[str, object]:
+        with self._lock:
+            pending = sorted(self._pending)
+            delivered = list(self.delivered)
+            failed = list(self.failed)
+        event = self.event
+        return {
+            "rule_id": event.rule_id,
+            "previous_state": event.previous_state.value if event.previous_state is not None else None,
+            "current_state": event.current_state.value,
+            "occurred_at": event.occurred_at,
+            "matched_outputs": list(self.matched),
+            "delivered_outputs": delivered,
+            "emit_skipped_outputs": list(self.emit_skipped),
+            "filtered_outputs": list(self.filtered),
+            "uninitialized_outputs": list(self.uninitialized),
+            "failed_outputs": failed,
+            "pending_outputs": pending,
+        }
 
 
 @dataclass(slots=True)
@@ -67,6 +183,7 @@ class Engine:
         self.sources = self._instantiate_sources()
         self.rules = self._instantiate_rules()
         self.outputs = self._instantiate_outputs()
+        self._output_workers: dict[str, OutputWorker] = {}
         self.plugin_states: dict[str, PluginStatus] = {}
         self.alerts: dict[str, Alert] = {}
         self._restored_rule_states: dict[str, tuple[AlertState, Severity]] = {}
@@ -137,6 +254,19 @@ class Engine:
             legacy_args=(self._source_runtime_ctx(now),),
         )
 
+    def _call_source_test_poll(self, source: Source, *, now: datetime) -> object:
+        """What poll() would return now, without changing the source (Source.test_poll).
+
+        What it adds to a kanary.Buffer is dropped when it returns.
+        """
+        with discarding_changes():
+            test_poll = getattr(type(source), "test_poll", None)
+            if test_poll is None or test_poll is Source.test_poll:
+                return self._call_source_poll(source, now=now)  # the default is poll() itself
+            source._kanary_engine = self
+            source._kanary_poll_now = now
+            return source.test_poll()
+
     def _call_source_terminate(self, source: Source) -> None:
         source._kanary_engine = self
         invoke_compat(
@@ -152,12 +282,31 @@ class Engine:
         source_payload: dict[str, object],
         ctx: RuleContext,
     ) -> object:
-        return invoke_compat(
-            rule.evaluate,
-            style=getattr(rule.__class__, "__kanary_evaluate_style__", "new"),
-            new_args=(ctx,),
-            legacy_args=(source_payload, ctx),
-        )
+        started = time.perf_counter()
+        try:
+            return invoke_compat(
+                rule.evaluate,
+                style=getattr(rule.__class__, "__kanary_evaluate_style__", "new"),
+                new_args=(ctx,),
+                legacy_args=(source_payload, ctx),
+            )
+        finally:
+            self._note_rule_duration(rule.rule_id, time.perf_counter() - started)
+
+    def _note_rule_duration(self, rule_id: str, seconds: float) -> None:
+        """Warn while a rule's evaluate() is slow: every other evaluation waits for it."""
+        status = self._plugin_status("rule", rule_id)
+        if seconds >= SLOW_EVALUATE_SECONDS:
+            if status.warning is None:
+                logger.warning(
+                    "rule '%s' evaluate() took %.0f ms; evaluations run one at a time, so keep it fast and move I/O into a source",
+                    rule_id,
+                    seconds * 1000,
+                )
+            status.warning = f"evaluate() took {seconds * 1000:.0f} ms (over {SLOW_EVALUATE_SECONDS * 1000:.0f} ms)"
+        elif status.warning is not None:
+            logger.info("rule '%s' evaluate() is fast again (%.0f ms)", rule_id, seconds * 1000)
+            status.warning = None
 
     def _output_runtime_ctx(self) -> dict[str, object]:
         return {"engine": self}
@@ -235,17 +384,72 @@ class Engine:
                     self._initialize_source(source)
                 except Exception:
                     logger.exception("source '%s' init failed during startup", source.source_id)
-            for output_id, output in self.outputs.items():
-                self._initialize_output(output_id, output)
+            output_inits = [self._start_output_worker(output_id, output) for output_id, output in self.outputs.items()]
             self._refresh_rule_plugin_resolution_status()
+        _wait_for(output_inits, None)
 
     def shutdown(self) -> None:
+        """Terminate sources, send what the outputs still have queued (briefly), then close the store."""
         with self._lock:
             for source in self.sources.values():
-                self._terminate_source(source)
-            for output_id, output in self.outputs.items():
-                self._terminate_output(output_id, output)
+                try:
+                    self._terminate_source(source)
+                except Exception:
+                    logger.exception("source '%s' terminate failed during shutdown", source.source_id)
+            workers = self._output_workers
+            self._output_workers = {}
+        self._close_output_workers(workers)
+        with self._lock:
             self.store.close()
+
+    # Output threads (dispatch.OutputWorker): one per output; its init(), emit(),
+    # followup callbacks and terminate() all run there, one at a time.
+
+    def _start_output_worker(self, output_id: str, output: Output) -> Future:
+        worker = OutputWorker(output_id, output, on_error=partial(self._record_output_error, output_id))
+        self._output_workers[output_id] = worker
+        return worker.post(partial(self._initialize_output, output_id))
+
+    def _install_output(self, output_id: str, output: Output) -> Future:
+        """Use a new output instance; events already queued are sent by it."""
+        self.outputs[output_id] = output
+        worker = self._output_workers.get(output_id)
+        if worker is None:
+            return self._start_output_worker(output_id, output)
+        return worker.post(partial(self._swap_output, output_id, worker, output))
+
+    def _swap_output(self, output_id: str, worker: OutputWorker, new_output: Output, old_output: Output) -> None:
+        if old_output is not new_output:
+            self._terminate_output(output_id, old_output)
+        worker.output = new_output
+        self._initialize_output(output_id, new_output)
+
+    def _close_output_workers(
+        self,
+        workers: dict[str, OutputWorker],
+        drain_seconds: float = SHUTDOWN_DRAIN_SECONDS,
+    ) -> None:
+        for output_id, worker in workers.items():
+            worker.close(drain_seconds=drain_seconds, finalize=partial(self._terminate_output, output_id))
+        deadline = time.monotonic() + drain_seconds + 2.0
+        for output_id, worker in workers.items():
+            if not worker.join(max(0.0, deadline - time.monotonic())):
+                logger.warning("output '%s' was still sending when it had to stop", output_id)
+
+    def flush_outputs(self, timeout: float = 10.0) -> bool:
+        """Wait until every output has sent what is queued; False on timeout."""
+        deadline = time.monotonic() + timeout
+        for worker in list(self._output_workers.values()):
+            if not worker.flush(max(0.0, deadline - time.monotonic())):
+                return False
+        return True
+
+    def output_backlog(self, output_id: str) -> dict[str, int]:
+        """Events waiting for (or being sent by) an output, and how many it dropped."""
+        worker = self._output_workers.get(output_id)
+        if worker is None:
+            return {"queued": 0, "dropped": 0}
+        return {"queued": worker.backlog, "dropped": worker.dropped}
 
     def evaluate_source(
         self,
@@ -309,6 +513,8 @@ class Engine:
         rule_registry: dict[str, type[Rule]] | None = None,
         output_registry: dict[str, type[Output]] | None = None,
     ) -> None:
+        closing_outputs: dict[str, OutputWorker] = {}
+        output_inits: list[Future] = []
         with self._lock:
             old_rule_ids = set(self.rules)
             old_rules = self.rules
@@ -339,12 +545,15 @@ class Engine:
 
             if output_registry is not None:
                 self._output_registry = output_registry
-                for output_id, output in old_outputs.items():
-                    self._terminate_output(output_id, output)
-                self.outputs = self._instantiate_outputs()
+                new_outputs = self._instantiate_outputs()
+                for output_id in set(old_outputs) - set(new_outputs):
+                    worker = self._output_workers.pop(output_id, None)
+                    if worker is not None:
+                        closing_outputs[output_id] = worker
+                self.outputs = {}
+                for output_id, output in new_outputs.items():
+                    output_inits.append(self._install_output(output_id, output))
                 self._rebuild_plugin_states()
-                for output_id, output in self.outputs.items():
-                    self._initialize_output(output_id, output)
 
             removed_rule_ids = old_rule_ids - set(self.rules)
             now = self._now_fn()
@@ -381,6 +590,9 @@ class Engine:
             self._refresh_rule_resolutions()
             self._sync_plugin_definition_files()
             self._refresh_rule_plugin_resolution_status()
+        # Waiting for output threads happens without the lock: they may be sending.
+        self._close_output_workers(closing_outputs)
+        _wait_for(output_inits, OUTPUT_INIT_WAIT_SECONDS)
 
     def reload_rule_plugins(
         self,
@@ -433,25 +645,27 @@ class Engine:
         replacements: dict[str, type[Output]],
         removed_output_ids: set[str] | None = None,
     ) -> None:
+        closing: dict[str, OutputWorker] = {}
+        inits: list[Future] = []
         with self._lock:
             removed_output_ids = set(removed_output_ids or ())
             for output_id in removed_output_ids:
-                output = self.outputs.pop(output_id, None)
+                self.outputs.pop(output_id, None)
                 self._output_registry.pop(output_id, None)
-                if output is not None:
-                    self._terminate_output(output_id, output)
+                worker = self._output_workers.pop(output_id, None)
+                if worker is not None:
+                    closing[output_id] = worker
 
             for output_id, output_cls in replacements.items():
-                existing = self.outputs.get(output_id)
-                if existing is not None:
-                    self._terminate_output(output_id, existing)
                 self._output_registry[output_id] = output_cls
-                output = output_cls()
-                self.outputs[output_id] = output
-                self._initialize_output(output_id, output)
+                # On the output's thread: terminate the old instance, init the new one;
+                # events still queued are then sent by the new one.
+                inits.append(self._install_output(output_id, output_cls()))
 
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
+        self._close_output_workers(closing)
+        _wait_for(inits, OUTPUT_INIT_WAIT_SECONDS)
 
     def reload_source_plugins(
         self,
@@ -459,6 +673,8 @@ class Engine:
         replacements: dict[str, type[Source]],
         removed_source_ids: set[str] | None = None,
     ) -> None:
+        stopping: list[Source] = []
+        starting: list[Source] = []
         with self._lock:
             removed_source_ids = set(removed_source_ids or ())
             for source_id in removed_source_ids:
@@ -466,27 +682,36 @@ class Engine:
                 self._source_registry.pop(source_id, None)
                 self.source_states.pop(source_id, None)
                 if source is not None:
-                    self._terminate_source(source)
+                    stopping.append(source)
 
             for source_id, source_cls in replacements.items():
                 existing = self.sources.get(source_id)
                 if existing is not None:
-                    self._terminate_source(existing)
+                    stopping.append(existing)
                 self._source_registry[source_id] = source_cls
                 source = source_cls()
                 self.sources[source_id] = source
                 self.source_states.setdefault(source_id, SourceState(source_id=source_id))
-                self._initialize_source(source)
+                starting.append(source)
 
             self._refresh_rule_resolutions()
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
             self._refresh_rule_plugin_resolution_status()
+        # The runtime has stopped these sources' threads. terminate() and init() may
+        # connect somewhere, so they run without the lock.
+        for source in stopping:
+            self._terminate_source(source)
+        for source in starting:
+            self._initialize_source(source)
 
     def acknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
         with self._lock:
             rule = self.rules[rule_id]
-            self._propagate_remote_ack(rule, operator=operator, reason=reason)
+        # An imported (remote) alarm is acknowledged at its peer first, over the network.
+        self._propagate_remote_ack(rule, operator=operator, reason=reason)
+        with self._lock:
+            rule = self.rules[rule_id]
             now = self._now_fn()
             alert = self.alerts[rule_id]
             previous_state = alert.state
@@ -535,7 +760,9 @@ class Engine:
             rule = self.rules[rule_id]
             if rule_id not in self.acknowledgements and (alert is None or alert.state != AlertState.ACKED):
                 raise ValueError(f"rule '{rule_id}' is not acknowledged")
-            self._propagate_remote_unack(rule, operator=operator, reason=reason)
+        self._propagate_remote_unack(rule, operator=operator, reason=reason)
+        with self._lock:
+            rule = self.rules[rule_id]
             now = self._now_fn()
             alert = self.alerts[rule_id]
             previous_state = alert.state
@@ -588,11 +815,20 @@ class Engine:
         tags: list[str] | None = None,
         reason: str | None = None,
     ) -> Silence:
+        if end_at <= start_at:
+            raise ValueError("silence end_at must be later than start_at")
+        if not (rule_patterns or tags):
+            raise ValueError("silence requires at least one rule pattern or tag")
+        # Imported (remote) alarms are silenced at their peers first, over the network.
+        remote_silence_refs = self._propagate_remote_silence(
+            operator=operator,
+            reason=reason,
+            start_at=start_at,
+            end_at=end_at,
+            rule_patterns=tuple(rule_patterns or []),
+            tags=tuple(tags or []),
+        )
         with self._lock:
-            if end_at <= start_at:
-                raise ValueError("silence end_at must be later than start_at")
-            if not (rule_patterns or tags):
-                raise ValueError("silence requires at least one rule pattern or tag")
             silence = Silence(
                 silence_id=uuid4().hex,
                 created_by=operator,
@@ -602,14 +838,7 @@ class Engine:
                 end_at=end_at,
                 rule_patterns=tuple(rule_patterns or []),
                 tags=tuple(tags or []),
-                remote_silence_refs=self._propagate_remote_silence(
-                    operator=operator,
-                    reason=reason,
-                    start_at=start_at,
-                    end_at=end_at,
-                    rule_patterns=tuple(rule_patterns or []),
-                    tags=tuple(tags or []),
-                ),
+                remote_silence_refs=remote_silence_refs,
             )
             self.silences[silence.silence_id] = silence
             self.store.create_silence(silence)
@@ -620,11 +849,12 @@ class Engine:
     def cancel_silence(self, silence_id: str, *, operator: str, reason: str | None = None) -> Silence:
         with self._lock:
             silence = self.silences[silence_id]
-            self._cancel_remote_silence_refs(
-                silence.remote_silence_refs,
-                operator=operator,
-                reason=reason,
-            )
+        self._cancel_remote_silence_refs(
+            silence.remote_silence_refs,
+            operator=operator,
+            reason=reason,
+        )
+        with self._lock:
             silence.cancelled_at = self._now_fn()
             silence.cancelled_by = operator
             silence.cancel_reason = reason
@@ -714,12 +944,16 @@ class Engine:
         )
 
     def test_poll(self, source_id: str) -> dict[str, object]:
+        """Call the source's test_poll() here and return the result, not evaluated.
+
+        Only for an engine without a runtime; the runtime runs it on the source's
+        own thread instead (EngineRuntime.test_poll), so it never overlaps poll().
+        """
         with self._lock:
             source = self.sources[source_id]
-            current_time = self._now_fn()
-            result = self._call_source_poll(source, now=current_time)
-            normalized = self._normalize_source_result(result, now=current_time)
-            return normalized
+        current_time = self._now_fn()
+        result = self._call_source_test_poll(source, now=current_time)
+        return self._normalize_source_result(result, now=current_time)
 
     def test_evaluate(
         self,
@@ -866,11 +1100,13 @@ class Engine:
                 occurred_at=current_time,
             )
             logger.info("test fire requested: rule=%s state=%s reason=%s", rule.rule_id, state.value, reason or "-")
-            summary = self._emit_alert_event(event)
-            summary["synthetic"] = True
-            summary["message"] = synthetic_message
-            summary["reason"] = reason
-            return summary
+            dispatch = self._emit_alert_event(event, first=True)
+        dispatch.done.wait(TEST_FIRE_WAIT_SECONDS)
+        summary = dispatch.summary()
+        summary["synthetic"] = True
+        summary["message"] = synthetic_message
+        summary["reason"] = reason
+        return summary
 
     def peer_status(self) -> dict[str, object]:
         with self._lock:
@@ -917,36 +1153,6 @@ class Engine:
                     "untracked_files": list(getattr(self, "runtime_untracked_files", [])),
                 },
             }
-
-    def _poll_sources(self, now: datetime) -> dict[str, dict]:
-        payloads: dict[str, dict] = {}
-        for source_id, source in self.sources.items():
-            payloads[source_id] = self._poll_source(source_id, source, now)
-        return payloads
-
-    def _poll_source(self, source_id: str, source: Source, now: datetime) -> dict[str, object]:
-        status = self._plugin_status("source", source_id)
-        try:
-            result = self._call_source_poll(source, now=now)
-            payload = self._normalize_source_result(result, now=now)
-            self._set_plugin_ready(status)
-            status.init_ok = True
-            status.last_error = None
-            status.last_error_detail = None
-            status.run_count += 1
-            status.last_run_at = now
-            status.last_success_at = now
-            status.last_updated_at = now
-            return payload
-        except Exception as exc:
-            self._set_plugin_failed(status)
-            status.last_error = str(exc)
-            status.last_error_detail = traceback.format_exc()
-            status.run_count += 1
-            status.last_run_at = now
-            status.last_failure_at = now
-            status.last_updated_at = now
-            raise
 
     def _normalize_source_result(self, result: object, *, now: datetime | None = None) -> dict[str, object]:
         normalized_result = normalize_source_output(result, now=now)
@@ -1173,7 +1379,6 @@ class Engine:
         acked_at = acknowledgement.created_at if acknowledgement and state == AlertState.ACKED else None
         acked_by = acknowledgement.operator if acknowledgement and state == AlertState.ACKED else None
         ack_reason = acknowledgement.reason if acknowledgement and state == AlertState.ACKED else None
-        previous_state = previous.state if previous else None
         active_silence_ids = tuple(silence.silence_id for silence in self._matching_active_silences(rule, now))
 
         if state == AlertState.OK:
@@ -1409,7 +1614,7 @@ class Engine:
     ) -> list[Rule]:
         matched: list[Rule] = []
         tag_set = set(tags)
-        for rule in self.rules.values():
+        for rule in list(self.rules.values()):
             matches_rule = any(fnmatch(rule.rule_id, pattern) for pattern in rule_patterns)
             matches_tag = bool(set(rule.tags).intersection(tag_set))
             if matches_rule or matches_tag:
@@ -1431,14 +1636,19 @@ class Engine:
             return False
         return alert.state != AlertState.OK
 
-    def _emit_alert_event(self, event: AlertEvent) -> dict[str, object]:
+    def _emit_alert_event(self, event: AlertEvent, *, first: bool = False) -> "_Dispatch":
+        """Route an event to the matching outputs' queues; sending happens on their threads.
+
+        Called with the engine lock held, so it only decides and enqueues. ``first``
+        puts the event ahead of queued ones (test fire).
+        """
+        # The engine changes some alerts in place (ACK); a queued event keeps what it saw.
+        event = dataclasses.replace(event, alert=dataclasses.replace(event.alert))
         matched_output_ids: list[str] = []
-        initialized_output_ids: list[str] = []
-        delivered_output_ids: list[str] = []
-        emit_skipped_output_ids: list[str] = []
         filtered_output_ids: list[str] = []
         uninitialized_output_ids: list[str] = []
-        failed_output_ids: list[str] = []
+        emit_skipped_output_ids: list[str] = []
+        targets: list[tuple[str, OutputWorker]] = []
         for output_id, output in self.outputs.items():
             if not output.matches(event):
                 filtered_output_ids.append(output_id)
@@ -1450,7 +1660,8 @@ class Engine:
                 continue
             matched_output_ids.append(output_id)
             status = self._plugin_status("output", output_id)
-            if not status.init_ok:
+            worker = self._output_workers.get(output_id)
+            if not status.init_ok or worker is None:
                 uninitialized_output_ids.append(output_id)
                 logger.warning(
                     "output '%s' skipped for rule '%s': output is not initialized",
@@ -1458,73 +1669,117 @@ class Engine:
                     event.rule_id,
                 )
                 continue
-            initialized_output_ids.append(output_id)
             if not self.output_emit_enabled:
                 emit_skipped_output_ids.append(output_id)
                 continue
-            try:
-                self._call_output_emit(output, event)
-                delivered_output_ids.append(output_id)
-                self._set_plugin_ready(status)
-                status.last_error = None
-                status.last_error_detail = None
-                status.run_count += 1
-                status.last_run_at = event.occurred_at
-                status.last_success_at = event.occurred_at
-                status.last_updated_at = event.occurred_at
-            except Exception as exc:
-                if self._recover_output_emit(output_id, output, event, status, exc):
-                    delivered_output_ids.append(output_id)
-                    continue
-                failed_output_ids.append(output_id)
-                logger.exception("output '%s' failed", output.output_id)
+            targets.append((output_id, worker))
+
+        dispatch = _Dispatch(
+            self,
+            event,
+            matched=matched_output_ids,
+            filtered=filtered_output_ids,
+            uninitialized=uninitialized_output_ids,
+            emit_skipped=emit_skipped_output_ids,
+            pending=[output_id for output_id, _worker in targets],
+        )
+        for output_id, worker in targets:
+            deliver = partial(self._deliver_event, output_id, event, dispatch)
+            if first:
+                worker.post(deliver)
+            else:
+                worker.submit(deliver, on_drop=partial(dispatch.report, output_id, False))
+        dispatch.start()
+        return dispatch
+
+    def _deliver_event(self, output_id: str, event: AlertEvent, dispatch: "_Dispatch", output: Output) -> None:
+        """Send one event; runs on the output's thread."""
+        status = self._plugin_status("output", output_id)
+        if not status.init_ok:
+            dispatch.report(output_id, False, "output is not initialized")
+            return
+        worker = current_worker()
+        sleep = worker.sleep if worker is not None else _plain_sleep
+        try:
+            self._call_output_emit(output, event)
+        except Exception as exc:
+            if status.state == "FAILED":
+                # Already failing: one attempt per event, so a dead destination does not
+                # hold every later event through the full retry sequence.
+                self._record_output_failure(status, event, exc, traceback.format_exc())
+                dispatch.report(output_id, False, f"{type(exc).__name__}: {exc}")
+                return
+            delivered = self._recover_output_emit(output_id, output, event, status, exc, sleep=sleep)
+            dispatch.report(output_id, delivered, None if delivered else "emit failed after retries")
+            return
+        self._record_output_success(status, event)
+        dispatch.report(output_id, True)
+
+    def _record_output_success(self, status: PluginStatus, event: AlertEvent) -> None:
+        self._set_plugin_ready(status)
+        status.last_error = None
+        status.last_error_detail = None
+        status.run_count += 1
+        status.last_run_at = event.occurred_at
+        status.last_success_at = event.occurred_at
+        status.last_updated_at = event.occurred_at
+
+    def _record_output_failure(self, status: PluginStatus, event: AlertEvent, exc: BaseException, detail: str) -> None:
+        self._set_plugin_failed(status)
+        status.last_error = str(exc)
+        status.last_error_detail = detail
+        status.last_failure_at = event.occurred_at
+        status.last_updated_at = event.occurred_at
+
+    def _record_output_error(self, output_id: str, what: str, exc: BaseException) -> None:
+        """An error outside emit() on the output's thread, such as a followup callback."""
+        status = self._plugin_status("output", output_id)
+        now = self._now_fn()
+        status.last_error = f"{what}: {exc}"
+        status.last_error_detail = "".join(traceback.format_exception(exc))
+        status.last_failure_at = now
+        status.last_updated_at = now
+
+    def _record_dispatch(self, dispatch: "_Dispatch") -> None:
+        """Log and store where an event went, once every output has finished with it."""
+        event = dispatch.event
         logger.info(
             "alert dispatch summary: rule=%s transition=%s->%s matched=%s delivered=%s emit_skipped=%s filtered=%s uninitialized=%s failed=%s",
             event.rule_id,
             event.previous_state.value if event.previous_state is not None else "-",
             event.current_state.value,
-            ",".join(matched_output_ids) or "-",
-            ",".join(delivered_output_ids) or "-",
-            ",".join(emit_skipped_output_ids) or "-",
-            ",".join(filtered_output_ids) or "-",
-            ",".join(uninitialized_output_ids) or "-",
-            ",".join(failed_output_ids) or "-",
+            ",".join(dispatch.matched) or "-",
+            ",".join(dispatch.delivered) or "-",
+            ",".join(dispatch.emit_skipped) or "-",
+            ",".join(dispatch.filtered) or "-",
+            ",".join(dispatch.uninitialized) or "-",
+            ",".join(dispatch.failed) or "-",
         )
-        self.store.append_output_dispatch(
-            event=event,
-            matched_outputs=matched_output_ids,
-            delivered_outputs=delivered_output_ids,
-            filtered_outputs=filtered_output_ids,
-            uninitialized_outputs=uninitialized_output_ids,
-            failed_outputs=failed_output_ids,
-        )
-        summary = {
-            "rule_id": event.rule_id,
-            "previous_state": event.previous_state.value if event.previous_state is not None else None,
-            "current_state": event.current_state.value,
-            "occurred_at": event.occurred_at,
-            "matched_outputs": matched_output_ids,
-            "delivered_outputs": delivered_output_ids,
-            "emit_skipped_outputs": emit_skipped_output_ids,
-            "filtered_outputs": filtered_output_ids,
-            "uninitialized_outputs": uninitialized_output_ids,
-            "failed_outputs": failed_output_ids,
-        }
-        if not matched_output_ids:
+        if not dispatch.matched:
             logger.info(
                 "alert event for rule '%s' (%s -> %s) had no matching outputs",
                 event.rule_id,
                 event.previous_state.value if event.previous_state is not None else "-",
                 event.current_state.value,
             )
-        elif not initialized_output_ids:
+        elif len(dispatch.uninitialized) == len(dispatch.matched):
             logger.warning(
                 "alert event for rule '%s' (%s -> %s) had matching outputs but none were initialized",
                 event.rule_id,
                 event.previous_state.value if event.previous_state is not None else "-",
                 event.current_state.value,
             )
-        return summary
+        try:
+            self.store.append_output_dispatch(
+                event=event,
+                matched_outputs=list(dispatch.matched),
+                delivered_outputs=list(dispatch.delivered),
+                filtered_outputs=list(dispatch.filtered),
+                uninitialized_outputs=list(dispatch.uninitialized),
+                failed_outputs=list(dispatch.failed),
+            )
+        except Exception:
+            logger.exception("could not record the output dispatch for rule '%s'", event.rule_id)
 
     def _derive_alert_event(
         self,
@@ -1699,61 +1954,44 @@ class Engine:
         event: AlertEvent,
         status: PluginStatus,
         initial_exc: Exception,
+        *,
+        sleep: Callable[[float], bool],
     ) -> bool:
-        last_exc: Exception = initial_exc
+        """Retry emit() max_retry times, then re-init and retry max_reinit times.
+
+        Runs on the output's thread; sleep() returns True when shutdown cuts the waits short.
+        """
+        last_exc: BaseException = initial_exc
         last_detail = traceback.format_exc()
         attempt = 0
-
-        for _ in range(getattr(output, "max_retry", 1)):
+        plan = ["retry"] * getattr(output, "max_retry", 1) + ["reinit"] * getattr(output, "max_reinit", 1)
+        for step in plan:
             attempt += 1
-            time.sleep(attempt ** 2)
+            if sleep(_retry_delay(attempt)):
+                break
+            if step == "reinit":
+                try:
+                    self._call_output_terminate(output)
+                except Exception:
+                    last_detail = traceback.format_exc()
+                try:
+                    self._call_output_init(output)
+                    status.init_ok = True
+                except Exception as exc:
+                    last_exc = exc
+                    last_detail = traceback.format_exc()
+                    continue
             try:
                 self._call_output_emit(output, event)
-                self._set_plugin_ready(status)
-                status.last_error = None
-                status.last_error_detail = None
-                status.run_count += 1
-                status.last_run_at = event.occurred_at
-                status.last_success_at = event.occurred_at
-                status.last_updated_at = event.occurred_at
-                return True
-            except Exception as exc:
-                last_exc = exc
-                last_detail = traceback.format_exc()
-
-        for _ in range(getattr(output, "max_reinit", 1)):
-            attempt += 1
-            time.sleep(attempt ** 2)
-            try:
-                self._call_output_terminate(output)
-            except Exception:
-                last_detail = traceback.format_exc()
-            try:
-                self._call_output_init(output)
-                status.init_ok = True
             except Exception as exc:
                 last_exc = exc
                 last_detail = traceback.format_exc()
                 continue
-            try:
-                self._call_output_emit(output, event)
-                self._set_plugin_ready(status)
-                status.last_error = None
-                status.last_error_detail = None
-                status.run_count += 1
-                status.last_run_at = event.occurred_at
-                status.last_success_at = event.occurred_at
-                status.last_updated_at = event.occurred_at
-                return True
-            except Exception as exc:
-                last_exc = exc
-                last_detail = traceback.format_exc()
+            self._record_output_success(status, event)
+            return True
 
-        self._set_plugin_failed(status)
-        status.last_error = str(last_exc)
-        status.last_error_detail = last_detail
-        status.last_failure_at = event.occurred_at
-        status.last_updated_at = event.occurred_at
+        self._record_output_failure(status, event, last_exc, last_detail)
+        logger.error("output '%s' failed: %s", output_id, last_exc)
         return False
 
     def record_source_failure(self, source_id: str, error: str, *, now: datetime | None = None) -> None:

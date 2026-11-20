@@ -292,6 +292,8 @@ The operational surface, however, is the HTTP API. The viewer is the standard UI
   Hands-on introduction.
 - [docs/plugins.md](docs/plugins.md)
   Plugin interfaces and built-in helper classes.
+- [docs/templates.md](docs/templates.md)
+  Every `kanary new` template on one page, with a table of contents.
 - [docs/operations.md](docs/operations.md)
   Running Kanary, the viewer, the CLI, and persistence.
 - [docs/api.md](docs/api.md)

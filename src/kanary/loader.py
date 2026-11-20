@@ -7,6 +7,7 @@ import sys
 from types import ModuleType
 
 from .filtering import apply_excludes
+from .plugin_files import tolerating_missing_files
 from .registry import (
     clear_registries,
     get_output_registry,
@@ -47,7 +48,19 @@ class RuleDirectoryLoader:
             raise ValueError(_format_validation_errors(report))
         return snapshot
 
-    def inspect(self, exclude_patterns: list[str] | None = None) -> tuple[RegistrySnapshot, ValidationReport]:
+    def inspect(
+        self,
+        exclude_patterns: list[str] | None = None,
+        *,
+        lint: bool = False,
+    ) -> tuple[RegistrySnapshot, ValidationReport]:
+        """Load the plugin files and check them. With lint=True, a config or secrets
+        file that load_json() / load_toml() cannot find is a warning, not an error."""
+        if lint:
+            with tolerating_missing_files() as notes:
+                snapshot, report = self.inspect(exclude_patterns)
+            report.warnings.extend(notes)
+            return snapshot, report
         previous_sources = get_source_registry()
         previous_rules = get_rule_registry()
         previous_outputs = get_output_registry()

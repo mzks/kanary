@@ -46,7 +46,7 @@ where = ["src"]
 exclude = ["*.tests", "*.tests.*", "tests.*", "tests"]
 
 [tool.setuptools.package-data]
-kanary = ["web/*.html", "web/*.js", "web/*.css"]
+kanary = ["web/*.html", "web/*.js", "web/*.css", "templates/*.py"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -45,3 +45,12 @@ SUPPRESSED = AlertState.SUPPRESSED
 UNACK = TransitionKind.UNACK
 ESCALATED = TransitionKind.ESCALATED
 DEESCALATED = TransitionKind.DEESCALATED
+
+
+def coerce_severity(value: "Severity | str") -> Severity:
+    """A Severity from a Severity or its name ("warn", "ERROR", ...)."""
+    if isinstance(value, Severity):
+        return value
+    if isinstance(value, str):
+        return Severity[value.strip().upper()]
+    raise TypeError("severity must be kanary.INFO/WARN/ERROR/CRITICAL or a matching string")

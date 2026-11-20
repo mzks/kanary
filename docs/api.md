@@ -34,6 +34,7 @@ Use `--api-host` and `--api-port` to change the bind address.
 - `GET /plugins`
   Returns current status for sources, rules, and outputs.
   Plugin rows may be `DISCOVERED`, `DIRTY`, `PENDING_REMOVE`, `READY`, `RELOADING`, or `FAILED`.
+  `warning` is set while a rule's `evaluate()` is slow. Output rows add `queued` (events waiting or being sent) and `dropped` (events dropped from a full queue or at shutdown).
 - `GET /viewer`
   Serves the built-in Web viewer.
 - `GET /plugins/{type}/{plugin_id}/source`
@@ -64,7 +65,7 @@ Use `--api-host` and `--api-port` to change the bind address.
   `{"full":true}` performs an in-process engine restart after successful discovery and validation.
   For legacy compatibility, an empty body is still accepted and behaves like `{"all":true}`.
 - `POST /test-poll/{source_id}`
-  Polls one source and returns the normalized source payload.
+  Runs the source's `test_poll()` on the source's own thread, between its polls, and returns the normalized source payload. The result is not evaluated, the source's state and status do not change, and its regular polls keep their schedule. Returns 409 when the source is not running (its `init()` failed) or the test poll does not finish within 30 seconds.
 - `POST /test-evaluate/{rule_id}`
   Dry-runs one rule against an explicit payload and returns the normalized evaluation result.
   This payload uses an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`. Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
@@ -125,12 +126,12 @@ Main subcommands:
   `--full` performs an in-process engine restart and reinitializes all sources, rules, and outputs.
   For legacy compatibility, `POST /reload` with an empty body still behaves like `--all`.
 - `test-poll`
-  Polls one source and prints the normalized payload as JSON.
+  Runs the source's `test_poll()` (on its own thread, between polls; not evaluated) and prints the normalized payload as JSON.
 - `test-evaluate`
   Dry-runs one rule against a payload from `--payload-json`, `--payload-file`, or `--payload-stdin`.
   Use `--print-template` first if you want a canonical inputs-based payload skeleton.
 - `test-fire`
-  Sends a synthetic alert event through the output pipeline and prints the dispatch summary as JSON.
+  Sends a synthetic alert event through the output pipeline and prints the dispatch summary as JSON. It goes ahead of queued events and waits up to 30 seconds; outputs that have not sent by then are listed in `pending_outputs`.
 
 Common argument:
 

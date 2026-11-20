@@ -1,12 +1,12 @@
+# The engine and the plugin base classes.
 from .api import ControlAPI
 from .constants import ACKED, CRITICAL, DEESCALATED, ERROR, ESCALATED, FIRING, INFO, OK, SILENCED, SUPPRESSED, UNACK, WARN, severity_label
 from .constants import AlertState, Severity, TransitionKind
 from .engine import Engine
 from .loader import RuleDirectoryLoader
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
-from .output import MailOutput, Output, OutputFollowups
+from .output import Output, event_record
 from .plugin_files import load_json, load_toml, plugin_dir
-from .remote import RemoteAlarm, RemoteKanarySource, import_remote_alarms
 from .registry import (
     clear_registries,
     get_output_registry,
@@ -21,12 +21,8 @@ from .registry import (
 )
 from .rule import (
     InputView,
-    RangeRule,
-    RateRule,
     Rule,
     RuleContext,
-    StaleRule,
-    ThresholdRule,
     critical,
     critical_if,
     error,
@@ -41,9 +37,29 @@ from .rule import (
     warn_if,
 )
 from .runtime import EngineRuntime, RuntimeConfig
-from .source import BufferedSource, PushSource, Source, inputs, no_data, no_update, skip
+from .source import Source, inputs, no_data, no_update, skip
 from .store import NullStore, SQLiteStore, build_store
+from .values import parse_values, to_datetime, to_number, to_timezone
 from .units import Hz, MHz, cps, day, format_rate, format_time, hour, kHz, microsecond, millisecond, minute, nanosecond, second
+
+# Ready-made plugin classes and tools (kanary/helpers).
+from .helpers.buffer import Buffer, Series
+from .helpers.command import CommandOutput, CommandSource, SSHCommandSource
+from .helpers.files import FileOutput, FileSource, LogCountSource
+from .helpers.followups import OutputFollowups
+from .helpers.health import PluginHealthSource
+from .helpers.inbox import Inbox
+from .helpers.http_plugins import DiscordOutput, HTTPJSONSource, MattermostOutput, SlackOutput, WebhookOutput
+from .helpers.input_rules import AggregateRule, CountRule, DifferenceRule, KOfNRule
+from .helpers.mail import MailOutput
+from .helpers.notice import Digest, Notice, describe, digest
+from .helpers.oncall import OnCallSchedule, QuietHours
+from .helpers.prometheus import PrometheusSource
+from .helpers.push import HTTPPushSource, MQTTSource
+from .helpers.probe import HTTPStatusSource, PingSource, TCPSource
+from .helpers.remote import RemoteAlarm, RemoteKanarySource, import_remote_alarms
+from .helpers.sql import SQLLongSource, SQLWideSource
+from .helpers.value_rules import ExpectedValueRule, RangeRule, RateRule, StaleRule, ThresholdRule, ValueRule
 
 __all__ = [
     "ACKED",
@@ -75,11 +91,21 @@ __all__ = [
     "ok_if",
     "Output",
     "OutputFollowups",
+    "PluginHealthSource",
+    "PrometheusSource",
     "PluginStatus",
-    "BufferedSource",
-    "PushSource",
+    "Buffer",
+    "HTTPPushSource",
+    "Inbox",
+    "MQTTSource",
+    "Digest",
+    "Notice",
+    "Series",
     "cps",
     "day",
+    "describe",
+    "digest",
+    "event_record",
     "format_rate",
     "format_time",
     "build_store",
@@ -99,6 +125,7 @@ __all__ = [
     "load_json",
     "load_toml",
     "plugin_dir",
+    "ExpectedValueRule",
     "RangeRule",
     "RateRule",
     "RemoteAlarm",
@@ -119,6 +146,7 @@ __all__ = [
     "SUPPRESSED",
     "StaleRule",
     "ThresholdRule",
+    "ValueRule",
     "TransitionKind",
     "UNACK",
     "WARN",
@@ -138,4 +166,30 @@ __all__ = [
     "skip",
     "import_remote_alarms",
     "severity_label",
+    "CommandOutput",
+    "CommandSource",
+    "SSHCommandSource",
+    "FileOutput",
+    "FileSource",
+    "LogCountSource",
+    "DiscordOutput",
+    "HTTPJSONSource",
+    "MattermostOutput",
+    "SlackOutput",
+    "WebhookOutput",
+    "AggregateRule",
+    "CountRule",
+    "DifferenceRule",
+    "KOfNRule",
+    "OnCallSchedule",
+    "QuietHours",
+    "HTTPStatusSource",
+    "PingSource",
+    "TCPSource",
+    "SQLLongSource",
+    "SQLWideSource",
+    "parse_values",
+    "to_datetime",
+    "to_number",
+    "to_timezone",
 ]

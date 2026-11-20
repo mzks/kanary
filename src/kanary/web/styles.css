@@ -26,6 +26,12 @@
 
 * { box-sizing: border-box; }
 
+/* iOS enlarges text in blocks it thinks are too wide; keep the sizes set here. */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   /* Keep the background gradient from repeating when content is short. */
@@ -921,6 +927,19 @@ select {
   color: #7d240c;
 }
 
+/* A rule whose evaluate() is slow; an output with events waiting. */
+.plugin-state-SLOW {
+  background: rgba(181, 126, 53, 0.22);
+  border-color: rgba(181, 126, 53, 0.38);
+  color: #7a4e0f;
+}
+
+.plugin-state-QUEUED {
+  background: rgba(104, 135, 167, 0.22);
+  border-color: rgba(104, 135, 167, 0.36);
+  color: #345370;
+}
+
 .severity-badge {
   display: inline-flex;
   align-items: center;
@@ -960,6 +979,9 @@ select {
 .alert-card {
   padding: 18px;
   display: grid;
+  /* A long unbroken message must not widen the card past its column. */
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 10px;
   border-color: var(--line-strong);
 }
@@ -1845,7 +1867,7 @@ code {
 @media (max-width: 760px) {
   :root {
     --radius: 14px;
-    --mobile-nav-height: 58px;
+    --mobile-nav-height: 68px;
   }
 
   body {
@@ -1980,7 +2002,7 @@ code {
     max-height: none;
     display: flex;
     gap: 2px;
-    padding: 5px 6px calc(5px + env(safe-area-inset-bottom));
+    padding: 8px 6px calc(8px + env(safe-area-inset-bottom));
     overflow-x: auto;
     overscroll-behavior-x: contain;
     scrollbar-width: none;
@@ -1995,7 +2017,7 @@ code {
 
   .nav-link {
     flex: 0 0 auto;
-    min-height: 42px;
+    min-height: 52px;
     padding: 0 12px;
     font-size: 13px;
     white-space: nowrap;
@@ -2214,7 +2236,7 @@ code {
   .alert-card-message {
     font-size: 13px;
     line-height: 1.35;
-    overflow-wrap: break-word;
+    overflow-wrap: anywhere;
   }
 
   .alert-card > .alert-card-meta:last-child {
@@ -3034,10 +3056,25 @@ input[type="datetime-local"]::-webkit-date-and-time-value {
      (its flex gap pushed the label off-center) unless the dirty dot is shown. */
   .nav-link {
     justify-content: center;
+    /* Taller than the 40px touch minimum above, so a sideways drag lands on
+       the tab bar instead of turning into a page swipe. */
+    min-block-size: 52px;
+  }
+
+  .sidebar {
+    touch-action: pan-x;
   }
 
   .nav-link-meta:not(:has(.nav-dirty-badge:not(.hidden))) {
     display: none;
+  }
+
+  /* Home-screen web app: iOS blurs and fades content just under the status
+     bar, so start the header a little lower than in the browser. */
+  @media (display-mode: standalone) {
+    .app-shell {
+      padding-top: calc(env(safe-area-inset-top) + 18px);
+    }
   }
 
   /* Payload JSON wraps instead of scrolling sideways. */

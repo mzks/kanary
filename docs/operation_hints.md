@@ -12,7 +12,7 @@ First, verify that the plugin directory can be loaded.
 kanary lint ./plugins
 ```
 
-`lint ok` means that Kanary could import the directory and inspect its definitions. It does not guarantee every behavior, including external connectivity, notification content, thresholds, or decorator typos. Importing a plugin module executes arbitrary Python code, so keep external connections and writes in `init()`, `poll()`, or `emit()`, rather than at module top level.
+`lint ok` means that Kanary could import the directory and inspect its definitions. It does not guarantee every behavior, including external connectivity, notification content, or thresholds. Unknown decorator arguments, such as a misspelled attribute name, and values set differently in the decorator and the class body are reported as warnings, but a typo in a class attribute name is not detected. Importing a plugin module executes arbitrary Python code, so keep external connections and writes in `init()`, `poll()`, or `emit()`, rather than at module top level.
 
 To verify routing with the same plugins and inputs as production, start a shadow instance on a different port with a different node ID.
 
@@ -93,7 +93,9 @@ A Source whose `init()` fails during startup does not get a runtime thread and i
 
 Always set timeouts for external I/O such as HTTP, database, and socket operations. Without one, a poll can block indefinitely and delay the next evaluation.
 
-The same constraint applies to Output `emit()`: it must complete promptly and use finite timeouts for external I/O. Synchronous waiting in `emit()` delays other Source updates and Rule evaluations. Use `OutputFollowups` for delayed follow-up work, or an Output that quickly publishes to a message broker when durable delivery is required.
+Output `emit()` runs on the output's own thread, so a slow destination does not delay Source updates, Rule evaluations, or other Outputs. It still needs finite timeouts: while `emit()` waits, this output's later events wait behind it (up to 1000; beyond that the oldest are dropped). Use `OutputFollowups` for delayed follow-up work, or an Output that quickly publishes to a message broker when durable delivery is required.
+
+Rule `evaluate()` is different: rules are evaluated one at a time, so a slow `evaluate()` delays every other evaluation. Keep it free of I/O; one slower than 100 ms is logged and shown as `SLOW`.
 
 When possible, set `Measurement.timestamp` to the time when the monitored system actually observed the value, rather than the retrieval time. Using Kanary's poll time makes old data appear fresh, which makes StaleRule and rate calculations inaccurate. Use the poll time only when no observation time is available.
 
@@ -253,6 +255,6 @@ class OperationsFollowupOutput:
             followups.now(self.post_mailing_list)
 ```
 
-`now()` invokes its callback synchronously with the current event. Callback exceptions propagate to `emit()`, so normal Output retry / reinitialization applies. `after()` uses an absolute offset from the first followup registration, and its callback receives the most recently received event at execution time.
+`now()` invokes its callback synchronously with the current event. Callback exceptions propagate to `emit()`, so normal Output retry / reinitialization applies. `after()` uses an absolute offset from the first followup registration, and its callback receives the most recently received event at execution time. Callbacks run on the output's own thread between `emit()` calls, so they never overlap with `emit()`.
 
 To cancel followups on `SILENCED` and `SUPPRESSED`, the Output must receive those events, hence `exclude_states=[]`. Followups are stored only in memory and are lost on process restart or plugin reload. Always call `close()` from `terminate()`. See [output_followups.py](../examples/output_followups.py) for the complete example.

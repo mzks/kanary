@@ -38,6 +38,23 @@ def format_time(seconds: float, *, precision: int = 1) -> str:
     return f"{_format_number(value, precision=precision)} {label}"
 
 
+def best_per_time_unit(per_second: float) -> tuple[float, str]:
+    """(seconds, label) of the time unit in which a rate per second reads as 1 or more."""
+    units = ((second, "s"), (minute, "min"), (hour, "h"), (day, "d"))
+    if per_second == 0:
+        return units[0]
+    for scale, label in units:
+        if abs(per_second) * scale >= 1:
+            return scale, label
+    return units[-1]
+
+
+def format_per_time(per_second: float, *, unit: tuple[float, str] | None = None, precision: int = 3) -> str:
+    """A rate per second as "2 /s", "1.5 /min", or "3 /h" (unit: from best_per_time_unit())."""
+    scale, label = unit or best_per_time_unit(per_second)
+    return f"{_format_number(per_second * scale, precision=precision)} /{label}"
+
+
 def best_rate_unit(per_second: float, *, kind: str = "frequency") -> tuple[float, str]:
     absolute = abs(per_second)
     if kind == "count":

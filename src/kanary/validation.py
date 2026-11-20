@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .constants import AlertState, Severity
-from .output import Output, _coerce_minimum_severity, prepare_output_class
+from .output import Output
 from .patterns import matches_any_tag, matches_excluded_tag
-from .rule import Rule, normalize_rule_inputs, prepare_rule_class, resolve_rule_sources
-from .source import BufferedSource, Source, prepare_source_class
+from .registry import _minimum_severity, prepare_output_class, prepare_rule_class, prepare_source_class
+from .helpers.value_rules import RangeRule, RateRule, StaleRule, ThresholdRule
+from .rule import Rule
+from .selectors import normalize_rule_inputs, resolve_rule_sources
+from .source import Source
 
 
 @dataclass(slots=True)
@@ -33,6 +36,7 @@ def validate_rule_class(rule_id: str, rule_cls: type[Any]) -> ValidationReport:
     except Exception as exc:
         report.errors.append(str(exc))
         return report
+    report.warnings.extend(_decorator_warnings("rule", rule_id, rule_cls))
 
     tags = getattr(rule_cls, "tags", None)
     if tags == []:
@@ -51,6 +55,7 @@ def validate_source_class(source_id: str, source_cls: type[Any]) -> ValidationRe
     except Exception as exc:
         report.errors.append(str(exc))
         return report
+    report.warnings.extend(_decorator_warnings("source", source_id, source_cls))
     if getattr(source_cls, "__kanary_init_style__", "new") == "legacy":
         report.warnings.append(
             f"source '{source_id}' uses legacy init(ctx); prefer init()"
@@ -63,10 +68,6 @@ def validate_source_class(source_id: str, source_cls: type[Any]) -> ValidationRe
         report.warnings.append(
             f"source '{source_id}' uses legacy terminate(ctx); prefer terminate()"
         )
-    if issubclass(source_cls, BufferedSource) and getattr(source_cls, "__kanary_fetch_style__", "new") == "legacy":
-        report.warnings.append(
-            f"source '{source_id}' uses legacy fetch(ctx); prefer fetch()"
-        )
     return report
 
 
@@ -77,6 +78,7 @@ def validate_output_class(output_id: str, output_cls: type[Any]) -> ValidationRe
     except Exception as exc:
         report.errors.append(str(exc))
         return report
+    report.warnings.extend(_decorator_warnings("output", output_id, output_cls))
     if getattr(output_cls, "__kanary_init_style__", "new") == "legacy":
         report.warnings.append(
             f"output '{output_id}' uses legacy init(ctx); prefer init()"
@@ -90,6 +92,25 @@ def validate_output_class(output_id: str, output_cls: type[Any]) -> ValidationRe
             f"output '{output_id}' uses legacy terminate(ctx); prefer terminate()"
         )
     return report
+
+
+def _decorator_warnings(kind: str, plugin_id: str, cls: type[Any]) -> list[str]:
+    warnings: list[str] = []
+    for attr_name, class_value, decorator_value in getattr(cls, "__kanary_decorator_conflicts__", []):
+        warnings.append(
+            f"{kind} '{plugin_id}' sets '{attr_name}' in both the decorator and the class body "
+            f"with different values ({_short_repr(decorator_value)} vs {_short_repr(class_value)}); "
+            "the decorator value is used"
+        )
+    for attr_name, suggestion in getattr(cls, "__kanary_decorator_unknown_attrs__", []):
+        hint = f"did you mean '{suggestion}'?" if suggestion else "check for a typo"
+        warnings.append(f"{kind} '{plugin_id}' decorator sets unknown attribute '{attr_name}'; {hint}")
+    return warnings
+
+
+def _short_repr(value: Any, limit: int = 40) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def validate_registries(
@@ -171,7 +192,7 @@ def _matching_outputs(rule_cls: type[Any], outputs: dict[str, type[Output]]) -> 
         include_tags = list(getattr(output_cls, "include_tags", []))
         exclude_tags = list(getattr(output_cls, "exclude_tags", []))
         exclude_states = set(getattr(output_cls, "exclude_states", []))
-        minimum_severity = _coerce_minimum_severity(getattr(output_cls, "minimum_severity", None))
+        minimum_severity = _minimum_severity(getattr(output_cls, "minimum_severity", None))
 
         if include_tags and not matches_any_tag(rule_tags, include_tags):
             continue
@@ -237,7 +258,36 @@ def _validate_rule_settings(
         report.errors.append(
             f"rule '{rule_id}' evaluation_interval must be a positive finite number"
         )
+    if (
+        isinstance(rule_cls, type)
+        and issubclass(rule_cls, RangeRule)
+        and getattr(rule_cls, "low", None) is None
+        and getattr(rule_cls, "high", None) is None
+    ):
+        if getattr(rule_cls, "fire_when", "outside") == "inside":
+            report.warnings.append(
+                f"rule '{rule_id}' sets neither low nor high with fire_when='inside', so it always fires; set at least one bound"
+            )
+        else:
+            report.warnings.append(
+                f"rule '{rule_id}' sets neither low nor high, so it never fires; set at least one bound"
+            )
+    if isinstance(rule_cls, type) and issubclass(rule_cls, (RangeRule, ThresholdRule, StaleRule)):
+        removed = [
+            name
+            for name in _REMOVED_RULE_SETTINGS
+            if any(name in vars(klass) for klass in rule_cls.__mro__ if klass not in _BUILTIN_RULES)
+        ]
+        if removed:
+            report.warnings.append(
+                f"rule '{rule_id}' sets {', '.join(removed)}, which built-in rules no longer read; "
+                "select the value with inputs='source:input' instead"
+            )
     return report
+
+
+_REMOVED_RULE_SETTINGS = ("field", "timestamp_field", "previous_field", "previous_timestamp_field")
+_BUILTIN_RULES = (RangeRule, RateRule, ThresholdRule, StaleRule, Rule, object)
 
 
 def _validate_rule_inputs(

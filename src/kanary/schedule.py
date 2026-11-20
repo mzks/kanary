@@ -122,3 +122,7 @@ def _parse_number(text: str, minimum: int, maximum: int, *, normalize_weekday: b
     if value < minimum or value > maximum:
         raise ValueError(f"cron value {value} is outside {minimum}-{maximum}")
     return value
+
+
+def compiled_schedule(source: object) -> CronSchedule | None:
+    return getattr(source.__class__, "_kanary_compiled_schedule", None)

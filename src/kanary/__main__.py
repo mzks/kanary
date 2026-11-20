@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tomllib
 
+from . import scaffold
 from .constants import DEFAULT_VIEWER_TITLE
 from .loader import RuleDirectoryLoader
 from .runtime import AUTO_RELOAD_CHOICES, DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
@@ -44,7 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  For the full run option list, use:\n"
             "  kanary run --help\n"
             "Lint must be explicit:\n"
-            "  kanary lint ./plugins"
+            "  kanary lint ./plugins\n"
+            "Generate a plugin from a template:\n"
+            "  kanary new --list\n"
+            "  kanary new -t range my.rule"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -130,7 +134,112 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PLUGIN_GLOB",
         help="Exclude one or more plugin id patterns such as 'sqlite.*.stale' or 'discord'. Can be given multiple times.",
     )
+
+    new_parser = subparsers.add_parser(
+        "new",
+        help="Generate a plugin file from a template",
+        usage=(
+            "kanary new -t TEMPLATE PLUGIN_ID [-o PATH] [-a | --force | --stdout]\n"
+            "       kanary new --show TEMPLATE\n"
+            "       kanary new --list"
+        ),
+        description="Generate a plugin file from a template. Every template passes `kanary lint`.",
+        epilog=(
+            "Templates:\n"
+            + scaffold.format_template_table()
+            + "\n\nExamples:\n"
+            "  kanary new -t source postgres.wide -o plugins/\n"
+            "  kanary new -t range oil.temperature.high -o plugins/postgres_wide.py -a\n"
+            "  kanary new -t followups oncall --stdout\n"
+            "  kanary new --show ping\n"
+            "\n"
+            "A PLUGIN_ID ending in .py names the file: `kanary new -t source plugins/env.py`\n"
+            "creates plugins/env.py with source_id \"env\"."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    new_parser.add_argument(
+        "-t",
+        "--template",
+        metavar="TEMPLATE",
+        help="Template name from the table below. It also decides the plugin kind.",
+    )
+    new_parser.add_argument("plugin_id", nargs="?", metavar="PLUGIN_ID", help="source_id, rule_id, or output_id of the new plugin.")
+    new_parser.add_argument(
+        "-o",
+        "--output",
+        metavar="PATH",
+        help="File, or directory ending in '/', to write. Default: <plugin_id>.py in the current directory.",
+    )
+    mode = new_parser.add_mutually_exclusive_group()
+    mode.add_argument("-a", "--append", action="store_true", help="Append to an existing file (imports are merged).")
+    mode.add_argument("--force", action="store_true", help="Overwrite an existing file.")
+    mode.add_argument("--stdout", action="store_true", help="Print the result instead of writing a file.")
+    new_parser.add_argument("-l", "--list", action="store_true", help="List the templates and exit.")
+    new_parser.add_argument("--show", metavar="TEMPLATE", help="Print a template as it is, without generating anything.")
+    new_parser.add_argument("--catalog", action="store_true", help="Print every template as one Markdown page (docs/templates.md).")
     return parser
+
+
+def _run_new(args: argparse.Namespace) -> int:
+    templates = scaffold.load_templates()
+    if args.list:
+        print(scaffold.format_template_table(templates))
+        return 0
+    if args.catalog:
+        print(scaffold.format_catalog(templates), end="")
+        return 0
+    if args.show:
+        template = templates.get(args.show)
+        if template is None:
+            print(f"error: unknown template '{args.show}'\n", file=sys.stderr)
+            print(scaffold.format_template_table(templates), file=sys.stderr)
+            return 2
+        print(template.body, end="")
+        return 0
+    if not args.template or not args.plugin_id:
+        print("error: kanary new needs -t TEMPLATE and PLUGIN_ID\n", file=sys.stderr)
+        print(scaffold.format_template_table(templates), file=sys.stderr)
+        return 2
+    template = templates.get(args.template)
+    if template is None:
+        print(f"error: unknown template '{args.template}'\n", file=sys.stderr)
+        print(scaffold.format_template_table(templates), file=sys.stderr)
+        return 2
+
+    plugin_id, named_path = scaffold.split_plugin_argument(args.plugin_id)
+    try:
+        content = scaffold.render(template, plugin_id)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.stdout:
+        print(content, end="")
+        return 0
+
+    if args.output and (args.output.endswith(("/", os.sep)) or Path(args.output).is_dir()):
+        target = Path(args.output) / (named_path.name if named_path else scaffold.file_name_for(plugin_id))
+    elif args.output:
+        target = Path(args.output)
+    else:
+        target = named_path or Path(scaffold.file_name_for(plugin_id))
+    try:
+        if args.append:
+            scaffold.append(
+                target,
+                content,
+                plugin_id=plugin_id,
+                class_name=scaffold.class_name_for(plugin_id, template.kind),
+            )
+        else:
+            scaffold.write(target, content, force=args.force)
+    except (FileExistsError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    action = "appended" if args.append else "created"
+    print(f"{action} {template.kind} '{plugin_id}' ({template.name}) in {target}")
+    return 0
+
 
 def main() -> int:
     parser = build_parser()
@@ -138,7 +247,7 @@ def main() -> int:
     if not argv:
         parser.print_help()
         return 2
-    if argv[0] not in {"run", "lint", "-h", "--help", "--version"}:
+    if argv[0] not in {"run", "lint", "new", "-h", "--help", "--version"}:
         argv = ["run", *argv]
     args = parser.parse_args(argv)
 
@@ -146,10 +255,13 @@ def main() -> int:
         parser.print_help()
         return 2
 
+    if args.command == "new":
+        return _run_new(args)
+
     if args.command == "lint":
         loader = RuleDirectoryLoader([Path(path) for path in args.plugin_directories])
         try:
-            _, report = loader.inspect(exclude_patterns=args.exclude)
+            _, report = loader.inspect(exclude_patterns=args.exclude, lint=True)
         except Exception as exc:
             print(f"lint failed: {exc}")
             return 1

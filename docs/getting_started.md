@@ -151,7 +151,7 @@ Other common helper-class settings:
 - `RangeRule`
   - `inputs`, `low`, `high`, `hysteresis`
 - `RateRule`
-  - `inputs`, `per_seconds`, `high`, `low`
+  - `inputs`, `high`, `low` (per second, e.g. `1.0 / kanary.minute`)
 
 Use a custom rule only when a helper class no longer matches the monitoring logic cleanly.
 
@@ -241,20 +241,9 @@ kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 
 ## 8. More Features
 
-### BufferedSource
+### Keeping History (kanary.Buffer)
 
-Use `kanary.BufferedSource` when you want to keep a short in-memory history inside the source itself.
-It gives you helper methods such as:
-
-- `history()`
-- `latest()`
-- `average_value()`
-- `min_value()`
-- `max_value()`
-- `count()`
-- `rate()`
-
-You implement `fetch()` instead of `poll()`, and use that short history to produce derived measurements.
+To publish values computed from recent samples, such as a 10-minute average or a trend, create a `kanary.Buffer` in `init()` (`self.buffer = kanary.Buffer(size=1024, seconds=kanary.hour)`), add the raw values to it in `poll()` (`self.buffer.add(("pressure", value))`, the same items as `kanary.inputs()`), and return inputs computed from `self.buffer["name"]`, for example `self.buffer["pressure"].window(600).mean()`. It works in any source, including the helper classes (`self.buffer.add(super().poll())`). See `kanary new --show buffered`.
 
 ### Remote Kanary Nodes
 
@@ -271,8 +260,6 @@ Remote alert import uses `origin_node_id` and `mirror_path` to avoid import loop
 For local testing, Mailpit is much easier than a real SMTP server.
 
 ```python
-import json
-
 @kanary.output(output_id="mail", include_tags=["getting-started"])
 class MailAlert(kanary.MailOutput):
     smtp_host = "127.0.0.1"
@@ -282,43 +269,13 @@ class MailAlert(kanary.MailOutput):
     recipients = ["operator@example.test"]
     subject_prefix = "[KANARY getting-started]"
 
-    def _subject(self, event):
-        marker = event.transition.value if event.transition is not None else event.current_state.value
-        return (
-            f"{self.subject_prefix} "
-            f"{marker} {kanary.severity_label(event.effective_severity)} {event.rule_id}"
-        )
-
-    def _body(self, event):
-        lines = [
-            f"Rule: {event.rule_id}",
-            f"Occurred At: {event.occurred_at.isoformat()}",
-            f"Previous State: {event.previous_state.value if event.previous_state is not None else '-'}",
-            f"State: {event.current_state.value}",
-            (
-                "Previous Severity: "
-                f"{kanary.severity_label(event.previous_severity) if event.previous_severity is not None else '-'}"
-            ),
-            f"Severity: {kanary.severity_label(event.current_severity)}",
-            f"Transition: {event.transition.value if event.transition else '-'}",
-            f"Owner: {event.owner or '-'}",
-            f"Tags: {', '.join(event.tags) if event.tags else '-'}",
-            f"Message: {event.message or '-'}",
-        ]
-        if event.payload:
-            lines.extend(
-                [
-                    "",
-                    "Payload:",
-                    json.dumps(event.payload, ensure_ascii=False, indent=2, sort_keys=True),
-                ]
-            )
-        return "\n".join(lines)
 ```
 
 Start Mailpit with:
 
-```bash
+```
+
+Each mail has a plain-text part and an HTML part with a colored header, the rule's message, and a table of state, severity, owner, tags, and the judged values. Override `subject(event)`, `body(event)`, or `html(event)` (return `None` for plain text only) to change it; `viewer_url` links the mail to the viewer.bash
 docker run --rm -p 1025:1025 -p 8025:8025 axllent/mailpit
 ```
 
@@ -341,6 +298,24 @@ kanaryctl --base-url http://127.0.0.1:8000 silence-for --operator operator_name 
 ```
 
 Scheduled silences update `SILENCED` at their start and end times without waiting for the next Source poll. A boundary does not trigger another poll; it restores the latest normal Rule evaluation, including evaluations completed while the silence was active. Only rules that have not been evaluated since process startup wait for their first poll before their state can change.
+
+### Generate a Plugin from a Template
+
+`kanary new` writes a plugin file from a template. Each template is a working plugin that shows every option with comments, so it also serves as a reference. `kanary new --list` (or `kanary new --help`) prints the table of templates: the template name also decides whether a Source, Rule, or Output is created.
+
+```bash
+kanary new --list
+kanary new -t source postgres.wide -o ./plugins/
+kanary new -t range oil.temperature.high -o ./plugins/postgres_wide.py -a
+kanary new -t followups oncall --stdout
+kanary new --show ping
+```
+
+- The list is split into BASIC templates (the common starting points, one helper class and mostly settings: `command`, `ping`, `tcp`, `http-status`, `file`, `http-json`, `prometheus`, `sql-wide`, `sql-long`, `http-push`, `mqtt`, `plugin-health`, `range`, `threshold`, `expected`, `stale`, `webhook`, `slack`, `mattermost`, `discord`, `file-log`, `mail`, plus the plain `source` / `rule` / `output`) and ADVANCED templates (less common helpers, custom logic, or several features: `ssh`, `log-count`, `push`, `buffered`, `trend`, `spike`, `frozen`, `remote`, `rate`, `difference`, `k-of-n`, `aggregate`, `count`, `multi-source`, `command-output`, `followups`, `delayed`, `quiet-hours`, `oncall`).
+- `--show TEMPLATE` prints a template without writing anything. [docs/templates.md](templates.md) shows every template on one page, with a table of contents.
+- The template files themselves are in `src/kanary/templates/`.
+- `-o` takes a file, or a directory ending in `/`. The default is `<plugin_id>.py` in the current directory. A PLUGIN_ID ending in `.py` names the file, and its stem becomes the id.
+- An existing file is never overwritten silently: use `-a` to append (imports are merged) or `--force` to overwrite.
 
 ### Lint
 

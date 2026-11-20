@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import fnmatch
@@ -12,13 +13,14 @@ import threading
 import time
 from typing import Any
 
-from .api import ControlAPI
+from .api import ControlAPI, PollUnavailableError
 from .constants import DEFAULT_VIEWER_TITLE
+from .dispatch import SHUTDOWN_DRAIN_SECONDS
 from .engine import Engine
 from .filtering import apply_excludes
 from .loader import RuleDirectoryLoader
 from .models import PluginStatus
-from .source import PushSource, compiled_schedule
+from .schedule import compiled_schedule
 from .store import build_store
 
 logger = logging.getLogger("kanary.runtime")
@@ -26,6 +28,8 @@ logger = logging.getLogger("kanary.runtime")
 DEFAULT_LOG_LEVEL = "INFO"
 LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 AUTO_RELOAD_CHOICES = ("off", "dirty", "all")
+# How long a test poll requested from the API (kanaryctl test-poll) may take.
+TEST_POLL_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(slots=True)
@@ -73,6 +77,8 @@ class EngineRuntime:
         self._source_threads: dict[str, threading.Thread] = {}
         self._source_stop_events: dict[str, threading.Event] = {}
         self._source_wake_events: dict[str, threading.Event] = {}
+        self._test_poll_requests: dict[str, list[Future]] = {}
+        self._test_poll_lock = threading.Lock()
         self.engine: Engine | None = None
         self._signature: tuple[tuple[str, int], ...] = ()
         self._discovered_snapshot = None
@@ -85,6 +91,7 @@ class EngineRuntime:
             engine_getter=lambda: self.engine,
             reload_callback=self.reload_now,
             meta_getter=self.meta_payload,
+            test_poll_callback=self.test_poll,
             host=config.api_host,
             port=config.api_port,
             enable_default_viewer=config.enable_default_viewer,
@@ -274,6 +281,10 @@ class EngineRuntime:
         old_engine = self.engine
         old_source_ids = set(self._source_threads)
         self._stop_source_threads(old_source_ids)
+        # Queued events of the old engine go out first, so a FIRING still waiting
+        # there cannot arrive after the new engine's OK for the same rule.
+        if not old_engine.flush_outputs(timeout=SHUTDOWN_DRAIN_SECONDS):
+            logger.warning("some outputs were still sending when the full restart began")
 
         new_store = build_store(self.config.state_db_path)
         new_engine = Engine(
@@ -463,7 +474,6 @@ class EngineRuntime:
             )
             self._source_stop_events[source_id] = stop_event
             self._source_wake_events[source_id] = wake_event
-            self._bind_push_wakeup(source_id, wake_event)
             self._source_threads[source_id] = thread
             thread.start()
 
@@ -479,6 +489,7 @@ class EngineRuntime:
             self._source_stop_events.pop(source_id, None)
             self._source_wake_events.pop(source_id, None)
             self._source_threads.pop(source_id, None)
+            self._fail_test_polls(source_id, PollUnavailableError(f"source '{source_id}' was stopped"))
 
     def _start_source_threads(self, source_ids: set[str]) -> None:
         if self.engine is None:
@@ -497,7 +508,6 @@ class EngineRuntime:
             )
             self._source_stop_events[source_id] = stop_event
             self._source_wake_events[source_id] = wake_event
-            self._bind_push_wakeup(source_id, wake_event)
             self._source_threads[source_id] = thread
             thread.start()
 
@@ -507,12 +517,55 @@ class EngineRuntime:
         status = self.engine._plugin_status("source", source_id)
         return status.init_ok
 
-    def _bind_push_wakeup(self, source_id: str, wake_event: threading.Event) -> None:
-        if self.engine is None:
+    def test_poll(self, source_id: str, timeout: float = TEST_POLL_TIMEOUT_SECONDS) -> dict[str, object]:
+        """Run the source's test_poll() on its own thread, between its polls.
+
+        The result is only returned: it is not evaluated, the source's state and
+        status do not change, and its regular polls keep their schedule.
+        """
+        engine = self.engine
+        if engine is None:
+            raise PollUnavailableError("the engine is starting")
+        if source_id not in engine.sources:
+            raise KeyError(source_id)
+        future: Future = Future()
+        with self._test_poll_lock:
+            wake_event = self._source_wake_events.get(source_id)
+            if wake_event is None or source_id not in self._source_threads:
+                raise PollUnavailableError(f"source '{source_id}' is not running (its init() failed, or it is stopped)")
+            self._test_poll_requests.setdefault(source_id, []).append(future)
+            wake_event.set()
+        try:
+            return future.result(timeout)
+        except FutureTimeoutError:
+            with self._test_poll_lock:
+                waiting = self._test_poll_requests.get(source_id, [])
+                if future in waiting:
+                    waiting.remove(future)
+            raise PollUnavailableError(f"source '{source_id}' did not finish a test poll within {timeout:.0f} s") from None
+
+    def _serve_test_polls(self, source_id: str, source: Any) -> None:
+        """Answer waiting test-poll requests; called on the source's thread between polls."""
+        with self._test_poll_lock:
+            futures = self._test_poll_requests.pop(source_id, [])
+        if not futures or self.engine is None:
             return
-        source = self.engine.sources.get(source_id)
-        if isinstance(source, PushSource):
-            source._set_push_wakeup(wake_event.set)
+        now = datetime.now().astimezone()
+        try:
+            result = self.engine._call_source_test_poll(source, now=now)
+            payload = self.engine._normalize_source_result(result, now=now)
+        except Exception as exc:
+            for future in futures:
+                future.set_exception(exc)
+            return
+        for future in futures:
+            future.set_result(payload)
+
+    def _fail_test_polls(self, source_id: str, error: BaseException) -> None:
+        with self._test_poll_lock:
+            futures = self._test_poll_requests.pop(source_id, [])
+        for future in futures:
+            future.set_exception(error)
 
     def _source_loop(
         self,
@@ -521,8 +574,12 @@ class EngineRuntime:
         wake_event: threading.Event,
     ) -> None:
         assert self.engine is not None
+
+        def stopped() -> bool:
+            return stop_event.is_set() or self._stop_event.is_set()
+
         next_run_at: datetime | None = None
-        while not stop_event.is_set() and not self._stop_event.is_set():
+        while not stopped():
             wake_event.clear()
             source = self.engine.sources.get(source_id)
             if source is None:
@@ -533,19 +590,33 @@ class EngineRuntime:
                 if next_run_at is None:
                     next_run_at = _initial_schedule_run_at(schedule, now)
                 if now < next_run_at:
-                    stop_event.wait((next_run_at - now).total_seconds())
+                    self._serve_test_polls(source_id, source)
+                    wake_event.wait((next_run_at - now).total_seconds())  # a test poll wakes it early
                     continue
             try:
                 payload = self._poll_source_with_recovery(source_id, source, now, stop_event)
-                alerts = self.engine.evaluate_source(source_id, payload, now=now)
+                if stopped():
+                    return  # stopped or reloaded while poll() was running
+                # poll() may have waited for data, so stamp the result when it returned.
+                observed_at = datetime.now().astimezone()
+                alerts = self.engine.evaluate_source(source_id, payload, now=observed_at)
                 if self.config.print_alerts:
                     self._print_alerts(alerts)
-            except Exception as exc:
+            except Exception:
                 logger.exception("source '%s' failed", source_id)
+            self._serve_test_polls(source_id, source)  # requests that came during the poll
             if schedule is not None:
                 next_run_at = schedule.next_after(now)
                 continue
-            wake_event.wait(float(source.interval))
+            # Wait for the next poll; a test poll is served in between without moving it.
+            next_poll_at = time.monotonic() + float(source.interval)
+            while not stopped():
+                remaining = next_poll_at - time.monotonic()
+                if remaining <= 0:
+                    break
+                wake_event.wait(remaining)
+                wake_event.clear()
+                self._serve_test_polls(source_id, source)
 
     def _rule_timer_loop(self) -> None:
         deadlines: dict[str, float] = {}

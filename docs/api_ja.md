@@ -34,6 +34,7 @@
 - `GET /plugins`
   source, rule, output plugin の current status を返します。
   plugin の state には `DISCOVERED`, `DIRTY`, `PENDING_REMOVE`, `READY`, `RELOADING`, `FAILED` が出ます。
+  rule の `evaluate()` が遅い間は `warning` が入ります。output の行には `queued`（待っている、または送信中の event 数）と `dropped`（queue が溢れたか停止時に捨てた event 数）が付きます。
 - `GET /viewer`
   組み込み Web viewer を返します。
 - `GET /plugins/{type}/{plugin_id}/source`
@@ -64,7 +65,7 @@
   `{"full":true}` は discovery 成功後に in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、空 body も受け付けます。この場合は `{"all":true}` と同じ意味です。
 - `POST /test-poll/{source_id}`
-  1 つの source を poll し、normalized source payload を返します。
+  その source の `test_poll()` を、source の thread で poll と poll の間に実行し、normalized source payload を返します。結果は評価に使わず、source の状態と status も変わらず、通常の poll の予定もずれません。source が動いていない（`init()` に失敗した）場合や、30 秒以内に終わらない場合は 409 を返します。
 - `POST /test-evaluate/{rule_id}`
   明示した payload に対して 1 つの rule を dry-run し、normalized evaluation result を返します。
   ここで与える payload は `postgres:temperature` のような fully-qualified input name を key にした `inputs` object です。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
@@ -124,12 +125,12 @@
   `--full` は in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、HTTP の `POST /reload` に空 body を送った場合は `--all` 相当で動きます。
 - `test-poll`
-  1 つの source を poll し、normalized payload を JSON で表示します。
+  source の `test_poll()` を実行し（その source の thread で poll と poll の間に。評価には使いません）、normalized payload を JSON で表示します。
 - `test-evaluate`
   `--payload-json`, `--payload-file`, `--payload-stdin` のいずれかで与えた payload に対して 1 つの rule を dry-run します。
   canonical な `inputs` payload を先に見たい時は `--print-template` を使います。
 - `test-fire`
-  synthetic な alert event を output pipeline に流し、dispatch summary を JSON で表示します。
+  synthetic な alert event を output pipeline に流し、dispatch summary を JSON で表示します。queue で待っている event より先に送り、最大 30 秒待ちます。それまでに送れなかった output は `pending_outputs` に出ます。
 
 共通引数:
 
