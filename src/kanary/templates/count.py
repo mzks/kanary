@@ -2,6 +2,7 @@
 # kind: rule
 # level: advanced
 # summary: Fire when fewer (or more) inputs than expected report a value (CountRule).
+# summary-ja: 値を返す input が期待より少ない（または多い）ときに発報する (CountRule)。
 import kanary
 
 

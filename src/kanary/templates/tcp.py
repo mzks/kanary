@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Connect to host:port and report the connect time; refused or timed out leaves it empty (TCPSource).
+# summary-ja: host:port に接続し、接続にかかった時間を出す。拒否や timeout なら値なし (TCPSource)。
 import kanary
 
 

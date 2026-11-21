@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Ping hosts and report the round-trip time; no reply leaves the value empty (PingSource).
+# summary-ja: host に ping し、往復時間を出す。応答が無ければ値なし (PingSource)。
 import kanary
 
 

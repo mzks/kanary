@@ -258,6 +258,8 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
+`systemctl stop` や `systemctl restart` は SIGTERM を送ります。Kanary はこれを Ctrl-C と同じように扱い、source と output を終了させ、output の queue で待っている event には最大 5 秒の送信時間を与えます。systemd の既定の停止 timeout（90 秒）で十分です。
+
 `systemd` 運用では、`ExecStart` が指している `kanary` がどの Python 環境に属しているかを
 固定しておくのが重要です。追加 module はその実行環境に install します。  
 system Python に直接入れるより、Kanary 専用 venv を作ってその中の `kanary` を

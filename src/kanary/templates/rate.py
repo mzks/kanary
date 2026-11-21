@@ -2,6 +2,7 @@
 # kind: rule
 # level: advanced
 # summary: Fire when a value changes too fast between two snapshots (RateRule).
+# summary-ja: 2 つの snapshot の間で値が速く変わりすぎたら発報する (RateRule)。
 import kanary
 
 
@@ -16,7 +17,7 @@ import kanary
 )
 class TemplateRate(kanary.RateRule):
     description = "TODO: describe the allowed rate of change."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # Allowed rate range, in value units per second; works like the "range" template.
     # Write it with the time units: 1.0 / kanary.minute is "1 per minute".

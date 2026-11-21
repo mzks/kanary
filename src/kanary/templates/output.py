@@ -2,6 +2,7 @@
 # kind: output
 # level: basic
 # summary: Deliver alert events somewhere, with every routing filter shown.
+# summary-ja: alert event をどこかへ届ける。routing の filter をすべて示す。
 import kanary
 
 
@@ -10,7 +11,7 @@ import kanary
     # Routing: an event reaches emit() only when it passes every filter below.
     # include_tags=["detector"],           # alert must have one of these tags (globs allowed)
     # exclude_tags=["debug", "test-*"],    # alert must have none of these tags
-    # minimum_severity="WARN",             # INFO / WARN / ERROR / CRITICAL
+    # minimum_severity=kanary.WARN,        # kanary.INFO / WARN / ERROR / CRITICAL
     # exclude_states=[],                   # default ["SUPPRESSED", "SILENCED"]; [] receives every state
     # exclude_states=kanary.Output.exclude_states + ["OK"],  # also skip recoveries (no "back to OK" message)
     # exclude_transitions=["UNACK"],       # also "ESCALATED", "DEESCALATED"

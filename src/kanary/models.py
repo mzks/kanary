@@ -30,6 +30,10 @@ class Alert:
     acked_by: str | None = None
     ack_reason: str | None = None
     active_silence_ids: tuple[str, ...] = ()
+    runbook: str | None = None  # the rule's runbook, shown with its notifications
+    # Restored at start from the state database and not evaluated since: the state
+    # KANARY stopped with. The rule's first evaluation replaces it.
+    restored: bool = False
 
 
 @dataclass(slots=True)
@@ -128,6 +132,10 @@ class AlertEvent:
     @property
     def tags(self) -> tuple[str, ...]:
         return self.alert.tags
+
+    @property
+    def runbook(self) -> str | None:
+        return self.alert.runbook
 
     @property
     def active_since(self) -> datetime | None:

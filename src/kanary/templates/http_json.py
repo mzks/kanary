@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: GET a JSON API and pick values by path, converted to numbers (HTTPJSONSource).
+# summary-ja: JSON の API を GET し、path で選んだ値を数値にして出す (HTTPJSONSource)。
 import os
 
 import kanary

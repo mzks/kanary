@@ -2,12 +2,13 @@
 # kind: output
 # level: advanced
 # summary: Run a script for each event, e.g. a phone call system or a warning light (CommandOutput).
+# summary-ja: event ごとに script を実行する。例: 電話の自動発信や警告灯 (CommandOutput)。
 import kanary
 
 
 @kanary.output(
     output_id="template.command_output",
-    minimum_severity="ERROR",
+    minimum_severity=kanary.ERROR,
 )
 class TemplateCommandOutput(kanary.CommandOutput):
     description = "TODO: describe what the script does."

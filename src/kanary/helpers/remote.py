@@ -18,7 +18,7 @@ from ..source import Source
 class RemoteKanarySource(Source):
     base_url: str | None = None
     url: str | None = None
-    timeout_seconds: float = 5.0
+    timeout: float = 5.0
     alerts_path: str = "/export-alerts"
     ack_path_template: str = "/alerts/{rule_id}/ack"
     unack_path_template: str = "/alerts/{rule_id}/unack"
@@ -111,7 +111,7 @@ class RemoteKanarySource(Source):
         request.add_header("Accept", "application/json")
         if data is not None:
             request.add_header("Content-Type", "application/json")
-        with urlopen(request, timeout=self.timeout_seconds) as response:
+        with urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode())
 
     def _base_url(self) -> str:

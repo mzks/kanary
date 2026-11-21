@@ -2,6 +2,7 @@
 # kind: rule
 # level: basic
 # summary: Write your own evaluate(ctx) with full access to inputs, history, and severities.
+# summary-ja: evaluate(ctx) を自分で書く。input、履歴、severity をすべて使える。
 import kanary
 
 
@@ -18,7 +19,7 @@ import kanary
 )
 class TemplateRule:
     description = "TODO: describe when this rule fires."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # Your own setting: any class attribute works. KANARY does not read this name;
     # only evaluate() below uses it.

@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Publish how unusual the newest value is against recent history, to catch spikes and dips (kanary.Buffer).
+# summary-ja: 最新の値が最近の履歴に比べてどれだけ外れているかを出し、spike や落ち込みを捉える (kanary.Buffer)。
 import kanary
 
 
@@ -11,7 +12,7 @@ class TemplateSpike(kanary.Source):
 
     def init(self):
         # Per input: the samples of the last hour (see the "buffered" template).
-        self.buffer = kanary.Buffer(seconds=1 * kanary.hour)
+        self.buffer = kanary.Buffer(max_age=1 * kanary.hour)
 
     def poll(self):
         reading = 12.0  # TODO: read the value, e.g. a current or a trigger rate

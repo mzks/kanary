@@ -281,6 +281,8 @@ Kanary には組み込みの Web viewer が含まれています。
   hands-on で流れを追う文書です。
 - [docs/plugins_ja.md](docs/plugins_ja.md)
   plugin interface と組み込み helper class を説明します。
+- [docs/templates_ja.md](docs/templates_ja.md)
+  `kanary new` の全 template を目次付きで 1 ページにまとめたものです。
 - [docs/operations_ja.md](docs/operations_ja.md)
   実行方法、viewer、CLI、永続化を説明します。
 - [docs/api_ja.md](docs/api_ja.md)

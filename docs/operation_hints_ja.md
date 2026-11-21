@@ -198,7 +198,7 @@ exclude_states = kanary.Output.exclude_states + ["OK"]
 Rule は decorator の default severity を、評価ごとに `kanary.firing(..., severity=...)` などで上書きできます。たとえば WARN 以上を担当者へ、ERROR 以上を当番 group へ、CRITICAL を mailing list へ送る Output を別々に用意できます。
 
 ```python
-@kanary.output(output_id="on-call", minimum_severity="ERROR")
+@kanary.output(output_id="on-call", minimum_severity=kanary.ERROR)
 class OnCallOutput:
     def emit(self, event):
         ...
@@ -223,7 +223,7 @@ from kanary import hour as h
 
 @kanary.output(
     output_id="operations-followups",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     exclude_states=[],
 )
 class OperationsFollowupOutput:

@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Watch files or glob patterns: exists, age since last write, size, count, last-line number (FileSource).
+# summary-ja: file や glob pattern を見張る: ファイルの有無、最終更新からの時間、大きさ、個数、最終行の数値 (FileSource)。
 import kanary
 
 

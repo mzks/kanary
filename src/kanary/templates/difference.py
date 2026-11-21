@@ -2,6 +2,7 @@
 # kind: rule
 # level: advanced
 # summary: Fire when redundant inputs disagree by more than a limit (DifferenceRule).
+# summary-ja: 冗長な input どうしの差が上限を超えたら発報する (DifferenceRule)。
 import kanary
 
 

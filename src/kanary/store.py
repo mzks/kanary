@@ -14,10 +14,22 @@ from .models import Acknowledgement, AlertEvent, Silence
 
 
 @dataclass(slots=True)
+class RestoredRuleState:
+    """A rule's alert as its last stored event left it: the state KANARY stopped with."""
+
+    state: AlertState
+    severity: Severity
+    message: str | None
+    payload: dict[str, Any]
+    occurred_at: datetime  # of that last event
+    active_since: datetime | None  # first event since the rule was last OK; None when OK
+
+
+@dataclass(slots=True)
 class RestoredState:
     acknowledgements: dict[str, Acknowledgement] = field(default_factory=dict)
     silences: dict[str, Silence] = field(default_factory=dict)
-    latest_rule_states: dict[str, tuple[AlertState, Severity]] = field(default_factory=dict)
+    latest_rule_states: dict[str, RestoredRuleState] = field(default_factory=dict)
 
 
 class NullStore:
@@ -337,29 +349,82 @@ class SQLiteStore:
                     cancel_reason=row["cancel_reason"],
                 )
 
-            latest_rule_states = {
-                row["rule_id"]: (
-                    AlertState(row["current_state"]),
-                    Severity(int(row["current_severity"])),
-                )
-                for row in conn.execute(
-                    """
-                    SELECT ae.rule_id, ae.current_state, ae.current_severity
-                    FROM alert_events AS ae
-                    JOIN (
-                        SELECT rule_id, MAX(id) AS max_id
-                        FROM alert_events
-                        GROUP BY rule_id
-                    ) latest ON latest.max_id = ae.id
-                    """
-                )
-            }
+            latest_rule_states = self._load_latest_rule_states(conn)
 
             return RestoredState(
                 acknowledgements=acknowledgements,
                 silences=silences,
                 latest_rule_states=latest_rule_states,
             )
+
+    def _load_latest_rule_states(self, conn: sqlite3.Connection) -> dict[str, RestoredRuleState]:
+        active_since = {
+            row["rule_id"]: _parse_datetime(row["occurred_at"])
+            for row in conn.execute(
+                """
+                WITH last_ok AS (
+                    SELECT rule_id, MAX(id) AS ok_id
+                    FROM alert_events
+                    WHERE current_state = ?
+                    GROUP BY rule_id
+                ),
+                first_active AS (
+                    SELECT ae.rule_id, MIN(ae.id) AS first_id
+                    FROM alert_events AS ae
+                    LEFT JOIN last_ok ON last_ok.rule_id = ae.rule_id
+                    WHERE ae.id > COALESCE(last_ok.ok_id, 0)
+                    GROUP BY ae.rule_id
+                )
+                SELECT fa.rule_id, ae.occurred_at
+                FROM first_active AS fa
+                JOIN alert_events AS ae ON ae.id = fa.first_id
+                """,
+                (AlertState.OK.value,),
+            )
+        }
+        removed_at = {
+            row["rule_id"]: _parse_datetime(row["created_at"])
+            for row in conn.execute(
+                """
+                SELECT rule_id, created_at
+                FROM operator_actions
+                WHERE id IN (
+                    SELECT MAX(id) FROM operator_actions WHERE action_type = 'rule_removed' GROUP BY rule_id
+                )
+                """
+            )
+        }
+        states: dict[str, RestoredRuleState] = {}
+        for row in conn.execute(
+            """
+            SELECT ae.rule_id, ae.current_state, ae.current_severity, ae.message, ae.payload_json, ae.occurred_at
+            FROM alert_events AS ae
+            JOIN (
+                SELECT rule_id, MAX(id) AS max_id
+                FROM alert_events
+                GROUP BY rule_id
+            ) latest ON latest.max_id = ae.id
+            """
+        ):
+            rule_id = row["rule_id"]
+            state = AlertState(row["current_state"])
+            occurred_at = _parse_datetime(row["occurred_at"])
+            removed = removed_at.get(rule_id)
+            if removed is not None and _not_before(removed, occurred_at):
+                continue  # removed in a reload after its last event: that state is no longer its own
+            try:
+                payload = json.loads(row["payload_json"])
+            except ValueError:
+                payload = {}
+            states[rule_id] = RestoredRuleState(
+                state=state,
+                severity=Severity(int(row["current_severity"])),
+                message=row["message"],
+                payload=payload if isinstance(payload, dict) else {},
+                occurred_at=occurred_at,
+                active_since=active_since.get(rule_id) if state != AlertState.OK else None,
+            )
+        return states
 
     def append_alert_event(self, event: AlertEvent, *, definition_file: str | None, matched_outputs: list[str]) -> None:
         conn = self._require_conn()
@@ -874,6 +939,13 @@ def build_store(path: str | Path | None):
 
 def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def _not_before(moment: datetime, other: datetime) -> bool:
+    try:
+        return moment >= other
+    except TypeError:  # one with a zone, one without (an old database)
+        return moment.replace(tzinfo=None) >= other.replace(tzinfo=None)
 
 
 def _json_default(value: object) -> str:

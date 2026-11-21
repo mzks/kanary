@@ -2,6 +2,7 @@
 # kind: rule
 # level: advanced
 # summary: Check the total or average of many inputs at once against a range, e.g. the summed current of all channels (AggregateRule).
+# summary-ja: 多数の input の合計や平均をまとめて範囲で判定する。例: 全 channel の電流の合計 (AggregateRule)。
 import kanary
 
 

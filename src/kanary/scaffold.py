@@ -33,7 +33,7 @@ _ORDER = (
     "output", "webhook", "slack", "mattermost", "discord", "file-log", "command-output", "mail",
     "followups", "delayed", "quiet-hours", "oncall",
 )
-_HEADER = re.compile(r"^# (kanary-template|kind|level|summary): (.+)$")
+_HEADER = re.compile(r"^# (kanary-template|kind|level|summary|summary-ja): (.+)$")
 _IMPORT = re.compile(r"^(import |from \S+ import )")
 
 
@@ -44,6 +44,7 @@ class Template:
     level: str
     summary: str
     body: str
+    summary_ja: str = ""  # for the Japanese catalog; the English summary when empty
 
     @property
     def placeholder_id(self) -> str:
@@ -89,7 +90,10 @@ def _parse(text: str) -> Template:
         raise ValueError(f"template '{meta['kanary-template']}' has unknown kind '{meta['kind']}'")
     if meta["level"] not in LEVELS:
         raise ValueError(f"template '{meta['kanary-template']}' has unknown level '{meta['level']}'")
-    return Template(meta["kanary-template"], meta["kind"], meta["level"], meta["summary"], "".join(lines[index:]))
+    return Template(
+        meta["kanary-template"], meta["kind"], meta["level"], meta["summary"], "".join(lines[index:]),
+        summary_ja=meta.get("summary-ja", ""),
+    )
 
 
 def format_template_table(templates: dict[str, Template] | None = None) -> str:
@@ -112,53 +116,76 @@ def format_template_table(templates: dict[str, Template] | None = None) -> str:
     return "\n".join(rows)
 
 
-_LEVEL_TEXT = {
-    "basic": "The common starting points: one helper class and mostly settings.",
-    "advanced": "Less common helpers, custom logic, or several features together.",
+_CATALOG_TEXT = {
+    "en": {
+        "title": "Template Catalog",
+        "intro": (
+            "Every template of `kanary new`, exactly as it writes it: `kanary new -t TEMPLATE PLUGIN_ID` "
+            "creates `PLUGIN_ID` from `TEMPLATE`, and `-o FILE -a` appends it to an existing file. "
+            "`kanary new --list` lists the same templates in the terminal."
+        ),
+        "generated": (
+            "This page is generated from `src/kanary/templates/` by `kanary new --catalog > docs/templates.md`; "
+            "edit the templates, not this page."
+        ),
+        "contents": "Contents",
+        "header": "| Kind | Template | What it does |",
+        "basic": "The common starting points: one helper class and mostly settings.",
+        "advanced": "Less common helpers, custom logic, or several features together.",
+        "kinds": {"source": "Sources", "rule": "Rules", "output": "Outputs"},
+        "back": "[Contents](#contents)",
+    },
+    "ja": {
+        "title": "Template 一覧",
+        "intro": (
+            "`kanary new` の全 template を、書き出されるとおりに載せています。`kanary new -t TEMPLATE PLUGIN_ID` で "
+            "`TEMPLATE` から `PLUGIN_ID` を作り、`-o FILE -a` で既存の file に追記します。"
+            "`kanary new --list` は同じ一覧を terminal に出します。"
+        ),
+        "generated": (
+            "この page は `src/kanary/templates/` から `kanary new --catalog ja > docs/templates_ja.md` で生成しています。"
+            "直すときはこの page ではなく template を直してください。"
+        ),
+        "contents": "目次",
+        "header": "| 種類 | Template | 内容 |",
+        "basic": "よく使う出発点。helper class 1 つで、ほぼ設定だけで使えます。",
+        "advanced": "使う場面が限られる helper、独自の logic、複数の機能の組み合わせ。",
+        "kinds": {"source": "Source 系", "rule": "Rule 系", "output": "Output 系"},
+        "back": "[目次へ](#目次)",
+    },
 }
-_KIND_TITLE = {"source": "Sources", "rule": "Rules", "output": "Outputs"}
 
 
-def format_catalog(templates: dict[str, Template] | None = None) -> str:
-    """Every template as one Markdown page, with a table of contents (docs/templates.md)."""
+def format_catalog(templates: dict[str, Template] | None = None, *, language: str = "en") -> str:
+    """Every template as one Markdown page with a table of contents (docs/templates.md, templates_ja.md)."""
     templates = templates if templates is not None else load_templates()
-    lines = [
-        "# Template Catalog",
-        "",
-        "Every template of `kanary new`, exactly as it writes it: `kanary new -t TEMPLATE PLUGIN_ID` "
-        "creates `PLUGIN_ID` from `TEMPLATE`, and `-o FILE -a` appends it to an existing file. `kanary new --list` "
-        "lists the same templates in the terminal.",
-        "",
-        "This page is generated from `src/kanary/templates/` by `kanary new --catalog > docs/templates.md`; "
-        "edit the templates, not this page.",
-        "",
-        "## Contents",
-        "",
-    ]
+    text = _CATALOG_TEXT[language]
+    lines = [f"# {text['title']}", "", text["intro"], "", text["generated"], "", f"## {text['contents']}", ""]
     for level in LEVELS:
         group = [template for template in templates.values() if template.level == level]
         if not group:
             continue
-        lines += [f"**[{level.capitalize()}](#{level})**: {_LEVEL_TEXT[level]}", "", "| Kind | Template | What it does |", "|---|---|---|"]
+        lines += [f"**[{level.upper()}](#{level})**: {text[level]}", "", text["header"], "|---|---|---|"]
         for template in group:
-            summary = template.summary.replace("|", "\\|")
-            lines.append(f"| {template.kind} | [{template.name}](#{template.name}) | {summary} |")
+            summary = (template.summary_ja if language == "ja" and template.summary_ja else template.summary)
+            lines.append(f"| {template.kind} | [{template.name}](#{template.name}) | {summary.replace('|', chr(92) + '|')} |")
         lines.append("")
     for level in LEVELS:
         group = [template for template in templates.values() if template.level == level]
         if not group:
             continue
-        lines += [f"## {level.capitalize()}", ""]
+        lines += [f"## {level.upper()}", ""]
         previous_kind = None
         for template in group:
             if template.kind != previous_kind:
-                lines += [f"### {_KIND_TITLE[template.kind]}", ""]
+                lines += [f"### {text['kinds'][template.kind]}", ""]
                 previous_kind = template.kind
             plugin_id = f"my.{template.name}"
+            summary = template.summary_ja if language == "ja" and template.summary_ja else template.summary
             lines += [
                 f"#### {template.name}",
                 "",
-                f"{template.kind} · {template.summary}",
+                f"{template.kind} · {summary}",
                 "",
                 "```console",
                 f"$ kanary new -t {template.name} {plugin_id}",
@@ -168,7 +195,7 @@ def format_catalog(templates: dict[str, Template] | None = None) -> str:
                 render(template, plugin_id).rstrip("\n"),
                 "```",
                 "",
-                "[Contents](#contents)",
+                text["back"],
                 "",
             ]
     return "\n".join(lines).rstrip("\n") + "\n"

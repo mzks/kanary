@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Publish how long a value has not changed (frozen sensor) and how often it changes (flapping), from recent history (kanary.Buffer).
+# summary-ja: 値が変わらない時間（固まった sensor）と変わる頻度（flapping）を、最近の履歴から出す (kanary.Buffer)。
 import kanary
 
 
@@ -11,7 +12,7 @@ class TemplateFrozen(kanary.Source):
 
     def init(self):
         # Per input: the samples of the last hour (see the "buffered" template).
-        self.buffer = kanary.Buffer(seconds=1 * kanary.hour)
+        self.buffer = kanary.Buffer(max_age=1 * kanary.hour)
 
     def poll(self):
         flow = 3.2   # TODO: read a value that always moves a little, e.g. a flow

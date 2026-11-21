@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Receive values over HTTP POST and evaluate them as soon as they arrive (HTTPPushSource).
+# summary-ja: HTTP の POST で値を受け取り、届いた瞬間に評価する (HTTPPushSource)。
 import os
 
 import kanary

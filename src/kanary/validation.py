@@ -40,7 +40,10 @@ def validate_rule_class(rule_id: str, rule_cls: type[Any]) -> ValidationReport:
 
     tags = getattr(rule_cls, "tags", None)
     if tags == []:
-        report.warnings.append(f"rule '{rule_id}' has no tags")
+        report.warnings.append(
+            f"rule '{rule_id}' has no tags: outputs with include_tags, silences by tag, "
+            "and remote imports filtered by tag do not see it"
+        )
     if getattr(rule_cls, "__kanary_evaluate_style__", "new") == "legacy":
         report.warnings.append(
             f"rule '{rule_id}' uses legacy evaluate(payload, ctx); prefer evaluate(ctx)"

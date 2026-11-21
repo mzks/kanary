@@ -229,7 +229,7 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
         )
 
     if not hasattr(cls, "tags"):
-        raise ValueError(f"rule '{rule_id}' must define tags")
+        cls.tags = []  # allowed, as for a subclass of kanary.Rule; lint warns about it
     tags = getattr(cls, "tags")
     if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
         raise ValueError(f"rule '{rule_id}' tags must be list[str]")

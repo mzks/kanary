@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Request URLs and report the HTTP status code and response time, e.g. API health checks (HTTPStatusSource).
+# summary-ja: URL に request し、HTTP status code と応答時間を出す。例: API の health check (HTTPStatusSource)。
 import kanary
 
 

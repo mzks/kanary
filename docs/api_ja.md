@@ -18,6 +18,7 @@
   peer monitoring 用の compact な status payload を返します。
 - `GET /alerts`
   local node の current alert 一覧を返します。
+  再起動の後は、各 rule の alert を state database から止まったときの状態で戻し、その rule が評価されるまで `"restored": true` を付けます。戻した alert も ack や silence ができます。まだ alert の無い rule（一度も評価されていない、または `--state-db` なし）はこの一覧に入らず、viewer と `kanaryctl alerts` では `WAITING` と表示します。
 - `GET /export-alerts`
   remote alert import 用の安定した形式で alert を返します。
 - `GET /history/{rule_id}`
@@ -68,11 +69,12 @@
   その source の `test_poll()` を、source の thread で poll と poll の間に実行し、normalized source payload を返します。結果は評価に使わず、source の状態と status も変わらず、通常の poll の予定もずれません。source が動いていない（`init()` に失敗した）場合や、30 秒以内に終わらない場合は 409 を返します。
 - `POST /test-evaluate/{rule_id}`
   明示した payload に対して 1 つの rule を dry-run し、normalized evaluation result を返します。
-  ここで与える payload は `postgres:temperature` のような fully-qualified input name を key にした `inputs` object です。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
+  payload は次のどれかです。`postgres:temperature` のような fully-qualified input name を key にした `inputs` object。`POST /test-poll/{source_id}` が返したもの（`channels`。読む source が 1 つの rule）。input が 1 つの rule なら `{"value": ..., "timestamp": ..., "prev_value": ...}`。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
 - `GET /test-evaluate-template/{rule_id}`
   1 つの rule 向けの canonical な `inputs` payload template を返します。単一 input rule の場合は shorthand template も含まれることがあります。
 - `POST /test-fire/{rule_id}`
   live alert state を変更せず、synthetic な state change を output pipeline に流します。
+  body には `"state"` か `"evaluation"` のどちらかを書きます。`"evaluation"` は `POST /test-evaluate/{rule_id}` の結果で、event はその state、severity、message、値を持ちます。どちらでも message は `[TEST-FIRE]` で始まります。
   `--no-output-emit`の場合はOutputを呼ばず、matching結果を`emit_skipped_outputs`に返します。
 
 ## API の考え方
@@ -94,15 +96,19 @@
 
 - `health`
   runtime health summary を表示します。
-- `alerts`
-  current alert を表示します。
+- `alerts [RULE_ID]`
+  current alert を、alert 中のものから表示します。すべての rule が載り、まだ alert の無い rule は `WAITING`、再起動前の状態を戻したものには `*` が付きます。
+  terminal では message を幅に合わせて切ります（`…`）。`--wide` は outputs と file の列を足して何も切りません。pipe に流すときも切りません。
+  `RULE_ID`（または glob）を付けると、その alert をすべて表示します: message、値、ack、silence、tags、outputs、runbook、file、最近の history。
   `--filter` で text または glob matching が使えます。
 - `history`
   1 つの rule の保存済み history を表示します。
   `--since` と `--limit` は history payload を取得した後に client-side で適用します。
   SQLite 永続化が有効な場合、output dispatch summary も含まれます。
-- `plugins`
-  source, rule, output plugin の状態を表示します。
+- `plugins [PLUGIN_ID]`
+  source、rule、output の順に plugin の状態を表示します。最終更新の時刻は local time です。
+  terminal では last error を幅に合わせて切ります。`--wide` は file の列を足して何も切りません。
+  `PLUGIN_ID`（または glob）を付けると、その plugin をすべて表示します: 実行回数、last error の全文、rule なら inputs と outputs、output なら routing と queue。`--traceback` で last error の起きた場所も出します。
   `--filter` で text または glob matching が使えます。
 - `silences`
   設定済み silence を表示します。
@@ -124,13 +130,15 @@
   `--all` は local の Python file に変更が無くても full discovery をやり直します。
   `--full` は in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、HTTP の `POST /reload` に空 body を送った場合は `--all` 相当で動きます。
+  reload した rule は、その source の最後の値ですぐに評価されます。閾値を変えたら次の値を待たずに反映されます。起動後まだ値を出していない source を読む rule は、値が来るまで待ちます。
 - `test-poll`
   source の `test_poll()` を実行し（その source の thread で poll と poll の間に。評価には使いません）、normalized payload を JSON で表示します。
 - `test-evaluate`
-  `--payload-json`, `--payload-file`, `--payload-stdin` のいずれかで与えた payload に対して 1 つの rule を dry-run します。
+  `--payload-json`, `--payload-file`, `--payload-stdin` のいずれかで与えた payload に対して 1 つの rule を dry-run します。`test-poll` の出力もそのまま payload になります。
   canonical な `inputs` payload を先に見たい時は `--print-template` を使います。
 - `test-fire`
   synthetic な alert event を output pipeline に流し、dispatch summary を JSON で表示します。queue で待っている event より先に送り、最大 30 秒待ちます。それまでに送れなかった output は `pending_outputs` に出ます。
+  `--state` か、`test-evaluate` の出力を `--evaluation-stdin` / `--evaluation-file` で与えます。後者では、rule が判定した state、severity、message、値が通知に出ます。
 
 共通引数:
 
@@ -145,6 +153,10 @@ kanaryctl test-poll sqlite
 kanaryctl test-evaluate sqlite.value1.range --print-template
 kanaryctl test-evaluate sqlite.value1.range --payload-json '{"inputs":{"sqlite:value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
+kanaryctl test-poll sqlite | kanaryctl test-evaluate sqlite.value1.range --payload-stdin \
+  | kanaryctl test-fire sqlite.value1.range --evaluation-stdin
+kanaryctl alerts sqlite.value1.range
+kanaryctl plugins sqlite --traceback
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'

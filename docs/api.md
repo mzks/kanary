@@ -18,6 +18,7 @@ Use `--api-host` and `--api-port` to change the bind address.
   Returns a compact status payload intended for peer monitoring.
 - `GET /alerts`
   Returns the current alert list for the local node.
+  After a restart, each rule's alert is restored from the state database as KANARY stopped with it, with `"restored": true`, until the rule is evaluated again. A restored alert can be acknowledged and silenced. A rule that has no alert yet (never evaluated, or no `--state-db`) is not in this list; the viewer and `kanaryctl alerts` show it as `WAITING`.
 - `GET /export-alerts`
   Returns alerts in a stable format intended for remote alert import.
 - `GET /history/{rule_id}`
@@ -64,15 +65,17 @@ Use `--api-host` and `--api-port` to change the bind address.
   `{"all":true}` always reruns full plugin discovery even when no watched Python file changed.
   `{"full":true}` performs an in-process engine restart after successful discovery and validation.
   For legacy compatibility, an empty body is still accepted and behaves like `{"all":true}`.
+  A reloaded rule is evaluated at once with the last values of its sources, so a changed threshold applies without waiting for the next value. A rule whose sources have given no value since the start waits for one.
 - `POST /test-poll/{source_id}`
   Runs the source's `test_poll()` on the source's own thread, between its polls, and returns the normalized source payload. The result is not evaluated, the source's state and status do not change, and its regular polls keep their schedule. Returns 409 when the source is not running (its `init()` failed) or the test poll does not finish within 30 seconds.
 - `POST /test-evaluate/{rule_id}`
   Dry-runs one rule against an explicit payload and returns the normalized evaluation result.
-  This payload uses an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`. Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
+  The payload is one of: an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`; what `POST /test-poll/{source_id}` returned (`channels`), for a rule that reads one source; or, for a rule with one input, `{"value": ..., "timestamp": ..., "prev_value": ...}`. Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
 - `GET /test-evaluate-template/{rule_id}`
   Returns a canonical `inputs` payload template for one rule. Single-input rules may also include a shorthand template.
 - `POST /test-fire/{rule_id}`
   Sends a synthetic state change through the output pipeline without changing the live alert state.
+  The body gives either `"state"` or `"evaluation"`: the result of `POST /test-evaluate/{rule_id}`, whose state, severity, message, and values the event then has. The message starts with `[TEST-FIRE]` either way.
   With `--no-output-emit`, it reports matching outputs in `emit_skipped_outputs` without calling them.
 
 ## Design Notes
@@ -95,15 +98,19 @@ Main subcommands:
 
 - `health`
   Shows the runtime health summary.
-- `alerts`
-  Shows current alerts.
+- `alerts [RULE_ID]`
+  Shows current alerts, alerting first; every rule is listed, one without an alert yet as `WAITING`, and a state restored from before a restart is marked `*`.
+  On a terminal the message is cut to fit the width (`…`); `--wide` adds the outputs and file columns and cuts nothing, and piped output is not cut.
+  With `RULE_ID` (or a glob), shows that alert in full: message, values, ack, silences, tags, outputs, runbook, file, and its newest history.
   `--filter` supports text and glob matching.
 - `history`
   Shows stored history for one rule.
   `--since` and `--limit` are applied client-side after fetching the history payload.
   When SQLite persistence is enabled, history includes output dispatch summaries.
-- `plugins`
-  Shows source, rule, and output plugin status.
+- `plugins [PLUGIN_ID]`
+  Shows source, then rule, then output plugin status; the time of the last update is local.
+  On a terminal the last error is cut to fit the width; `--wide` adds the file column and cuts nothing.
+  With `PLUGIN_ID` (or a glob), shows that plugin in full: runs, the whole last error, and for a rule its inputs and outputs, for an output its routing and queue. `--traceback` adds where the last error happened.
   `--filter` supports text and glob matching.
 - `silences`
   Shows configured silences.
@@ -128,10 +135,11 @@ Main subcommands:
 - `test-poll`
   Runs the source's `test_poll()` (on its own thread, between polls; not evaluated) and prints the normalized payload as JSON.
 - `test-evaluate`
-  Dry-runs one rule against a payload from `--payload-json`, `--payload-file`, or `--payload-stdin`.
+  Dry-runs one rule against a payload from `--payload-json`, `--payload-file`, or `--payload-stdin`; the output of `test-poll` works as a payload.
   Use `--print-template` first if you want a canonical inputs-based payload skeleton.
 - `test-fire`
   Sends a synthetic alert event through the output pipeline and prints the dispatch summary as JSON. It goes ahead of queued events and waits up to 30 seconds; outputs that have not sent by then are listed in `pending_outputs`.
+  Give `--state`, or `--evaluation-stdin` / `--evaluation-file` with the output of `test-evaluate`: the notification then shows the state, severity, message, and values the rule judged.
 
 Common argument:
 
@@ -146,6 +154,10 @@ kanaryctl test-poll sqlite
 kanaryctl test-evaluate sqlite.value1.range --print-template
 kanaryctl test-evaluate sqlite.value1.range --payload-json '{"inputs":{"sqlite:value1":{"value":120,"timestamp":"2026-05-29T00:00:00+00:00"}},"status":"ok"}'
 kanaryctl test-fire sqlite.value1.range --state FIRING --reason "output check"
+kanaryctl test-poll sqlite | kanaryctl test-evaluate sqlite.value1.range --payload-stdin \
+  | kanaryctl test-fire sqlite.value1.range --evaluation-stdin
+kanaryctl alerts sqlite.value1.range
+kanaryctl plugins sqlite --traceback
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'

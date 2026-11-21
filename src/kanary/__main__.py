@@ -1,4 +1,5 @@
 import argparse
+import difflib
 from importlib import metadata as importlib_metadata
 import logging
 import os
@@ -12,6 +13,7 @@ from .loader import RuleDirectoryLoader
 from .runtime import AUTO_RELOAD_CHOICES, DEFAULT_LOG_LEVEL, LOG_LEVEL_CHOICES, EngineRuntime, RuntimeConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+NEW_USAGE = "kanary new -t TEMPLATE PLUGIN_ID [-o PATH] [-a | --force | --stdout]"
 
 
 def _kanary_version() -> str:
@@ -139,14 +141,14 @@ def build_parser() -> argparse.ArgumentParser:
         "new",
         help="Generate a plugin file from a template",
         usage=(
-            "kanary new -t TEMPLATE PLUGIN_ID [-o PATH] [-a | --force | --stdout]\n"
+            f"{NEW_USAGE}\n"
             "       kanary new --show TEMPLATE\n"
             "       kanary new --list"
         ),
         description="Generate a plugin file from a template. Every template passes `kanary lint`.",
         epilog=(
             "Templates:\n"
-            + scaffold.format_template_table()
+            + _template_table_for_help()
             + "\n\nExamples:\n"
             "  kanary new -t source postgres.wide -o plugins/\n"
             "  kanary new -t range oil.temperature.high -o plugins/postgres_wide.py -a\n"
@@ -177,8 +179,34 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--stdout", action="store_true", help="Print the result instead of writing a file.")
     new_parser.add_argument("-l", "--list", action="store_true", help="List the templates and exit.")
     new_parser.add_argument("--show", metavar="TEMPLATE", help="Print a template as it is, without generating anything.")
-    new_parser.add_argument("--catalog", action="store_true", help="Print every template as one Markdown page (docs/templates.md).")
+    new_parser.add_argument(
+        "--catalog",
+        nargs="?",
+        const="en",
+        choices=("en", "ja"),
+        help="Print every template as one Markdown page: docs/templates.md, or with 'ja' docs/templates_ja.md.",
+    )
+    new_parser.set_defaults(print_new_help=new_parser.print_help)
     return parser
+
+
+def _new_error(message: str, *, usage: str = NEW_USAGE) -> int:
+    print(f"usage: {usage}\nerror: {message}", file=sys.stderr)
+    return 2
+
+
+def _unknown_template(name: str, templates: dict) -> str:
+    close = difflib.get_close_matches(name, list(templates), n=3, cutoff=0.6)
+    hint = f"; did you mean {' or '.join(repr(item) for item in close)}?" if close else ""
+    return f"unknown template {name!r}{hint} (kanary new --list shows the templates)"
+
+
+def _template_table_for_help() -> str:
+    # The help text is built on every start; a broken template must not stop `kanary run`.
+    try:
+        return scaffold.format_template_table()
+    except Exception as exc:
+        return f"  (the templates could not be read: {exc})"
 
 
 def _run_new(args: argparse.Namespace) -> int:
@@ -187,25 +215,31 @@ def _run_new(args: argparse.Namespace) -> int:
         print(scaffold.format_template_table(templates))
         return 0
     if args.catalog:
-        print(scaffold.format_catalog(templates), end="")
+        print(scaffold.format_catalog(templates, language=args.catalog), end="")
         return 0
     if args.show:
         template = templates.get(args.show)
         if template is None:
-            print(f"error: unknown template '{args.show}'\n", file=sys.stderr)
-            print(scaffold.format_template_table(templates), file=sys.stderr)
-            return 2
+            return _new_error(_unknown_template(args.show, templates), usage="kanary new --show TEMPLATE")
         print(template.body, end="")
         return 0
-    if not args.template or not args.plugin_id:
-        print("error: kanary new needs -t TEMPLATE and PLUGIN_ID\n", file=sys.stderr)
-        print(scaffold.format_template_table(templates), file=sys.stderr)
+    if not any((args.template, args.plugin_id, args.output, args.append, args.force, args.stdout)):
+        # Plain `kanary new`: the help, with the template table.
+        args.print_new_help(sys.stderr)
         return 2
+    # Who gave some arguments already knows the templates: show how to write the command.
+    if not args.template:
+        missing = "PLUGIN_ID and -t TEMPLATE are missing" if not args.plugin_id else "-t TEMPLATE is missing"
+        return _new_error(f"{missing} (kanary new --list shows the templates)")
     template = templates.get(args.template)
     if template is None:
-        print(f"error: unknown template '{args.template}'\n", file=sys.stderr)
-        print(scaffold.format_template_table(templates), file=sys.stderr)
-        return 2
+        return _new_error(_unknown_template(args.template, templates))
+    if not args.plugin_id:
+        rest = f" -o {args.output}" if args.output else ""
+        return _new_error(
+            f"PLUGIN_ID is missing: the {template.kind}_id of the new {template.kind}, "
+            f"as in `kanary new -t {template.name} my.{template.name.replace('-', '_')}{rest}`"
+        )
 
     plugin_id, named_path = scaffold.split_plugin_argument(args.plugin_id)
     try:

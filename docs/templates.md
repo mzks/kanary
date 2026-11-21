@@ -6,7 +6,7 @@ This page is generated from `src/kanary/templates/` by `kanary new --catalog > d
 
 ## Contents
 
-**[Basic](#basic)**: The common starting points: one helper class and mostly settings.
+**[BASIC](#basic)**: The common starting points: one helper class and mostly settings.
 
 | Kind | Template | What it does |
 |---|---|---|
@@ -36,7 +36,7 @@ This page is generated from `src/kanary/templates/` by `kanary new --catalog > d
 | output | [file-log](#file-log) | Append every alert event to a JSON Lines file (FileOutput). |
 | output | [mail](#mail) | Send alert events by e-mail over SMTP (MailOutput). |
 
-**[Advanced](#advanced)**: Less common helpers, custom logic, or several features together.
+**[ADVANCED](#advanced)**: Less common helpers, custom logic, or several features together.
 
 | Kind | Template | What it does |
 |---|---|---|
@@ -60,7 +60,7 @@ This page is generated from `src/kanary/templates/` by `kanary new --catalog > d
 | output | [quiet-hours](#quiet-hours) | Hold non-urgent alerts at night and send them in the morning, in order (QuietHours). |
 | output | [oncall](#oncall) | Mail whoever is on shift, from a schedule file, and hold mail at night (MailOutput + OnCallSchedule + QuietHours). |
 
-## Basic
+## BASIC
 
 ### Sources
 
@@ -448,9 +448,9 @@ import kanary
 class MySqlWideSource(kanary.SQLWideSource):
     description = "TODO: describe the table."
 
-    # Connection. "sqlite" needs nothing extra; "postgresql" needs the psycopg package
-    # and "mysql" (also MariaDB) the pymysql package, in the Python environment that
-    # runs KANARY (docs/deployment.md, "When A Plugin Needs Additional Python Modules").
+    # Connection. "sqlite" and "postgresql" (psycopg comes with KANARY) need nothing
+    # extra; "mysql" (also MariaDB) needs the pymysql package in the Python environment
+    # that runs KANARY (docs/deployment.md, "When A Plugin Needs Additional Python Modules").
     database_type = "sqlite"
     database = "environment.db"  # sqlite: file path (relative = next to this plugin); others: database name
     # host = "db.example.org"
@@ -530,7 +530,7 @@ class MySqlLongSource(kanary.SQLLongSource):
     # ("+09:00", "+9"), or "UTC" (the default).
     # timestamp_timezone = "Asia/Tokyo"
     # Only scan rows of the last 10 minutes: keeps the query cheap on a large table.
-    lookback_seconds = 10 * kanary.minute
+    lookback = 10 * kanary.minute
 
     # Upstream name -> input name. When set, other names are ignored; when empty,
     # every name is used as-is. The upstream name is kept in each input's metadata.
@@ -689,7 +689,7 @@ class MyPluginHealthSource(kanary.PluginHealthSource):
 )
 class PluginFailed:
     description = "A plugin of this KANARY failed; KANARY retries it or waits for a fix."
-    runbook = "kanaryctl plugins shows the error. Fix the plugin or its settings, then reload it."
+    runbook = "kanaryctl plugins PLUGIN_ID --traceback shows the whole error. Fix the plugin or its settings, then reload it."
 
     def evaluate(self, ctx):
         failed = [item for item in ctx.inputs() if item.value]
@@ -745,7 +745,7 @@ import kanary
 )
 class MyRule:
     description = "TODO: describe when this rule fires."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # Your own setting: any class attribute works. KANARY does not read this name;
     # only evaluate() below uses it.
@@ -810,7 +810,7 @@ import kanary
 )
 class MyRangeRule(kanary.RangeRule):
     description = "TODO: describe the normal range."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # The range [low, high]. Set either one to None for a one-sided check; never both.
     low = 10.0
@@ -863,7 +863,7 @@ import kanary
 )
 class MyThresholdRule(kanary.ThresholdRule):
     description = "TODO: describe what each level means."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # "high": fire when value >= threshold.  "low": fire when value <= threshold.
     direction = "high"
@@ -974,7 +974,7 @@ import kanary
     # Routing: an event reaches emit() only when it passes every filter below.
     # include_tags=["detector"],           # alert must have one of these tags (globs allowed)
     # exclude_tags=["debug", "test-*"],    # alert must have none of these tags
-    # minimum_severity="WARN",             # INFO / WARN / ERROR / CRITICAL
+    # minimum_severity=kanary.WARN,        # kanary.INFO / WARN / ERROR / CRITICAL
     # exclude_states=[],                   # default ["SUPPRESSED", "SILENCED"]; [] receives every state
     # exclude_states=kanary.Output.exclude_states + ["OK"],  # also skip recoveries (no "back to OK" message)
     # exclude_transitions=["UNACK"],       # also "ESCALATED", "DEESCALATED"
@@ -1030,7 +1030,7 @@ import kanary
 @kanary.output(
     output_id="my.webhook",
     # include_tags=["detector"],
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class MyWebhookOutput(kanary.WebhookOutput):
     description = "TODO: describe the receiving service."
@@ -1050,7 +1050,8 @@ class MyWebhookOutput(kanary.WebhookOutput):
 
     def payload(self, event):
         # The JSON body. The default (kept here) sends rule_id, state, previous_state,
-        # transition, severity, message, owner, tags, occurred_at, active_since, acked_by.
+        # transition, severity, message, owner, tags, occurred_at, active_since, acked_by,
+        # and runbook.
         body = super().payload(event)
         body["source"] = "kanary"
         # self.text(event) gives a one-line summary such as
@@ -1077,7 +1078,7 @@ import kanary
 
 @kanary.output(
     output_id="my.slack",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     # include_tags=["detector"],
 )
 class MySlackOutput(kanary.SlackOutput):
@@ -1128,7 +1129,7 @@ import kanary
 
 @kanary.output(
     output_id="my.mattermost",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class MyMattermostOutput(kanary.MattermostOutput):
     description = "TODO: name the channel."
@@ -1171,7 +1172,7 @@ import kanary
 
 @kanary.output(
     output_id="my.discord",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class MyDiscordOutput(kanary.DiscordOutput):
     description = "TODO: name the channel."
@@ -1248,7 +1249,7 @@ import kanary
 @kanary.output(
     output_id="my.mail",
     # include_tags=["detector"],
-    minimum_severity="ERROR",
+    minimum_severity=kanary.ERROR,
 )
 class MyMailOutput(kanary.MailOutput):
     description = "TODO: describe who receives these mails."
@@ -1256,7 +1257,7 @@ class MyMailOutput(kanary.MailOutput):
     smtp_host = "smtp.example.org"  # TODO
     smtp_port = 587
     use_starttls = True
-    smtp_timeout_seconds = 10.0
+    smtp_timeout = 10.0
     smtp_username = None  # None: send without logging in
 
     sender = "kanary@example.org"  # TODO
@@ -1293,7 +1294,7 @@ class MyMailOutput(kanary.MailOutput):
 
 [Contents](#contents)
 
-## Advanced
+## ADVANCED
 
 ### Sources
 
@@ -1470,9 +1471,10 @@ class MyBufferedSource(kanary.Source):
     description = "TODO: describe the raw value and the derived inputs."
 
     def init(self):
-        # Per input: at most size samples, none older than seconds (counted back from
-        # the newest sample). Keep enough for the longest window below.
-        self.buffer = kanary.Buffer(size=1024, seconds=1 * kanary.hour)
+        # Per input: at most size samples, none older than max_age (counted back from
+        # the newest sample); the first limit reached drops the oldest. Keep enough for
+        # the longest window below.
+        self.buffer = kanary.Buffer(size=1024, max_age=1 * kanary.hour)
 
     def poll(self):
         reading = 1.0  # TODO: read the raw value (a device, a file, an API)
@@ -1531,7 +1533,7 @@ class MyTrendSource(kanary.Source):
 
     def init(self):
         # Per input: the samples of the last 30 minutes (see the "buffered" template).
-        self.buffer = kanary.Buffer(seconds=30 * kanary.minute)
+        self.buffer = kanary.Buffer(max_age=30 * kanary.minute)
 
     def poll(self):
         reading = 50.0  # TODO: read the value, e.g. a tank level or a disk usage in %
@@ -1581,7 +1583,7 @@ class MySpikeSource(kanary.Source):
 
     def init(self):
         # Per input: the samples of the last hour (see the "buffered" template).
-        self.buffer = kanary.Buffer(seconds=1 * kanary.hour)
+        self.buffer = kanary.Buffer(max_age=1 * kanary.hour)
 
     def poll(self):
         reading = 12.0  # TODO: read the value, e.g. a current or a trigger rate
@@ -1628,7 +1630,7 @@ class MyFrozenSource(kanary.Source):
 
     def init(self):
         # Per input: the samples of the last hour (see the "buffered" template).
-        self.buffer = kanary.Buffer(seconds=1 * kanary.hour)
+        self.buffer = kanary.Buffer(max_age=1 * kanary.hour)
 
     def poll(self):
         flow = 3.2   # TODO: read a value that always moves a little, e.g. a flow
@@ -1679,7 +1681,7 @@ class MyRemoteSource(kanary.RemoteKanarySource):
     description = "TODO: describe the remote Kanary node."
 
     base_url = "http://remote-kanary.example:8000"  # TODO
-    timeout_seconds = 5.0
+    timeout = 5.0
     # url = "http://remote-kanary.example:8000/export-alerts"  # full URL instead of base_url
 
 
@@ -1724,7 +1726,7 @@ import kanary
 )
 class MyRateRule(kanary.RateRule):
     description = "TODO: describe the allowed rate of change."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # Allowed rate range, in value units per second; works like the "range" template.
     # Write it with the time units: 1.0 / kanary.minute is "1 per minute".
@@ -1897,7 +1899,7 @@ import kanary
 )
 class MyMultiSourceRule:
     description = "TODO: describe what disagreement between the sources means."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     max_difference = 2.0
     max_age = 5 * kanary.minute
@@ -1945,7 +1947,7 @@ import kanary
 
 @kanary.output(
     output_id="my.command-output",
-    minimum_severity="ERROR",
+    minimum_severity=kanary.ERROR,
 )
 class MyCommandOutput(kanary.CommandOutput):
     description = "TODO: describe what the script does."
@@ -1980,7 +1982,7 @@ import kanary
 
 @kanary.output(
     output_id="my.followups",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     # Receive SILENCED / SUPPRESSED too, so pending followups can be cancelled.
     exclude_states=[],
 )
@@ -2045,7 +2047,7 @@ import kanary
 
 @kanary.output(
     output_id="my.delayed",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     # Receive SILENCED / SUPPRESSED too, so a pending notification can be cancelled.
     exclude_states=[],
 )
@@ -2108,7 +2110,7 @@ import kanary
 
 @kanary.output(
     output_id="my.quiet-hours",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class MyQuietHoursOutput(kanary.SlackOutput):
     description = "TODO: describe the channel and the quiet hours."
@@ -2170,7 +2172,7 @@ import kanary
 
 @kanary.output(
     output_id="my.oncall",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class MyOncallOutput(kanary.MailOutput):
     description = "TODO: describe the shift arrangement."

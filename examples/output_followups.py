@@ -3,7 +3,7 @@ from kanary import hour as h
 
 
 @kanary.output(output_id="operations-followups",
-               minimum_severity="WARN",
+               minimum_severity=kanary.WARN,
                exclude_states=[]) # remove "SILENCED" and "SUPPRESSED" from default `exclude_states`.
 class OperationsFollowupOutput:
     def init(self):

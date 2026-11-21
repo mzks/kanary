@@ -2,6 +2,7 @@
 # kind: output
 # level: basic
 # summary: POST each alert event as JSON to an HTTP endpoint; reshape the body in payload() (WebhookOutput).
+# summary-ja: 各 alert event を JSON で HTTP の endpoint に POST する。body の形は payload() で変える (WebhookOutput)。
 import os
 
 import kanary
@@ -10,7 +11,7 @@ import kanary
 @kanary.output(
     output_id="template.webhook",
     # include_tags=["detector"],
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class TemplateWebhook(kanary.WebhookOutput):
     description = "TODO: describe the receiving service."
@@ -30,7 +31,8 @@ class TemplateWebhook(kanary.WebhookOutput):
 
     def payload(self, event):
         # The JSON body. The default (kept here) sends rule_id, state, previous_state,
-        # transition, severity, message, owner, tags, occurred_at, active_since, acked_by.
+        # transition, severity, message, owner, tags, occurred_at, active_since, acked_by,
+        # and runbook.
         body = super().payload(event)
         body["source"] = "kanary"
         # self.text(event) gives a one-line summary such as

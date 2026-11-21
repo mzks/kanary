@@ -2,6 +2,7 @@
 # kind: output
 # level: basic
 # summary: Post alerts to Mattermost through an incoming webhook (MattermostOutput).
+# summary-ja: incoming webhook で Mattermost に alert を投稿する (MattermostOutput)。
 import os
 
 import kanary
@@ -9,7 +10,7 @@ import kanary
 
 @kanary.output(
     output_id="template.mattermost",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class TemplateMattermost(kanary.MattermostOutput):
     description = "TODO: name the channel."

@@ -2,12 +2,13 @@
 # kind: output
 # level: advanced
 # summary: Mail whoever is on shift, from a schedule file, and hold mail at night (MailOutput + OnCallSchedule + QuietHours).
+# summary-ja: 当番表の file から今の当番に mail し、夜間は mail を保留する (MailOutput + OnCallSchedule + QuietHours)。
 import kanary
 
 
 @kanary.output(
     output_id="template.oncall",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class TemplateOncall(kanary.MailOutput):
     description = "TODO: describe the shift arrangement."

@@ -206,8 +206,9 @@ class の中に書いた場合は、plugin file を読み込むときに読み�
 - `rule_id`
 - `inputs`
 - `severity`
-- `tags`
 - `evaluate(ctx)`
+
+`tags` は省略できますが、書いてください。tag の無い rule は `include_tags` を持たない output にしか届かず、tag を指定した silence の対象にならず、tag で絞り込む remote の取り込みからも漏れます。lint はそのような rule に warning を出します。
 
 `source="postgres"` も、`inputs="postgres:*"` の短縮として引き続き使えます。1つの source が公開する全 input に依存したい時の sugar です。
 
@@ -228,6 +229,8 @@ Kanary は load/reload 時にこれらの selector から `resolved_sources` を
 - `owner`
 - `description`
 - `runbook`
+
+どれも alert API と viewer の detail に出ます。`runbook`（まず何を確かめるか、dashboard への link など）は rule の通知にも付きます: Slack、Mattermost、Discord、mail では「Runbook」の field（URL は link になる）、webhook の JSON では `runbook`。
 
 `evaluate(ctx)` は速く、I/O をしないでください。rule は 1 つずつ評価され（「plugin のコードが動く場所」参照）、100 ms を超えると `SLOW` と表示されます。
 
@@ -342,7 +345,7 @@ payload を明示しない場合、Kanary は current source payload を自動�
 `emit()` はその output 専用の thread で動きます。engine は event をどの output に送るかを決めて queue に入れるだけなので、評価、他の output、operator の操作が送信を待つことはありません。各 output は event の順序を保ちます。output ごとに最大 1000 件まで待たせ、それを超えると最も古いものを捨てて log に出し、未送信として記録します。Outputs 画面に待ち件数と捨てた件数を表示します。停止時、queue に残った event は最大 5 秒まで送ります。
 
 `include_tags` と `exclude_tags` は glob pattern を使えます。  
-たとえば `include_tags=["expert_*"]` とすると、`expert_db` や `expert_shift` のような tag に一致します。
+たとえば `include_tags=["expert_*"]` とすると、`expert_db` や `expert_shift` のような tag に一致します。pattern は tag に対して一致を見るので、`include_tags=["*"]` でも tag の無い rule には一致しません。
 
 `exclude_states` は current state が指定値に一致する event を除外します。default は `["SUPPRESSED", "SILENCED"]` です。
 
@@ -397,7 +400,7 @@ def emit(self, event):
 @kanary.output(
     output_id="discord",
     include_tags=["sqlite"],
-    minimum_severity="ERROR",
+    minimum_severity=kanary.ERROR,
 )
 class DiscordOutput:
     def emit(self, event):
@@ -472,8 +475,9 @@ helper class は engine とは別の `src/kanary/helpers/` にあり、上で説
 @kanary.source(source_id="vacuum", interval=10 * kanary.second)
 class Vacuum(kanary.Source):
     def init(self):
-        # input ごとに最大 1024 sample、1 時間より古いものは捨てる（最新の sample から数える）
-        self.buffer = kanary.Buffer(size=1024, seconds=1 * kanary.hour)
+        # input ごとに最大 1024 sample、1 時間より古いものは捨てる（最新の sample から数える）。
+        # 先に当たった方の制限で古いものから捨てる
+        self.buffer = kanary.Buffer(size=1024, max_age=1 * kanary.hour)
 
     def poll(self):
         self.buffer.add(("pressure", read_gauge()))  # the same items as kanary.inputs()
@@ -499,7 +503,7 @@ buffer は input 名ごとに、追加された sample を古い順に持ちま�
 `self.buffer["name"]` は `kanary.Series` で、その input の sample の読み取り専用のコピーを古い順に持ちます。一度も追加されていない名前は `KeyError` になり、buffer にある input の名前を示すので、打ち間違いはすぐ分かります。まだ来ていないかもしれない input は `"name" in self.buffer` で確かめます。
 
 - sample: `first`、`last`（`.value`、`.timestamp`、`.metadata` を持つ sample。無ければ `None`）、`values`、`timestamps`、`len()`、反復、`span`（最初から最後までの秒数）
-- 絞り込み: `window(seconds)` は最新の sample から数えて直近 `seconds` 秒の sample。`tail(n)` は最新の `n` 個
+- 絞り込み: `window(duration)` は最新の sample から数えて直近 `duration`（`10 * kanary.minute`）の sample。`tail(n)` は最新の `n` 個
 - 統計: `mean()`、`median()`、`min()`、`max()`、`sum()`、`stddev()`、`delta()`（最後 − 最初）、`rate()`（最初と最後の sample から）、`slope()`（全 sample の最小二乗。ノイズ 1 点の影響を受けにくい。`rate()` とも毎秒あたりで、`* kanary.minute` で毎分）、`zscore()`（最新値が平均から標準偏差何個分離れているか）、`eta(target)`（傾向が `target` に届くまでの秒数。平坦か離れていく場合は `None`）、`changes(tolerance=)`（隣り合う sample の間で値が変わった回数。バタつき、flapping）、`unchanged_seconds(tolerance=)`（値が変わっていない秒数。固まった sensor は timestamp だけ新しくして同じ値を送り続ける）
 
 `values` と `timestamps` は普通の list なので、ほかの計算には `numpy.array(series.values)` などがそのまま使えます。
@@ -582,9 +586,9 @@ metrics = {
 
 決まった量をまとめて書き込むなら wide、量が多い・増減する・別々に書き込むなら long が向いています。
 
-- 接続: `database_type`（`"sqlite"`、`"postgresql"`、`"mysql"`。MariaDB も `"mysql"`）、`database`（SQLite は file path で、相対なら plugin file の隣。それ以外は database 名）、`host`、`port`、`user`、`password`（secret なので `password = os.environ.get("DB_PASSWORD")`）、`timeout`（接続と statement の timeout）。PostgreSQL には `psycopg`、MySQL には `pymysql` package が必要です。KANARY を動かす Python 環境に入れてください（[Deployment: plugin が追加 module を要求する場合](deployment_ja.md#plugin-が追加-module-を要求する場合)）。接続は autocommit で、poll が失敗すると通常の retry/reinit で再接続します。
+- 接続: `database_type`（`"sqlite"`、`"postgresql"`、`"mysql"`。MariaDB も `"mysql"`）、`database`（SQLite は file path で、相対なら plugin file の隣。それ以外は database 名）、`host`、`port`、`user`、`password`（secret なので `password = os.environ.get("DB_PASSWORD")`）、`timeout`（接続と statement の timeout）。PostgreSQL は KANARY と一緒に入る `psycopg` を使います。MySQL には `pymysql` package が必要で、KANARY を動かす Python 環境に入れてください（[Deployment: plugin が追加 module を要求する場合](deployment_ja.md#plugin-が追加-module-を要求する場合)）。接続は autocommit で、poll が失敗すると通常の retry/reinit で再接続します。
 - `SQLWideSource`: `table`、`timestamp_column`、`columns`（input 名 → column。空なら全 column）。最も新しい行を読みます: `SELECT ... ORDER BY timestamp_column DESC LIMIT 1`。
-- `SQLLongSource`: `table`、`name_column`、`value_column`、`timestamp_column`。name ごとに最も新しい行を読みます。`lookback_seconds` で最近の行だけを走査します。`names` で上流の名前 → input 名を対応させ、それ以外は無視します。
+- `SQLLongSource`: `table`、`name_column`、`value_column`、`timestamp_column`。name ごとに最も新しい行を読みます。`lookback` で最近の行だけを走査します。`names` で上流の名前 → input 名を対応させ、それ以外は無視します。
 
 table 名と column 名は単純な識別子に限ります（`schema.table` は可）。join、view、`WHERE` など別のものを読むときは `query`（と driver の parameter style の `params`）を書きます。その場合は書いたとおりに実行し（新しい行を先頭に）、table の設定は使いません。別の driver を使うなら `connect()` を override して DB-API connection を返します。
 
@@ -782,7 +786,7 @@ webhook URL は通常 secret なので、上の plugin config の節のように
 `kanary.QuietHours` は静かな時間帯の alert event を保留し、後で送る helper です。`OutputFollowups` と同じく、output が `init()` で作り、`terminate()` で閉じ、`emit()` から呼びます。使わない output には影響しません。
 
 ```python
-@kanary.output(output_id="slack", minimum_severity="WARN")
+@kanary.output(output_id="slack", minimum_severity=kanary.WARN)
 class Slack(kanary.SlackOutput):
     url = os.environ.get("SLACK_WEBHOOK_URL")
 

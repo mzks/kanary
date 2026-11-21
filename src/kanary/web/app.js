@@ -606,8 +606,8 @@ async function refreshAllNow() {
       getJson("/silences"),
       getJson("/meta"),
     ]);
-    state.alerts = alertsPayload.alerts || [];
     state.plugins = pluginsPayload.plugins || [];
+    state.alerts = withWaitingRules(alertsPayload.alerts || [], state.plugins);
     state.silences = silencesPayload.silences || [];
     state.meta = metaPayload || null;
     state.dataLoaded = true;
@@ -789,6 +789,7 @@ function renderDashboardPage() {
               <div class="alert-card-title"><a class="rule-link" href="#alert/${encodeURIComponent(alert.rule_id)}">${breakableIdentifier(alert.rule_id)}</a></div>
               <div class="alert-card-meta">
                 <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
+                ${restoredBadge(alert)}
                 <span class="severity-badge severity-${severityLabel(alert.severity)}">${escapeHtml(severityLabel(alert.severity))}</span>
                 <span class="${alert.acked_by ? "alert-card-acked-by" : "alert-card-unacked"}">${escapeHtml(alert.acked_by || "Unacked")}</span>
                 <span class="alert-card-age" title="${escapeHtml(alert.active_since || "-")}"><span class="alert-card-age-prefix">Active since </span>${escapeHtml(formatRelativeTime(alert.active_since))}</span>
@@ -850,7 +851,7 @@ async function renderDetailPage() {
   const emptyClass = (value) => (value ? "" : " detail-row-empty");
   setHtml(document.getElementById("detail-summary"), [
     row("Rule", alert.rule_id, false, "detail-row-secondary"),
-    row("State", `<span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>`, true, "detail-row-state"),
+    row("State", `<span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span> ${restoredBadge(alert)}`, true, "detail-row-state"),
     row("Severity", severityLabel(alert.severity), false, "detail-row-severity"),
     row("Active Since", alert.active_since ? `${formatRelativeTime(alert.active_since)} (${formatDateTime(alert.active_since)})` : "-", false, "detail-row-active"),
     row("Acked By", alert.acked_by || "-", false, `detail-row-acked${emptyClass(alert.acked_by)}`),
@@ -916,7 +917,7 @@ function renderRulesPage() {
       (plugin) => `
         <tr class="${escapeHtml(pluginTableRowClass(plugin))}" data-key="${escapeAttribute(`${plugin.type}:${plugin.plugin_id}`)}">
           <td class="plugin-primary-cell cell-name">
-            <div class="plugin-title">${breakableIdentifier(plugin.plugin_id)}</div>
+            <div class="plugin-title"><a class="rule-link" href="#alert/${encodeURIComponent(plugin.plugin_id)}">${breakableIdentifier(plugin.plugin_id)}</a></div>
           </td>
           <td class="cell-runtime">${formatPluginRuntime(plugin)}</td>
           <td class="cell-description">${formatPlainDescription(plugin.description)}</td>
@@ -1351,7 +1352,8 @@ function updateDetailActionAvailability(alert) {
   const ackNotice = document.getElementById("ack-notice");
   const alreadyAcknowledged = alert.state === "ACKED";
   if (ackButton) {
-    ackButton.disabled = state.pendingActions.has("acknowledge") || alreadyAcknowledged;
+    // A rule that has no alert yet has nothing to acknowledge.
+    ackButton.disabled = state.pendingActions.has("acknowledge") || alreadyAcknowledged || Boolean(alert.waiting);
   }
   if (unackButton) {
     unackButton.disabled = alert.state !== "ACKED" || state.pendingActions.has("acknowledge");
@@ -1733,6 +1735,7 @@ function formatAlertStateCell(alert) {
   return `
     <div class="state-with-detail">
       <span class="state-pill state-${escapeHtml(alert.state)}">${escapeHtml(alert.state)}</span>
+      ${restoredBadge(alert)}
       ${hasDetails ? `<button type="button" class="state-detail-button" data-open-alert-state="${escapeAttribute(alert.rule_id)}" aria-label="Show state details for ${escapeAttribute(alert.rule_id)}">i</button>` : ""}
     </div>
   `;
@@ -1792,7 +1795,40 @@ function alertPriority(alert) {
     SILENCED: 2,
     SUPPRESSED: 3,
     OK: 4,
+    WAITING: 5,
   }[alert.state] ?? 10;
+}
+
+// A rule with no alert yet (not evaluated since the start, and none stored) still
+// gets a row, so that every rule is listed and has a detail page.
+function withWaitingRules(alerts, plugins) {
+  const known = new Set(alerts.map((alert) => alert.rule_id));
+  const waiting = plugins
+    .filter((plugin) => plugin.type === "rule" && !known.has(plugin.plugin_id))
+    .map((plugin) => ({
+      rule_id: plugin.plugin_id,
+      state: "WAITING",
+      waiting: true,
+      severity: plugin.severity,
+      owner: plugin.owner || null,
+      tags: plugin.tags || [],
+      matched_outputs: plugin.matched_outputs || [],
+      inputs: plugin.inputs || [],
+      description: plugin.description || null,
+      runbook: plugin.runbook || null,
+      definition_file: plugin.definition_file || null,
+      message: plugin.state === "FAILED" && plugin.last_error ? `evaluate() failed: ${plugin.last_error}` : "Not evaluated yet",
+      payload: {},
+      active_silence_ids: [],
+    }));
+  return [...alerts, ...waiting];
+}
+
+// "before restart": the state KANARY stopped with, shown until the rule is evaluated.
+function restoredBadge(alert) {
+  return alert.restored
+    ? `<span class="restored-badge" title="The state KANARY stopped with. The rule has not been evaluated since the start.">before restart</span>`
+    : "";
 }
 
 function countByState(alerts) {

@@ -106,3 +106,24 @@ function createContext() {
 
   assert.equal(matches, true);
 }
+
+{
+  // Every rule is listed: one without an alert yet gets a WAITING row.
+  const context = createContext();
+  const rows = JSON.parse(vm.runInContext(`JSON.stringify(withWaitingRules(
+    [{ rule_id: "oil.temperature", state: "FIRING", restored: true }],
+    [
+      { type: "rule", plugin_id: "oil.temperature", state: "READY" },
+      { type: "rule", plugin_id: "oil.new", state: "created", severity: 20, tags: ["oil"] },
+      { type: "rule", plugin_id: "oil.broken", state: "FAILED", last_error: "division by zero" },
+      { type: "source", plugin_id: "oil", state: "READY" }
+    ]
+  ))`, context));
+  assert.deepEqual(rows.map((row) => [row.rule_id, row.state]), [
+    ["oil.temperature", "FIRING"], ["oil.new", "WAITING"], ["oil.broken", "WAITING"],
+  ]);
+  assert.equal(rows[1].message, "Not evaluated yet");
+  assert.equal(rows[2].message, "evaluate() failed: division by zero");
+  assert.match(vm.runInContext(`restoredBadge({ restored: true })`, context), /before restart/);
+  assert.equal(vm.runInContext(`restoredBadge({})`, context), "");
+}

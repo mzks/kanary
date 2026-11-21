@@ -305,6 +305,7 @@ class ControlAPI:
                                 "definition_file_name": Path(definition_file).name if definition_file else None,
                                 "description": getattr(plugin, "description", None) if plugin is not None else None,
                                 "tags": list(getattr(plugin, "tags", [])) if plugin is not None else [],
+                                "severity": int(plugin.severity) if status.plugin_type == "rule" and plugin is not None else None,
                                 "owner": getattr(plugin, "owner", None) if status.plugin_type == "rule" and plugin is not None else None,
                                 "runbook": getattr(plugin, "runbook", None) if status.plugin_type == "rule" and plugin is not None else None,
                                 "inputs": list(getattr(plugin, "inputs", [])) if status.plugin_type == "rule" and plugin is not None else [],
@@ -319,7 +320,7 @@ class ControlAPI:
                                 **(engine.output_backlog(status.plugin_id) if status.plugin_type == "output" else {}),
                             }
                         )
-                    plugins.sort(key=lambda row: (row["type"], row["plugin_id"]))
+                    plugins.sort(key=lambda row: (_PLUGIN_TYPE_ORDER.get(row["type"], 3), row["plugin_id"]))
                     self._write_json(HTTPStatus.OK, {"plugins": plugins})
                     return
 
@@ -373,6 +374,9 @@ class ControlAPI:
 
                 if self.path.startswith("/test-evaluate/"):
                     rule_id = unquote(self.path[len("/test-evaluate/") :]).strip("/")
+                    if rule_id not in engine.rules:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": f"unknown rule '{rule_id}'"})
+                        return
                     body = self._read_json_body()
                     try:
                         payload = engine.test_evaluate(
@@ -391,11 +395,15 @@ class ControlAPI:
 
                 if self.path.startswith("/test-fire/"):
                     rule_id = unquote(self.path[len("/test-fire/") :]).strip("/")
+                    if rule_id not in engine.rules:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": f"unknown rule '{rule_id}'"})
+                        return
                     body = self._read_json_body()
                     try:
                         payload = engine.test_fire(
                             rule_id,
-                            state=_parse_alert_state(body["state"]),
+                            state=_parse_alert_state(body["state"]) if body.get("state") else None,
+                            evaluation=body.get("evaluation"),
                             message=body.get("message"),
                             reason=body.get("reason"),
                             now=_parse_datetime(body["now"]) if body.get("now") else None,
@@ -777,12 +785,17 @@ def _export_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
         "runbook": getattr(rule, "runbook", None) if rule else None,
         "payload": alert.payload,
         "last_evaluated_at": alert.last_evaluated_at,
+        "restored": alert.restored,  # the state KANARY stopped with; not evaluated since its start
         "definition_file": getattr(rule.__class__, "__kanary_definition_file__", None) if rule is not None else None,
         "origin_node_id": origin_node_id,
         "origin_rule_id": origin_rule_id,
         "mirror_path": mirror_path,
         "is_mirrored": is_mirrored,
     }
+
+
+# /plugins lists them in the order values flow: sources, rules, outputs.
+_PLUGIN_TYPE_ORDER = {"source": 0, "rule": 1, "output": 2}
 
 
 def _plugin_source_payload(engine: Engine, plugin_type: str, plugin_id: str) -> dict[str, object]:

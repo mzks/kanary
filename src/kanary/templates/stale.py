@@ -2,6 +2,7 @@
 # kind: rule
 # level: basic
 # summary: Fire when an input stops updating for longer than a timeout (StaleRule).
+# summary-ja: input が timeout より長く更新されなければ発報する (StaleRule)。
 import kanary
 
 

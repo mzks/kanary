@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Publish the trend of a value and the time until it reaches a limit, from recent history (kanary.Buffer).
+# summary-ja: 値の傾向と、上限に届くまでの時間を、最近の履歴から出す (kanary.Buffer)。
 import kanary
 
 
@@ -11,7 +12,7 @@ class TemplateTrend(kanary.Source):
 
     def init(self):
         # Per input: the samples of the last 30 minutes (see the "buffered" template).
-        self.buffer = kanary.Buffer(seconds=30 * kanary.minute)
+        self.buffer = kanary.Buffer(max_age=30 * kanary.minute)
 
     def poll(self):
         reading = 50.0  # TODO: read the value, e.g. a tank level or a disk usage in %

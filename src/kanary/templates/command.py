@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Run a local command and read numbers from its output (CommandSource).
+# summary-ja: 手元の command を実行し、出力から数値を読む (CommandSource)。
 import kanary
 
 

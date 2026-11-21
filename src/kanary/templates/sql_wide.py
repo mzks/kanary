@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Read the newest row of a wide table (one column per quantity) from SQL, from settings only (SQLWideSource).
+# summary-ja: wide 形式（量ごとに column）の table から最新の行を SQL で読む (SQLWideSource)。
 import kanary
 
 
@@ -9,9 +10,9 @@ import kanary
 class TemplateSqlWide(kanary.SQLWideSource):
     description = "TODO: describe the table."
 
-    # Connection. "sqlite" needs nothing extra; "postgresql" needs the psycopg package
-    # and "mysql" (also MariaDB) the pymysql package, in the Python environment that
-    # runs KANARY (docs/deployment.md, "When A Plugin Needs Additional Python Modules").
+    # Connection. "sqlite" and "postgresql" (psycopg comes with KANARY) need nothing
+    # extra; "mysql" (also MariaDB) needs the pymysql package in the Python environment
+    # that runs KANARY (docs/deployment.md, "When A Plugin Needs Additional Python Modules").
     database_type = "sqlite"
     database = "environment.db"  # sqlite: file path (relative = next to this plugin); others: database name
     # host = "db.example.org"

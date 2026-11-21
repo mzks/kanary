@@ -2,6 +2,7 @@
 # kind: rule
 # level: advanced
 # summary: Fire when at least k of many inputs are out of range, e.g. "3 channels dead" (KOfNRule).
+# summary-ja: 多数の input のうち k 個以上が範囲外なら発報する。例: 「3 channel が死んでいる」 (KOfNRule)。
 import kanary
 
 

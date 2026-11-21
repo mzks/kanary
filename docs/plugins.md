@@ -206,8 +206,9 @@ Required:
 - `rule_id`
 - `inputs`
 - `severity`
-- `tags`
 - `evaluate(ctx)`
+
+`tags` is optional, but write it: a rule without tags reaches only the outputs without `include_tags`, cannot be silenced by tag, and is left out by remote imports filtered by tag. Lint warns about such a rule.
 
 `source="postgres"` remains available as a shorthand for `inputs="postgres:*"` when you want to depend on everything exposed by one source.
 
@@ -232,7 +233,7 @@ Optional metadata:
 - `description`
 - `runbook`
 
-These appear in the alert API and in the viewer detail panel.
+These appear in the alert API and in the viewer detail panel. `runbook` (what to check first, a link to a dashboard) also goes with the rule's notifications: a "Runbook" field in Slack, Mattermost, Discord, and mail (URLs become links), and `runbook` in the webhook JSON.
 
 ### RuleContext
 
@@ -341,7 +342,7 @@ The older `emit(event, ctx)`, `init(ctx)`, and `terminate(ctx)` signatures still
 `emit()` runs on the output's own thread. The engine only decides which outputs an event goes to and adds it to their queues, so evaluation, other outputs, and operator actions never wait for a delivery. Each output keeps the order of its events. Up to 1000 events wait per output; beyond that the oldest is dropped, logged, and recorded as not sent. The Outputs page shows how many events are queued and how many were dropped. On shutdown, queued events get up to 5 seconds to go out.
 
 `include_tags` and `exclude_tags` support glob patterns.  
-For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`.
+For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `expert_shift`. A pattern matches a tag, so even `include_tags=["*"]` does not match a rule without tags.
 
 `exclude_states` drops events whose current state matches a listed value. It defaults to `["SUPPRESSED", "SILENCED"]`.
 
@@ -396,7 +397,7 @@ Example:
 @kanary.output(
     output_id="discord",
     include_tags=["sqlite"],
-    minimum_severity="ERROR",
+    minimum_severity=kanary.ERROR,
 )
 class DiscordOutput:
     def emit(self, event):
@@ -471,8 +472,9 @@ The helper classes live in `src/kanary/helpers/`, apart from the engine, and use
 @kanary.source(source_id="vacuum", interval=10 * kanary.second)
 class Vacuum(kanary.Source):
     def init(self):
-        # per input: at most 1024 samples, none older than 1 hour (from the newest sample)
-        self.buffer = kanary.Buffer(size=1024, seconds=1 * kanary.hour)
+        # per input: at most 1024 samples, none older than 1 hour (from the newest sample);
+        # the first limit reached drops the oldest
+        self.buffer = kanary.Buffer(size=1024, max_age=1 * kanary.hour)
 
     def poll(self):
         self.buffer.add(("pressure", read_gauge()))  # the same items as kanary.inputs()
@@ -498,7 +500,7 @@ Adding:
 `self.buffer["name"]` is a `kanary.Series`: a read-only copy of that input's samples, oldest first. A name never added raises `KeyError`, naming the inputs the buffer has, so a typo shows at once; check an input that may not have arrived yet with `"name" in self.buffer`.
 
 - Samples: `first`, `last` (each a sample with `.value`, `.timestamp`, `.metadata`, or `None`), `values`, `timestamps`, `len()`, iteration, `span` (seconds from first to last)
-- Selecting: `window(seconds)` - the samples of the last `seconds`, counted back from the newest; `tail(n)` - the newest `n`
+- Selecting: `window(duration)` - the samples of the last `duration` (`10 * kanary.minute`), counted back from the newest; `tail(n)` - the newest `n`
 - Statistics: `mean()`, `median()`, `min()`, `max()`, `sum()`, `stddev()`, `delta()` (last minus first), `rate()` (from the first and last sample), `slope()` (least-squares over every sample, less sensitive to one noisy point) - both per second; `* kanary.minute` gives per minute, `zscore()` (standard deviations of the newest value from the mean), `eta(target)` (seconds until the trend reaches `target`; `None` when flat or moving away), `changes(tolerance=)` (how often the value changed between samples: toggling, flapping), `unchanged_seconds(tolerance=)` (how long the value has stayed the same: a frozen sensor keeps sending new timestamps with the same value)
 
 `values` and `timestamps` are plain lists, so for anything else `numpy.array(series.values)` works.
@@ -581,9 +583,9 @@ A **long** table has one row per quantity and time: a name column and a value co
 
 A wide table suits a fixed set of quantities written together; a long table suits many or changing quantities, written each on its own.
 
-- Connection: `database_type` (`"sqlite"`, `"postgresql"`, or `"mysql"`, which also covers MariaDB), `database` (a file path for SQLite, relative to the plugin file; otherwise the database name), `host`, `port`, `user`, `password` (a secret: `password = os.environ.get("DB_PASSWORD")`), and `timeout` (connect and statement timeout). PostgreSQL needs the `psycopg` package and MySQL the `pymysql` package, installed into the Python environment that runs KANARY (see [Deployment: When A Plugin Needs Additional Python Modules](deployment.md#when-a-plugin-needs-additional-python-modules)). The connection uses autocommit, and a failing poll reconnects through the normal retry/reinit path.
+- Connection: `database_type` (`"sqlite"`, `"postgresql"`, or `"mysql"`, which also covers MariaDB), `database` (a file path for SQLite, relative to the plugin file; otherwise the database name), `host`, `port`, `user`, `password` (a secret: `password = os.environ.get("DB_PASSWORD")`), and `timeout` (connect and statement timeout). PostgreSQL uses `psycopg`, which is installed with KANARY; MySQL needs the `pymysql` package, installed into the Python environment that runs KANARY (see [Deployment: When A Plugin Needs Additional Python Modules](deployment.md#when-a-plugin-needs-additional-python-modules)). The connection uses autocommit, and a failing poll reconnects through the normal retry/reinit path.
 - `SQLWideSource`: `table`, `timestamp_column`, and `columns` (input name to column; empty means every column). It reads the newest row: `SELECT ... ORDER BY timestamp_column DESC LIMIT 1`.
-- `SQLLongSource`: `table`, `name_column`, `value_column`, and `timestamp_column`. It reads the newest row of every name; `lookback_seconds` limits the scan to recent rows. `names` maps upstream names to input names and filters the rest.
+- `SQLLongSource`: `table`, `name_column`, `value_column`, and `timestamp_column`. It reads the newest row of every name; `lookback` limits the scan to recent rows. `names` maps upstream names to input names and filters the rest.
 
 Table and column names must be plain identifiers (`schema.table` is allowed). To read anything else, such as a join, a view, or a `WHERE` clause, set `query` (with `params` in the driver's parameter style); it is then used as written, newest rows first, and the table settings are ignored. For another driver, override `connect()` and return any DB-API connection.
 
@@ -790,7 +792,7 @@ A webhook URL is usually a secret: `url = os.environ.get("WEBHOOK_URL")`, as sho
 `kanary.QuietHours` holds alert events during quiet hours and sends them later. Like `OutputFollowups`, an output creates it in `init()`, closes it in `terminate()`, and calls it from `emit()`; outputs that do not use it are unaffected.
 
 ```python
-@kanary.output(output_id="slack", minimum_severity="WARN")
+@kanary.output(output_id="slack", minimum_severity=kanary.WARN)
 class Slack(kanary.SlackOutput):
     url = os.environ.get("SLACK_WEBHOOK_URL")
 

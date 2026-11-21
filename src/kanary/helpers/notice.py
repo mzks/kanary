@@ -7,7 +7,7 @@ output of your own (Teams, LINE, a pager) can use it the same way::
     notice.headline   # "🔴 FIRING ERROR oil.temperature"
     notice.message    # the rule's message
     notice.color_hex  # "#E74C3C": green when OK, grey when silenced, else by severity
-    notice.fields     # [("State", "OK → FIRING"), ("Severity", "ERROR"), ...]
+    notice.fields     # [("State", "OK → FIRING"), ("Severity", "ERROR"), ..., ("Runbook", ...)]
     notice.text       # one line, for previews and plain-text receivers
 """
 
@@ -130,9 +130,15 @@ def digest(events: list[AlertEvent], *, title: str | None = None, viewer_url: st
 
 
 def summary(event: AlertEvent) -> str:
-    """One line: "[ERROR] FIRING oil.temperature: value=95 out of range [10, 80]"."""
-    marker = event.transition.value if event.transition is not None else event.current_state.value
-    line = f"[{severity_label(event.effective_severity)}] {marker} {event.rule_id}"
+    """One line: "[ERROR] FIRING oil.temperature: value=95 out of range [10, 80]".
+
+    Back to OK it has no severity, as the title: "OK oil.temperature: value=42 within range".
+    """
+    if event.current_state == AlertState.OK:
+        line = f"OK {event.rule_id}"
+    else:
+        marker = event.transition.value if event.transition is not None else event.current_state.value
+        line = f"[{severity_label(event.effective_severity)}] {marker} {event.rule_id}"
     return f"{line}: {event.message}" if event.message else line
 
 
@@ -164,6 +170,8 @@ def event_fields(event: AlertEvent) -> list[tuple[str, str]]:
         if len(values) > MAX_VALUES:
             shown.append(f"… {len(values) - MAX_VALUES} more")
         fields.append(("Values", "\n".join(shown)))
+    if event.runbook:
+        fields.append(("Runbook", event.runbook))  # the rule's: what to do, a link to a dashboard
     return fields
 
 

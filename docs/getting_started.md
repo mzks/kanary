@@ -243,7 +243,7 @@ kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 
 ### Keeping History (kanary.Buffer)
 
-To publish values computed from recent samples, such as a 10-minute average or a trend, create a `kanary.Buffer` in `init()` (`self.buffer = kanary.Buffer(size=1024, seconds=kanary.hour)`), add the raw values to it in `poll()` (`self.buffer.add(("pressure", value))`, the same items as `kanary.inputs()`), and return inputs computed from `self.buffer["name"]`, for example `self.buffer["pressure"].window(600).mean()`. It works in any source, including the helper classes (`self.buffer.add(super().poll())`). See `kanary new --show buffered`.
+To publish values computed from recent samples, such as a 10-minute average or a trend, create a `kanary.Buffer` in `init()` (`self.buffer = kanary.Buffer(size=1024, max_age=3 * kanary.hour)`), add the raw values to it in `poll()` (`self.buffer.add(("pressure", value))`, the same items as `kanary.inputs()`), and return inputs computed from `self.buffer["name"]`, for example `self.buffer["pressure"].window(10 * kanary.minute).mean()`. It works in any source, including the helper classes (`self.buffer.add(super().poll())`). See `kanary new --show buffered`.
 
 ### Remote Kanary Nodes
 

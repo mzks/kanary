@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Evaluate values as soon as your own listener receives them (a device callback, a socket): kanary.Inbox.
+# summary-ja: 自分で書いた受け口（装置の callback、socket など）に届いた値を、届いた瞬間に評価する: kanary.Inbox。
 import socket
 import threading
 

@@ -891,6 +891,26 @@ select {
   color: #584f45;
 }
 
+/* A rule with no alert yet; dashed: it has no state of its own. */
+.state-WAITING {
+  background: transparent;
+  border: 1px dashed rgba(127, 120, 108, 0.55);
+  color: #6b6258;
+}
+
+/* The state KANARY stopped with, until the rule's first evaluation. */
+.restored-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border: 1px dashed rgba(127, 120, 108, 0.55);
+  border-radius: 999px;
+  color: #6b6258;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .plugin-state-READY {
   background: rgba(74, 105, 65, 0.24);
   border-color: rgba(74, 105, 65, 0.38);
@@ -1867,7 +1887,11 @@ code {
 @media (max-width: 760px) {
   :root {
     --radius: 14px;
-    --mobile-nav-height: 68px;
+    /* Phone header and bottom tabs: tall enough that a touch near them is not
+       taken for the system's status bar or home-indicator swipe. */
+    --mobile-header-height: 88px;
+    --mobile-tab-height: 76px;
+    --mobile-nav-height: calc(var(--mobile-tab-height) + 16px);
   }
 
   body {
@@ -1889,6 +1913,7 @@ code {
     grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 6px 10px;
+    min-height: var(--mobile-header-height);
     padding: 6px 8px 6px 14px;
     margin-bottom: 8px;
     border-radius: 12px;
@@ -2017,7 +2042,7 @@ code {
 
   .nav-link {
     flex: 0 0 auto;
-    min-height: 52px;
+    min-height: var(--mobile-tab-height);
     padding: 0 12px;
     font-size: 13px;
     white-space: nowrap;
@@ -3058,7 +3083,7 @@ input[type="datetime-local"]::-webkit-date-and-time-value {
     justify-content: center;
     /* Taller than the 40px touch minimum above, so a sideways drag lands on
        the tab bar instead of turning into a page swipe. */
-    min-block-size: 52px;
+    min-block-size: var(--mobile-tab-height);
   }
 
   .sidebar {

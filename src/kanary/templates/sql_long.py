@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Read the newest name/value row of every name in a long table from SQL, from settings only (SQLLongSource).
+# summary-ja: long 形式の table から、名前ごとに最新の名前/値の行を SQL で読む (SQLLongSource)。
 import kanary
 
 
@@ -25,7 +26,7 @@ class TemplateSqlLong(kanary.SQLLongSource):
     # ("+09:00", "+9"), or "UTC" (the default).
     # timestamp_timezone = "Asia/Tokyo"
     # Only scan rows of the last 10 minutes: keeps the query cheap on a large table.
-    lookback_seconds = 10 * kanary.minute
+    lookback = 10 * kanary.minute
 
     # Upstream name -> input name. When set, other names are ignored; when empty,
     # every name is used as-is. The upstream name is kept in each input's metadata.

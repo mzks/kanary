@@ -262,6 +262,8 @@ WantedBy=multi-user.target
 
 Adjust `ExecStart` if your installation path is different.
 
+`systemctl stop` and `systemctl restart` send SIGTERM, which Kanary handles like Ctrl-C: sources and outputs are terminated, and events still waiting in an output's queue get up to 5 seconds to go out. systemd's default stop timeout (90 seconds) is more than enough.
+
 In `systemd` deployments, it is important to pin the exact Python environment
 that provides `kanary`. Install any extra modules into that same environment.
 Using a dedicated Kanary virtual environment is usually easier to manage than

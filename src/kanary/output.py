@@ -61,4 +61,5 @@ def event_record(event: AlertEvent) -> dict[str, Any]:
         "occurred_at": event.occurred_at.isoformat(),
         "active_since": event.active_since.isoformat() if event.active_since else None,
         "acked_by": event.acked_by,
+        "runbook": event.runbook,
     }

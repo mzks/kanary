@@ -2,6 +2,7 @@
 # kind: rule
 # level: basic
 # summary: Raise severity step by step as a value crosses several thresholds (ThresholdRule).
+# summary-ja: 値が複数の閾値を越えるたびに severity を段階的に上げる (ThresholdRule)。
 import kanary
 
 
@@ -15,7 +16,7 @@ import kanary
 )
 class TemplateThreshold(kanary.ThresholdRule):
     description = "TODO: describe what each level means."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # "high": fire when value >= threshold.  "low": fire when value <= threshold.
     direction = "high"

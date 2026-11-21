@@ -2,6 +2,7 @@
 # kind: output
 # level: basic
 # summary: Append every alert event to a JSON Lines file (FileOutput).
+# summary-ja: すべての alert event を JSON Lines の file に追記する (FileOutput)。
 import kanary
 
 

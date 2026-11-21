@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Run a command on a remote host over ssh, e.g. disk, load, or GPU status (SSHCommandSource).
+# summary-ja: ssh で別の host の command を実行する。例: disk、load、GPU の状態 (SSHCommandSource)。
 import kanary
 
 

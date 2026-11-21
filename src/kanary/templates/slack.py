@@ -2,6 +2,7 @@
 # kind: output
 # level: basic
 # summary: Post alerts to a Slack channel through an incoming webhook (SlackOutput).
+# summary-ja: incoming webhook で Slack の channel に alert を投稿する (SlackOutput)。
 import os
 
 import kanary
@@ -9,7 +10,7 @@ import kanary
 
 @kanary.output(
     output_id="template.slack",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     # include_tags=["detector"],
 )
 class TemplateSlack(kanary.SlackOutput):

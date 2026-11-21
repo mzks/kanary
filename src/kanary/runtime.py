@@ -9,9 +9,10 @@ import hashlib
 import inspect
 import logging
 from pathlib import Path
+import signal
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .api import ControlAPI, PollUnavailableError
 from .constants import DEFAULT_VIEWER_TITLE
@@ -152,14 +153,35 @@ class EngineRuntime:
         logger.info("engine stopped")
 
     def run_forever(self) -> None:
-        self.start()
+        """Run until Ctrl-C (SIGINT) or SIGTERM (systemctl stop, kill), then stop cleanly.
+
+        Both end the same way: sources and outputs are terminated, and queued
+        output events get SHUTDOWN_DRAIN_SECONDS to go out.
+        """
+        restore = self._stop_on_sigterm()
         try:
-            while not self._stop_event.is_set():
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            pass
+            self.start()
+            try:
+                while not self._stop_event.is_set():
+                    self._stop_event.wait(0.5)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                self.stop()
         finally:
-            self.stop()
+            restore()
+
+    def _stop_on_sigterm(self) -> Callable[[], None]:
+        """Turn SIGTERM into a clean stop; returns a function that puts the old handler back."""
+        if threading.current_thread() is not threading.main_thread():
+            return lambda: None  # signal handlers can only be set from the main thread
+
+        def stop(signum: int, frame: Any) -> None:
+            logger.info("received SIGTERM, stopping")
+            self._stop_event.set()
+
+        previous = signal.signal(signal.SIGTERM, stop)
+        return lambda: signal.signal(signal.SIGTERM, previous)
 
     def _watch_reload_loop(self) -> None:
         while not self._stop_event.wait(self.config.reload_interval):
@@ -417,9 +439,9 @@ class EngineRuntime:
                 if metadata is not None:
                     self._loaded_metadata[(plugin_type, plugin_id)] = metadata
             for plugin_id in selected_ids:
-                status = self.engine._plugin_status(plugin_type, plugin_id)
                 if plugin_id in removed_ids:
-                    continue
+                    continue  # its status is gone; asking for it would create a new one
+                status = self.engine._plugin_status(plugin_type, plugin_id)
                 status.loaded = plugin_id in self._plugin_ids_for_type(self.engine.plugin_states, plugin_type)
                 status.dirty_reason = None
                 status.definition_file = self._discovered_metadata.get((plugin_type, plugin_id), self._loaded_metadata.get((plugin_type, plugin_id), None)).definition_file if self._discovered_metadata.get((plugin_type, plugin_id), self._loaded_metadata.get((plugin_type, plugin_id), None)) is not None else status.definition_file

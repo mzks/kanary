@@ -2,6 +2,7 @@
 # kind: rule
 # level: basic
 # summary: Fire when a value leaves [low, high], or enters a forbidden band (RangeRule).
+# summary-ja: 値が [low, high] を外れたとき、または禁止帯に入ったときに発報する (RangeRule)。
 import kanary
 
 
@@ -17,7 +18,7 @@ import kanary
 )
 class TemplateRange(kanary.RangeRule):
     description = "TODO: describe the normal range."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     # The range [low, high]. Set either one to None for a one-sided check; never both.
     low = 10.0

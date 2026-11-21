@@ -2,13 +2,14 @@
 # kind: output
 # level: basic
 # summary: Send alert events by e-mail over SMTP (MailOutput).
+# summary-ja: SMTP で alert event を mail で送る (MailOutput)。
 import kanary
 
 
 @kanary.output(
     output_id="template.mail",
     # include_tags=["detector"],
-    minimum_severity="ERROR",
+    minimum_severity=kanary.ERROR,
 )
 class TemplateMail(kanary.MailOutput):
     description = "TODO: describe who receives these mails."
@@ -16,7 +17,7 @@ class TemplateMail(kanary.MailOutput):
     smtp_host = "smtp.example.org"  # TODO
     smtp_port = 587
     use_starttls = True
-    smtp_timeout_seconds = 10.0
+    smtp_timeout = 10.0
     smtp_username = None  # None: send without logging in
 
     sender = "kanary@example.org"  # TODO

@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Poll an external system on an interval or a cron schedule.
+# summary-ja: 外部の system を一定間隔か cron の schedule で poll する。
 import kanary
 
 

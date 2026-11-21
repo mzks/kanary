@@ -2,6 +2,7 @@
 # kind: rule
 # level: advanced
 # summary: Combine inputs from several sources in one rule (e.g. compare two sensors).
+# summary-ja: 複数の source の input を 1 つの rule で組み合わせる（例: 2 つの sensor を比べる）。
 import kanary
 
 
@@ -19,7 +20,7 @@ import kanary
 )
 class TemplateMultiSource:
     description = "TODO: describe what disagreement between the sources means."
-    # runbook = "TODO: what the operator should check first."
+    # runbook = "TODO: what to check first, or a link"  # also in the notifications
 
     max_difference = 2.0
     max_age = 5 * kanary.minute

@@ -2,12 +2,13 @@
 # kind: output
 # level: advanced
 # summary: Escalate over time - notify now, again after a delay, cancel on ack (OutputFollowups).
+# summary-ja: 時間とともに通知を広げる: すぐ通知し、時間を置いて再通知し、ack で取り消す (OutputFollowups)。
 import kanary
 
 
 @kanary.output(
     output_id="template.followups",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     # Receive SILENCED / SUPPRESSED too, so pending followups can be cancelled.
     exclude_states=[],
 )

@@ -2,6 +2,7 @@
 
 from email.message import EmailMessage
 import html
+import re
 import smtplib
 
 from ..models import AlertEvent
@@ -23,7 +24,7 @@ class MailOutput(Output):
     smtp_port: int = 587
     smtp_username: str | None = None
     smtp_password: str | None = None
-    smtp_timeout_seconds: float = 10.0
+    smtp_timeout: float = 10.0
     use_starttls: bool = True
     sender: str | None = None
     recipients: list[str] = []
@@ -54,7 +55,7 @@ class MailOutput(Output):
 
     def send_mail(self, message: EmailMessage) -> None:
         """Send a finished mail over SMTP."""
-        with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=self.smtp_timeout_seconds) as smtp:
+        with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=self.smtp_timeout) as smtp:
             if self.use_starttls:
                 smtp.starttls()
             if self.smtp_username:
@@ -126,7 +127,7 @@ class MailOutput(Output):
             title = f'<a href="{escape(notice.link)}" style="color:inherit;text-decoration:none">{title}</a>'
         rows = "".join(
             f'<tr><th style="text-align:left;vertical-align:top;padding:4px 16px 4px 0;color:#666;font-weight:600">{escape(label)}</th>'
-            f'<td style="padding:4px 0;white-space:pre-wrap">{escape(value)}</td></tr>'
+            f'<td style="padding:4px 0;white-space:pre-wrap">{_linked(value)}</td></tr>'
             for label, value in notice.fields
         )
         message = f'<div style="margin-top:6px;font-size:15px">{escape(notice.message)}</div>' if notice.message else ""
@@ -141,3 +142,18 @@ class MailOutput(Output):
             f'<div style="margin-top:16px;color:#888;font-size:12px">KANARY · {escape(notice.time)}{link}</div>'
             "</div></body></html>"
         )
+
+
+_URL = re.compile(r"https?://[^\s<>\"']+")
+
+
+def _linked(text: str) -> str:
+    """HTML-escaped text with its URLs as links (as the viewer shows a runbook)."""
+    parts, cursor = [], 0
+    for match in _URL.finditer(text):
+        url = match.group(0).rstrip(").,;!?")
+        parts.append(html.escape(text[cursor:match.start()]))
+        parts.append(f'<a href="{html.escape(url)}">{html.escape(url)}</a>')
+        cursor = match.start() + len(url)
+    parts.append(html.escape(text[cursor:]))
+    return "".join(parts)

@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Subscribe to MQTT topics and evaluate each message as soon as it arrives (MQTTSource; needs paho-mqtt).
+# summary-ja: MQTT の topic を subscribe し、message が届いた瞬間に評価する (MQTTSource。paho-mqtt が必要)。
 import os
 
 import kanary

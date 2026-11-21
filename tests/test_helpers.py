@@ -376,7 +376,7 @@ class BufferTest(unittest.TestCase):
 
     def test_size_and_age_limits(self):
         self.assertEqual(filled_buffer("p", range(10), size=3)["p"].values, [7, 8, 9])
-        self.assertEqual(filled_buffer("p", range(10), seconds=120)["p"].values, [7, 8, 9])
+        self.assertEqual(filled_buffer("p", range(10), max_age=120)["p"].values, [7, 8, 9])
         with self.assertRaisesRegex(ValueError, "size must be a positive integer"):
             kanary.Buffer(size=0)
 
@@ -422,10 +422,10 @@ class BufferAddTest(unittest.TestCase):
         self.assertNotIn("presure", buffer)
 
     def test_printing_shows_what_is_kept(self):
-        buffer = filled_buffer("p", [1.0, 2.5], size=8, seconds=3600)
+        buffer = filled_buffer("p", [1.0, 2.5], size=8, max_age=3600)
         self.assertEqual(
             str(buffer),
-            "Buffer (at most 8 samples per input, none older than 3600 s): 1 inputs\n"
+            "Buffer (at most 8 samples per input, none older than 1 h): 1 inputs\n"
             "  p: 2 samples, 2026-11-18T12:00:00+00:00 .. 2026-11-18T12:01:00+00:00, last 2.5",
         )
         self.assertEqual(repr(buffer), "Buffer(p: 2)")
@@ -1322,7 +1322,7 @@ class SQLTest(HelperTestCase):
             _, result = poll(kanary.SQLWideSource, table="env", columns={"t": "temperature"})
             self.assertEqual({m.name: m.value for m in result.measurements}, {"t": 21.5})
             long, result = poll(kanary.SQLLongSource, table="samples", name_column="metric", value_column="val",
-                                lookback_seconds=3600)
+                                lookback=3600)
             self.assertEqual({m.name: m.value for m in result.measurements}, {"a": 2.0, "b": 5.0})
             self.assertIn('JOIN (SELECT "metric", MAX("observed_at")', long.build_query()[0])
         with self.assertRaisesRegex(ValueError, "not a plain table or column name"):
@@ -1389,6 +1389,7 @@ class NoticeTest(unittest.TestCase):
             rule_id="oil.temperature", state=changes.get("state", kanary.FIRING), severity=changes.get("severity", kanary.ERROR),
             tags=("oil",), owner="cryo", message=changes.get("message", "value=95 out of range"),
             payload={"values": {"oil:temperature": 95.0}}, active_since=changes.get("active_since"),
+            runbook=changes.get("runbook"),
         )
         return kanary.AlertEvent(
             rule_id="oil.temperature", previous_state=changes.get("previous_state", kanary.OK),
@@ -1405,10 +1406,20 @@ class NoticeTest(unittest.TestCase):
         self.assertEqual(dict(notice.fields)["Values"], "oil:temperature = 95")
         self.assertEqual(notice.text, "[ERROR] FIRING oil.temperature: value=95 out of range")
 
+    def test_the_rules_runbook_goes_with_its_notifications(self):
+        runbook = "Check the chiller: https://slowdash.example.org/oil?panel=1."
+        event = self.event(runbook=runbook)
+        self.assertEqual(kanary.describe(event).fields[-1], ("Runbook", runbook))
+        self.assertEqual(kanary.event_record(event)["runbook"], runbook)
+        html = type("M", (kanary.MailOutput,), {"sender": "k@example.org"})().html(event)
+        self.assertIn('<a href="https://slowdash.example.org/oil?panel=1">https://slowdash.example.org/oil?panel=1</a>.', html)
+        self.assertNotIn("Runbook", [label for label, _ in kanary.describe(self.event()).fields])
+
     def test_states_and_changes(self):
         recovered = kanary.describe(self.event(state=kanary.OK, previous_state=kanary.FIRING, previous_severity=kanary.ERROR))
         self.assertEqual((recovered.headline, recovered.color), ("✅ OK oil.temperature", 0x2ECC71))
         self.assertEqual(dict(recovered.fields)["Severity"], "was ERROR")
+        self.assertEqual(recovered.text, "OK oil.temperature: value=95 out of range")  # no "[ERROR]" on a recovery
         silenced = kanary.describe(self.event(state=kanary.SILENCED, previous_state=kanary.FIRING))
         self.assertEqual((silenced.symbol, silenced.color_hex), ("🔕", "#95A5A6"))
         escalated = kanary.describe(self.event(
@@ -1467,6 +1478,14 @@ class NoticeTest(unittest.TestCase):
         self.assertIn("&lt;b&gt;hot&lt;/b&gt;", page)
         plain = type("P", (kanary.MailOutput,), {"sender": "k@example.org", "html": lambda self, event: None})()
         self.assertFalse(plain.message(self.event()).is_multipart())
+
+
+class BrokenTemplateTest(unittest.TestCase):
+    def test_a_broken_template_does_not_stop_kanary(self):
+        with mock.patch.object(kanary_main.scaffold, "load_templates", side_effect=ValueError("template header is missing: level")):
+            parser = kanary_main.build_parser()  # built on every start, also for `kanary run`
+            args = parser.parse_args(["run", "plugins"])
+        self.assertEqual(args.command, "run")
 
 
 class ReviewRegressionTest(HelperTestCase):

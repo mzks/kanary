@@ -2,12 +2,13 @@
 # kind: output
 # level: advanced
 # summary: Notify only when an alert is still active after a delay, like a "for" / fire_after (OutputFollowups).
+# summary-ja: 一定時間たっても alert が続いているときだけ通知する。"for" / fire_after に相当 (OutputFollowups)。
 import kanary
 
 
 @kanary.output(
     output_id="template.delayed",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     # Receive SILENCED / SUPPRESSED too, so a pending notification can be cancelled.
     exclude_states=[],
 )

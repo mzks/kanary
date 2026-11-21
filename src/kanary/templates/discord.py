@@ -2,6 +2,7 @@
 # kind: output
 # level: basic
 # summary: Post alerts to a Discord channel through a webhook (DiscordOutput).
+# summary-ja: webhook で Discord の channel に alert を投稿する (DiscordOutput)。
 import os
 
 import kanary
@@ -9,7 +10,7 @@ import kanary
 
 @kanary.output(
     output_id="template.discord",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class TemplateDiscord(kanary.DiscordOutput):
     description = "TODO: name the channel."

@@ -198,7 +198,7 @@ Specifying `exclude_states` in a decorator replaces the defaults. Set `exclude_s
 A Rule can override its decorator's default severity for each evaluation with `kanary.firing(..., severity=...)` and similar helpers. For example, separate Outputs can send WARN and above to the owner, ERROR and above to the on-call group, and CRITICAL to a mailing list.
 
 ```python
-@kanary.output(output_id="on-call", minimum_severity="ERROR")
+@kanary.output(output_id="on-call", minimum_severity=kanary.ERROR)
 class OnCallOutput:
     def emit(self, event):
         ...
@@ -223,7 +223,7 @@ from kanary import hour as h
 
 @kanary.output(
     output_id="operations-followups",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
     exclude_states=[],
 )
 class OperationsFollowupOutput:

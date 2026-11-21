@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Mirror alerts from another Kanary node (RemoteKanarySource + import_remote_alarms).
+# summary-ja: 別の Kanary node の alert を映す (RemoteKanarySource + import_remote_alarms)。
 import kanary
 
 
@@ -10,7 +11,7 @@ class TemplateRemote(kanary.RemoteKanarySource):
     description = "TODO: describe the remote Kanary node."
 
     base_url = "http://remote-kanary.example:8000"  # TODO
-    timeout_seconds = 5.0
+    timeout = 5.0
     # url = "http://remote-kanary.example:8000/export-alerts"  # full URL instead of base_url
 
 

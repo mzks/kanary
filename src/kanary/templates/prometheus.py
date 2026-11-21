@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Read series from a Prometheus /metrics page, e.g. node_exporter or an application's metrics (PrometheusSource).
+# summary-ja: Prometheus の /metrics page から series を読む。例: node_exporter や application の metrics (PrometheusSource)。
 import kanary
 
 

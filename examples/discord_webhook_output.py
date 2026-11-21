@@ -8,7 +8,7 @@ import kanary
 @kanary.output(
     output_id="discord",
     include_tags=["sqlite"],
-    minimum_severity="ERROR",
+    minimum_severity=kanary.ERROR,
 )
 class DiscordOutput:
     description = "Send sqlite alerts at ERROR or higher to a Discord webhook."

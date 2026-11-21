@@ -202,7 +202,7 @@ kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 
 ### 履歴を持つ（kanary.Buffer）
 
-10 分平均や傾向など、最近の sample から計算した値を出すには、`init()` で `kanary.Buffer` を作り（`self.buffer = kanary.Buffer(size=1024, seconds=kanary.hour)`）、`poll()` で生の値を追加して（`self.buffer.add(("pressure", value))`。`kanary.inputs()` と同じ形）、`self.buffer["name"]` から計算した input を返します。例: `self.buffer["pressure"].window(600).mean()`。helper class を含むどの source でも使えます（`self.buffer.add(super().poll())`）。`kanary new --show buffered` を参照してください。
+10 分平均や傾向など、最近の sample から計算した値を出すには、`init()` で `kanary.Buffer` を作り（`self.buffer = kanary.Buffer(size=1024, max_age=3 * kanary.hour)`）、`poll()` で生の値を追加して（`self.buffer.add(("pressure", value))`。`kanary.inputs()` と同じ形）、`self.buffer["name"]` から計算した input を返します。例: `self.buffer["pressure"].window(10 * kanary.minute).mean()`。helper class を含むどの source でも使えます（`self.buffer.add(super().poll())`）。`kanary new --show buffered` を参照してください。
 
 ### Remote Kanary node の読み込み
 
@@ -266,7 +266,7 @@ kanary new --show ping
 ```
 
 - 一覧は BASIC（よく使う出発点で、helper class 1 つでほぼ設定だけ: `command`、`ping`、`tcp`、`http-status`、`file`、`http-json`、`prometheus`、`sql-wide`、`sql-long`、`http-push`、`mqtt`、`plugin-health`、`range`、`threshold`、`expected`、`stale`、`webhook`、`slack`、`mattermost`、`discord`、`file-log`、`mail`、素の `source` / `rule` / `output`）と ADVANCED（使う場面が限られる helper、独自 logic、複数機能の組み合わせ: `ssh`、`log-count`、`push`、`buffered`、`trend`、`spike`、`frozen`、`remote`、`rate`、`difference`、`k-of-n`、`aggregate`、`count`、`multi-source`、`command-output`、`followups`、`delayed`、`quiet-hours`、`oncall`）に分かれています。
-- `--show TEMPLATE` は何も書き出さずに template を表示します。全 template を目次付きで 1 ページにまとめたものが [docs/templates.md](templates.md) にあります。
+- `--show TEMPLATE` は何も書き出さずに template を表示します。全 template を目次付きで 1 ページにまとめたものが [docs/templates_ja.md](templates_ja.md) にあります。
 - template の実 file は `src/kanary/templates/` にあります。
 - `-o` には file か、末尾 `/` の directory を指定します。省略時は current directory の `<plugin_id>.py` です。PLUGIN_ID を `.py` で終えるとそれが file 名になり、拡張子を除いた部分が id になります。
 - 既存 file を黙って上書きすることはありません。`-a` で追記（import は統合）、`--force` で上書きします。

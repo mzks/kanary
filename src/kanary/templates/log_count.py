@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Count new log lines matching regular expressions since the last poll (LogCountSource).
+# summary-ja: 前回の poll 以降に増えた log の行のうち、正規表現に一致するものを数える (LogCountSource)。
 import kanary
 
 

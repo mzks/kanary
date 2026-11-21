@@ -2,6 +2,7 @@
 # kind: source
 # level: advanced
 # summary: Keep recent history in a kanary.Buffer and publish window averages and minimums.
+# summary-ja: 最近の履歴を kanary.Buffer に貯め、window の平均や最小値を出す。
 import kanary
 
 
@@ -10,9 +11,10 @@ class TemplateBuffered(kanary.Source):
     description = "TODO: describe the raw value and the derived inputs."
 
     def init(self):
-        # Per input: at most size samples, none older than seconds (counted back from
-        # the newest sample). Keep enough for the longest window below.
-        self.buffer = kanary.Buffer(size=1024, seconds=1 * kanary.hour)
+        # Per input: at most size samples, none older than max_age (counted back from
+        # the newest sample); the first limit reached drops the oldest. Keep enough for
+        # the longest window below.
+        self.buffer = kanary.Buffer(size=1024, max_age=1 * kanary.hour)
 
     def poll(self):
         reading = 1.0  # TODO: read the raw value (a device, a file, an API)

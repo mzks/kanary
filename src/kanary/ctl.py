@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import difflib
+from fnmatch import fnmatchcase
 from importlib import metadata as importlib_metadata
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
+import textwrap
 from datetime import datetime, timezone
 import tomllib
+import unicodedata
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 SEVERITY_LABELS = {
@@ -29,6 +35,7 @@ ANSI_COLORS = {
     "ACKED": "\033[34m",
     "SILENCED": "\033[36m",
     "SUPPRESSED": "\033[90m",
+    "WAITING": "\033[90m",
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -64,9 +71,14 @@ def main() -> int:
     subparsers.add_parser("help", help="Show this help message")
     subparsers.add_parser("health", help="Show runtime health")
 
-    alerts_parser = subparsers.add_parser("alerts", help="Show current alerts")
+    alerts_parser = subparsers.add_parser("alerts", help="Show current alerts, or one in full")
+    alerts_parser.add_argument(
+        "rule_id", nargs="?", metavar="RULE_ID",
+        help="Show this alert in full, with its recent history (a glob such as 'oil.*' shows each match)",
+    )
     alerts_parser.add_argument("--json", action="store_true", help="Print raw JSON")
     alerts_parser.add_argument("--filter", help="Filter alerts by text or glob")
+    alerts_parser.add_argument("--wide", action="store_true", help="Show every column and cut nothing")
 
     history_parser = subparsers.add_parser("history", help="Show persisted alert history for a rule")
     history_parser.add_argument("rule_id")
@@ -74,9 +86,15 @@ def main() -> int:
     history_parser.add_argument("--limit", type=int, help="Show only the most recent N entries in each history section")
     history_parser.add_argument("--since", help="Show only entries at or after this ISO timestamp")
 
-    plugins_parser = subparsers.add_parser("plugins", help="Show source/rule/output plugin status")
+    plugins_parser = subparsers.add_parser("plugins", help="Show source/rule/output plugin status, or one in full")
+    plugins_parser.add_argument(
+        "plugin_id", nargs="?", metavar="PLUGIN_ID",
+        help="Show this plugin in full (a glob such as 'check.*' shows each match)",
+    )
     plugins_parser.add_argument("--json", action="store_true", help="Print raw JSON")
     plugins_parser.add_argument("--filter", help="Filter plugins by text or glob")
+    plugins_parser.add_argument("--wide", action="store_true", help="Show every column and cut nothing")
+    plugins_parser.add_argument("--traceback", action="store_true", help="With PLUGIN_ID: also print where the last error happened")
 
     silences_parser = subparsers.add_parser("silences", help="Show configured silences")
     silences_parser.add_argument("--json", action="store_true", help="Print raw JSON")
@@ -144,7 +162,16 @@ def main() -> int:
 
     test_fire_parser = subparsers.add_parser("test-fire", help="Send a synthetic event through the output pipeline")
     test_fire_parser.add_argument("rule_id")
-    test_fire_parser.add_argument("--state", required=True)
+    fire_input = test_fire_parser.add_mutually_exclusive_group(required=True)
+    fire_input.add_argument("--state", help="The state of the event: FIRING, OK, ...")
+    fire_input.add_argument(
+        "--evaluation-file", metavar="PATH",
+        help="Send what test-evaluate judged (its output, saved to a file): state, severity, message, values",
+    )
+    fire_input.add_argument(
+        "--evaluation-stdin", action="store_true",
+        help="The same from stdin: kanaryctl test-evaluate RULE ... | kanaryctl test-fire RULE --evaluation-stdin",
+    )
     test_fire_parser.add_argument("--message")
     test_fire_parser.add_argument("--reason")
     test_fire_parser.add_argument("--now")
@@ -163,9 +190,11 @@ def main() -> int:
             return 0
 
         if args.command == "alerts":
-            payload = fetch_json(f"{args.base_url}/alerts")
+            alerts = fetch_json(f"{args.base_url}/alerts").get("alerts", [])
+            plugins = fetch_json(f"{args.base_url}/plugins").get("plugins", [])
+            rows = alerts + waiting_rule_rows(alerts, plugins)
             if args.filter:
-                payload["alerts"] = [alert for alert in payload.get("alerts", []) if matches_row_filter(
+                rows = [alert for alert in rows if matches_row_filter(
                     [
                         alert.get("rule_id"),
                         alert.get("state"),
@@ -177,10 +206,23 @@ def main() -> int:
                     ],
                     args.filter,
                 )]
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            if args.rule_id:
+                matches = select_by_id(rows, "rule_id", args.rule_id)
+                if not matches:
+                    return report_unknown_id("alert", args.rule_id, [row["rule_id"] for row in rows])
+                if args.json:
+                    print(json.dumps({"alerts": matches}, ensure_ascii=False, indent=2))
+                    return 0
+                for index, alert in enumerate(matches):
+                    if index:
+                        print()
+                    history = fetch_json(f"{args.base_url}/history/{quote(alert['rule_id'], safe='')}")
+                    print_alert_detail(alert, apply_history_filters(history, since=None, limit=5))
+                return 0
+            if args.json:  # the API's alerts as they are: a rule without one has no row here
+                print(json.dumps({"alerts": [row for row in rows if row["state"] != WAITING]}, ensure_ascii=False, indent=2))
             else:
-                print_alerts(payload)
+                print_alerts({"alerts": rows}, width=None if args.wide else terminal_width(), wide=args.wide)
             return 0
 
         if args.command == "history":
@@ -205,10 +247,23 @@ def main() -> int:
                     ],
                     args.filter,
                 )]
+            if args.plugin_id:
+                plugins = payload.get("plugins", [])
+                matches = select_by_id(plugins, "plugin_id", args.plugin_id)
+                if not matches:
+                    return report_unknown_id("plugin", args.plugin_id, [plugin["plugin_id"] for plugin in plugins])
+                if args.json:
+                    print(json.dumps({"plugins": matches}, ensure_ascii=False, indent=2))
+                    return 0
+                for index, plugin in enumerate(matches):
+                    if index:
+                        print()
+                    print_plugin_detail(plugin, traceback=args.traceback)
+                return 0
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
-                print_plugins(payload)
+                print_plugins(payload, width=None if args.wide else terminal_width(), wide=args.wide)
             return 0
 
         if args.command == "silences":
@@ -337,11 +392,17 @@ def main() -> int:
             return 0
 
         if args.command == "test-fire":
+            evaluation = None
+            if args.evaluation_file:
+                evaluation = _parse_json_object(Path(args.evaluation_file).read_text(encoding="utf-8"), source=args.evaluation_file)
+            elif args.evaluation_stdin:
+                evaluation = _parse_json_object(sys.stdin.read(), source="stdin")
             payload = fetch_json(
                 f"{args.base_url}/test-fire/{args.rule_id}",
                 method="POST",
                 body={
                     "state": args.state,
+                    "evaluation": evaluation,
                     "message": args.message,
                     "reason": args.reason,
                     "now": args.now,
@@ -349,7 +410,10 @@ def main() -> int:
             )
             print(json.dumps(payload, ensure_ascii=False, indent=2))
             return 0
-    except (HTTPError, URLError) as exc:
+    except HTTPError as exc:
+        print(f"kanaryctl: {exc}{_error_detail(exc)}")
+        return 1
+    except URLError as exc:
         print(f"kanaryctl: {exc}")
         return 1
     except ValueError as exc:
@@ -410,93 +474,312 @@ def print_health(payload: dict) -> None:
     print(f"alert_count {payload.get('alert_count', 0)}")
 
 
-def print_alerts(payload: dict) -> None:
+WAITING = "WAITING"  # a rule with no alert yet: not evaluated since KANARY started (and none stored)
+RESTORED_NOTE = "* restored: the state KANARY stopped with; not evaluated since it started"
+# Alerting first, as the viewer lists them.
+STATE_ORDER = {"FIRING": 0, "ACKED": 1, "SILENCED": 2, "SUPPRESSED": 3, "OK": 4, WAITING: 5}
+
+
+def waiting_rule_rows(alerts: list[dict], plugins: list[dict]) -> list[dict]:
+    """A row for each rule without an alert, so that every rule is listed."""
+    known = {alert["rule_id"] for alert in alerts}
+    rows = []
+    for plugin in plugins:
+        if plugin.get("type") != "rule" or plugin["plugin_id"] in known:
+            continue
+        failed = plugin.get("state") == "FAILED" and plugin.get("last_error")
+        rows.append({
+            "rule_id": plugin["plugin_id"],
+            "state": WAITING,
+            "severity": plugin.get("severity"),
+            "owner": plugin.get("owner"),
+            "tags": list(plugin.get("tags") or []),
+            "message": f"evaluate() failed: {plugin['last_error']}" if failed else "not evaluated yet",
+            "matched_outputs": list(plugin.get("matched_outputs") or []),
+            "inputs": list(plugin.get("inputs") or []),
+            "description": plugin.get("description"),
+            "runbook": plugin.get("runbook"),
+            "definition_file": plugin.get("definition_file"),
+            "acked_by": None,
+            "active_silence_ids": [],
+            "payload": {},
+        })
+    return rows
+
+
+def select_by_id(rows: list[dict], key: str, pattern: str) -> list[dict]:
+    """The rows whose id is ``pattern``, or matches it when it is a glob."""
+    if any(char in pattern for char in "*?["):
+        return [row for row in rows if fnmatchcase(row[key], pattern)]
+    return [row for row in rows if row[key] == pattern]
+
+
+def report_unknown_id(kind: str, pattern: str, known: list[str]) -> int:
+    close = difflib.get_close_matches(pattern, known, n=3, cutoff=0.8)
+    hint = f"; did you mean {' or '.join(repr(item) for item in close)}?" if close else ""
+    print(f"kanaryctl: no {kind} {pattern!r}{hint}")
+    return 1
+
+
+def _error_detail(exc: HTTPError) -> str:
+    """The API's own reason for an error answer, when it gave one."""
+    try:
+        body = json.loads(exc.read().decode() or "{}")
+    except (ValueError, OSError):
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    return f": {error}" if error else ""
+
+
+# -- tables -------------------------------------------------------------------
+
+def terminal_width() -> int | None:
+    """Columns to fit in, or None when the output is not a terminal (piped: cut nothing)."""
+    if not sys.stdout.isatty():
+        return None
+    return shutil.get_terminal_size((120, 24)).columns
+
+
+def text_width(text: str) -> int:
+    """Columns the text takes in a terminal: wide (CJK) characters take two."""
+    return sum(
+        0 if unicodedata.combining(char) else 2 if unicodedata.east_asian_width(char) in "WF" else 1
+        for char in text
+    )
+
+
+def cut_text(text: str, width: int) -> str:
+    """text in at most ``width`` columns, ending in "…" when cut."""
+    if text_width(text) <= width:
+        return text
+    kept, used = [], 0
+    for char in text:
+        size = text_width(char)
+        if used + size > width - 1:
+            break
+        kept.append(char)
+        used += size
+    return "".join(kept) + "…"
+
+
+def render_table(headers: list[str], rows: list[list[tuple[str, str]]], *, colored: bool, width: int | None) -> list[str]:
+    """Lines of a table; each cell is (text, color key). The last column is cut to ``width``."""
+    widths = [max(text_width(header), *(text_width(row[index][0]) for row in rows)) for index, header in enumerate(headers[:-1])]
+    used = sum(widths) + 2 * len(widths)
+    last_width = None if width is None else max(20, width - used)
+
+    def line(cells: list[tuple[str, str]]) -> str:
+        parts = []
+        for (text, key), column_width in zip(cells[:-1], widths):
+            parts.append(colorize(text, key, colored=colored) + " " * (column_width - text_width(text)))
+        last = " ".join(cells[-1][0].split()) if last_width is not None else cells[-1][0]
+        parts.append(colorize(cut_text(last, last_width) if last_width is not None else last, cells[-1][1], colored=colored))
+        return "  ".join(parts).rstrip()
+
+    header_line = line([(header, "") for header in headers])
+    rule_width = text_width(header_line) if width is None else min(width, max(text_width(header_line), used + 20))
+    return [header_line, "-" * rule_width, *(line(row) for row in rows)]
+
+
+def short_time(value: str | None, *, now: datetime | None = None) -> str:
+    """Local time: "13:45:10" today, "11-20 13:45" another day, "-" when unknown."""
+    moment = parse_iso_datetime(value)
+    if moment is None:
+        return "-"
+    local = moment.astimezone()
+    today = (now or datetime.now(timezone.utc)).astimezone().date()
+    return local.strftime("%H:%M:%S") if local.date() == today else local.strftime("%m-%d %H:%M")
+
+
+def print_alerts(payload: dict, *, width: int | None = None, wide: bool = False) -> None:
     alerts = payload.get("alerts", [])
     if not alerts:
         print("no alerts")
         return
 
-    colored = sys.stdout.isatty()
-    severities = [severity_label(alert.get("severity")) for alert in alerts]
-    rule_width = max(len("RULE ID"), *(len(alert["rule_id"]) for alert in alerts))
-    state_width = max(len("STATE"), *(len(alert["state"]) for alert in alerts))
-    severity_width = max(len("SEV"), *(len(label) for label in severities))
-    outputs_width = max(len("OUTPUTS"), *(len(", ".join(alert.get("matched_outputs", [])) or "-") for alert in alerts))
-    file_width = max(len("FILE"), *(len(alert.get("definition_file") or "-") for alert in alerts))
-    ack_width = max(len("ACKED BY"), *(len(alert.get("acked_by") or "-") for alert in alerts))
-    silence_width = max(len("SILENCES"), *(len(", ".join(alert.get("active_silence_ids", [])) or "-") for alert in alerts))
-
-    header = (
-        f"{'RULE ID':<{rule_width}}  "
-        f"{'STATE':<{state_width}}  "
-        f"{'SEV':<{severity_width}}  "
-        f"{'ACKED BY':<{ack_width}}  "
-        f"{'SILENCES':<{silence_width}}  "
-        f"{'OUTPUTS':<{outputs_width}}  "
-        f"{'FILE':<{file_width}}  "
-        f"MESSAGE"
-    )
-    print(header)
-    print("-" * len(header))
-    for alert, severity in zip(alerts, severities):
-        message = alert.get("message") or ""
+    headers = ["RULE ID", "STATE", "SEV", "ACKED BY", "SILENCES", *(["OUTPUTS", "FILE"] if wide else []), "MESSAGE"]
+    rows = []
+    for alert in sorted(alerts, key=lambda row: (STATE_ORDER.get(row["state"], len(STATE_ORDER)), row["rule_id"])):
         state = alert["state"]
-        outputs = ", ".join(alert.get("matched_outputs", [])) or "-"
-        acked_by = alert.get("acked_by") or "-"
-        silences = ", ".join(alert.get("active_silence_ids", [])) or "-"
-        definition_file = alert.get("definition_file") or "-"
-        rendered_state = colorize(state, state, colored=colored)
-        severity_key = severity if state != "OK" else ""
-        rendered_severity = colorize(severity, severity_key, colored=colored)
-        print(
-            f"{alert['rule_id']:<{rule_width}}  "
-            f"{rendered_state:<{state_width + color_padding(rendered_state, state)}}  "
-            f"{rendered_severity:<{severity_width + color_padding(rendered_severity, severity)}}  "
-            f"{acked_by:<{ack_width}}  "
-            f"{silences:<{silence_width}}  "
-            f"{outputs:<{outputs_width}}  "
-            f"{definition_file:<{file_width}}  "
-            f"{message}"
-        )
+        severity = severity_label(alert.get("severity"))
+        cells = [
+            (alert["rule_id"], ""),
+            (state + ("*" if alert.get("restored") else ""), state),
+            (severity, severity if state not in ("OK", WAITING) else ""),
+            (alert.get("acked_by") or "-", ""),
+            (", ".join(alert.get("active_silence_ids", [])) or "-", ""),
+        ]
+        if wide:
+            cells.append((", ".join(alert.get("matched_outputs", [])) or "-", ""))
+            cells.append((alert.get("definition_file") or "-", ""))
+        cells.append((alert.get("message") or "", ""))
+        rows.append(cells)
+    for line in render_table(headers, rows, colored=sys.stdout.isatty(), width=width):
+        print(line)
+    if any(alert.get("restored") for alert in alerts):
+        print(RESTORED_NOTE)
 
 
-def print_plugins(payload: dict) -> None:
+def print_plugins(payload: dict, *, width: int | None = None, wide: bool = False) -> None:
     plugins = payload.get("plugins", [])
     if not plugins:
         print("no plugins")
         return
 
-    colored = sys.stdout.isatty()
-    type_width = max(len("TYPE"), *(len(plugin["type"]) for plugin in plugins))
-    plugin_width = max(len("PLUGIN"), *(len(plugin["plugin_id"]) for plugin in plugins))
-    state_width = max(len("STATE"), *(len(plugin["state"]) for plugin in plugins))
+    headers = ["TYPE", "PLUGIN", "STATE", "RUNS", "UPDATED", *(["FILE"] if wide else []), "LAST ERROR"]
     run_width = max(len("RUNS"), *(len(str(plugin["run_count"])) for plugin in plugins))
-    updated_width = max(len("UPDATED"), *(len(plugin.get("last_updated_at") or "-") for plugin in plugins))
-    file_width = max(len("FILE"), *(len(plugin.get("definition_file") or "-") for plugin in plugins))
-
-    header = (
-        f"{'TYPE':<{type_width}}  "
-        f"{'PLUGIN':<{plugin_width}}  "
-        f"{'STATE':<{state_width}}  "
-        f"{'RUNS':>{run_width}}  "
-        f"{'UPDATED':<{updated_width}}  "
-        f"{'FILE':<{file_width}}  "
-        f"LAST ERROR"
-    )
-    print(header)
-    print("-" * len(header))
+    rows = []
     for plugin in plugins:
         state = plugin["state"]
-        rendered_state = colorize(state, state.upper(), colored=colored)
-        print(
-            f"{plugin['type']:<{type_width}}  "
-            f"{plugin['plugin_id']:<{plugin_width}}  "
-            f"{rendered_state:<{state_width + color_padding(rendered_state, state)}}  "
-            f"{plugin['run_count']:>{run_width}}  "
-            f"{(plugin.get('last_updated_at') or '-'): <{updated_width}}  "
-            f"{(plugin.get('definition_file') or '-'): <{file_width}}  "
-            f"{plugin.get('last_error') or ''}"
-        )
+        cells = [
+            (plugin["type"], ""),
+            (plugin["plugin_id"], ""),
+            (state, state.upper()),
+            (f"{plugin['run_count']:>{run_width}}", ""),
+            (short_time(plugin.get("last_updated_at")), ""),
+        ]
+        if wide:
+            cells.append((plugin.get("definition_file") or "-", ""))
+        cells.append((plugin.get("last_error") or "", ""))
+        rows.append(cells)
+    for line in render_table(headers, rows, colored=sys.stdout.isatty(), width=width):
+        print(line)
+
+
+# -- one item in full ------------------------------------------------------------
+
+def _print_fields(fields: list[tuple[str, object]]) -> None:
+    """"  label   value" lines; a value that is a list takes a line per item. Long lines wrap."""
+    width = terminal_width()
+    label_width = max(len(label) for label, _ in fields)
+    indent = " " * (2 + label_width + 2)
+    for label, value in fields:
+        items = [str(item) for item in value] if isinstance(value, list) else str(value).splitlines() or [""]
+        for index, item in enumerate(items or ["-"]):
+            head = f"  {label:<{label_width}}  " if index == 0 else indent
+            if width is None or text_width(head + item) <= width:
+                print(head + item)
+                continue
+            wrapped = textwrap.wrap(item, width=max(20, width - len(indent))) or [item]
+            print(head + wrapped[0])
+            for rest in wrapped[1:]:
+                print(indent + rest)
+
+
+def _when(value: str | None) -> str:
+    """"2026-11-21 13:45:10 (12 min ago)" in local time."""
+    moment = parse_iso_datetime(value)
+    if moment is None:
+        return "-"
+    seconds = (datetime.now(timezone.utc) - moment).total_seconds()
+    if seconds < 0:
+        ago = "from now"
+    elif seconds < 60:
+        ago = f"{int(seconds)} s ago"
+    elif seconds < 3600:
+        ago = f"{int(seconds // 60)} min ago"
+    elif seconds < 86400:
+        ago = f"{seconds / 3600:.1f} h ago"
+    else:
+        ago = f"{seconds / 86400:.1f} days ago"
+    return f"{moment.astimezone().strftime('%Y-%m-%d %H:%M:%S')} ({ago})"
+
+
+def print_alert_detail(alert: dict, history: dict | None = None) -> None:
+    state = alert["state"]
+    colored = sys.stdout.isatty()
+    severity = severity_label(alert.get("severity"))
+    print(f"{alert['rule_id']}  {colorize(state, state, colored=colored)}  "
+          f"{colorize(severity, severity if state not in ('OK', WAITING) else '', colored=colored)}")
+    fields: list[tuple[str, object]] = [("message", alert.get("message") or "-")]
+    if alert.get("restored"):
+        fields.append(("restored", "the state KANARY stopped with; not evaluated since it started"))
+    if state not in ("OK", WAITING):
+        fields.append(("active since", _when(alert.get("active_since"))))
+    if alert.get("acked_by"):
+        reason = f" ({alert['ack_reason']})" if alert.get("ack_reason") else ""
+        fields.append(("acked by", f"{alert['acked_by']} at {short_time(alert.get('acked_at'))}{reason}"))
+    silences = alert.get("active_silences") or []
+    if silences:
+        fields.append(("silences", [
+            f"{silence['silence_id']} until {short_time(silence.get('end_at'))} by {silence.get('created_by') or '-'}"
+            + (f": {silence['reason']}" if silence.get("reason") else "")
+            for silence in silences
+        ]))
+    values = (alert.get("payload") or {}).get("values")
+    if isinstance(values, dict) and values:
+        fields.append(("values", [f"{name} = {value}" for name, value in values.items()]))
+    if state == WAITING and alert.get("inputs"):
+        fields.append(("inputs", ", ".join(alert["inputs"])))
+    fields.append(("tags", ", ".join(alert.get("tags", [])) or "-"))
+    if alert.get("owner"):
+        fields.append(("owner", alert["owner"]))
+    fields.append(("outputs", ", ".join(alert.get("matched_outputs", [])) or "-"))
+    for key in ("description", "runbook"):
+        if alert.get(key):
+            fields.append((key, alert[key]))
+    fields.append(("file", alert.get("definition_file") or "-"))
+    if state != WAITING:
+        evaluated = alert.get("last_evaluated_at")
+        fields.append(("evaluated", "not since the start" if alert.get("restored") else short_time(evaluated)))
+    _print_fields(fields)
+
+    events = (history or {}).get("alert_events") or []
+    if events:
+        print(f"  history (newest {len(events)})")
+        for event in events:
+            line = (
+                f"    {short_time(event.get('occurred_at'))}  {event.get('previous_state') or '-'} -> "
+                f"{event['current_state']}  {severity_label(event.get('current_severity', event.get('severity')))}  "
+                f"{event.get('message') or ''}"
+            ).rstrip()
+            width = terminal_width()
+            print(cut_text(line, width) if width else line)
+
+
+def print_plugin_detail(plugin: dict, *, traceback: bool = False) -> None:
+    state = plugin["state"]
+    print(f"{plugin['type']} {plugin['plugin_id']}  {colorize(state, state.upper(), colored=sys.stdout.isatty())}")
+    fields: list[tuple[str, object]] = []
+    if plugin.get("description"):
+        fields.append(("description", plugin["description"]))
+    fields.append(("runs", (
+        f"{plugin['run_count']} (last {short_time(plugin.get('last_run_at'))}, "
+        f"success {short_time(plugin.get('last_success_at'))}, failure {short_time(plugin.get('last_failure_at'))})"
+    )))
+    fields.append(("last error", plugin.get("last_error") or "-"))
+    if plugin.get("warning"):
+        fields.append(("warning", plugin["warning"]))
+    if plugin.get("dirty_reason"):
+        fields.append(("changed", plugin["dirty_reason"]))
+    if plugin["type"] == "rule":
+        fields.append(("severity", severity_label(plugin.get("severity"))))
+        fields.append(("inputs", ", ".join(plugin.get("inputs") or []) or "-"))
+        fields.append(("sources", ", ".join(plugin.get("resolved_sources") or []) or "-"))
+        fields.append(("outputs", ", ".join(plugin.get("matched_outputs") or []) or "-"))
+        fields.append(("tags", ", ".join(plugin.get("tags") or []) or "-"))
+        for key in ("owner", "runbook"):
+            if plugin.get(key):
+                fields.append((key, plugin[key]))
+    elif plugin["type"] == "output":
+        routing = []
+        for key, label in (("include_tags", "include tags"), ("exclude_tags", "exclude tags"),
+                           ("exclude_states", "exclude states"), ("exclude_transitions", "exclude transitions")):
+            if plugin.get(key):
+                routing.append(f"{label}: {', '.join(plugin[key])}")
+        if plugin.get("minimum_severity") is not None:
+            routing.append(f"minimum severity: {plugin['minimum_severity']}")
+        fields.append(("routing", routing or ["every alert"]))
+        fields.append(("queue", f"{plugin.get('queued', 0)} queued, {plugin.get('dropped', 0)} dropped"))
+    fields.append(("file", plugin.get("definition_file") or "-"))
+    _print_fields(fields)
+    detail = plugin.get("last_error_detail")
+    if detail and traceback:
+        print("  traceback")
+        for line in str(detail).rstrip().splitlines():
+            print(f"    {line}")
+    elif detail:
+        print("  (--traceback shows where the last error happened)")
 
 
 def print_silences(payload: dict) -> None:
@@ -708,10 +991,6 @@ def colorize(text: str, key: str, *, colored: bool) -> str:
     if color is None:
         return text
     return f"{color}{text}{ANSI_RESET}"
-
-
-def color_padding(rendered: str, plain: str) -> int:
-    return len(rendered) - len(plain)
 
 
 if __name__ == "__main__":

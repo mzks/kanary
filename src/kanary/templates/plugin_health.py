@@ -2,6 +2,7 @@
 # kind: source
 # level: basic
 # summary: Watch this KANARY's own plugins: alert when a source, rule, or output fails, or an output drops events (PluginHealthSource).
+# summary-ja: オススメ! この KANARY 自身の plugin を見張る: source、rule、output の失敗や、output が event を捨てたときに発報する (PluginHealthSource)。
 import kanary
 
 
@@ -24,7 +25,7 @@ class TemplatePluginHealth(kanary.PluginHealthSource):
 )
 class PluginFailed:
     description = "A plugin of this KANARY failed; KANARY retries it or waits for a fix."
-    runbook = "kanaryctl plugins shows the error. Fix the plugin or its settings, then reload it."
+    runbook = "kanaryctl plugins PLUGIN_ID --traceback shows the whole error. Fix the plugin or its settings, then reload it."
 
     def evaluate(self, ctx):
         failed = [item for item in ctx.inputs() if item.value]

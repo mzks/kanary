@@ -2,6 +2,7 @@
 # kind: rule
 # level: basic
 # summary: Fire when a value is not the expected one, e.g. a status code, a 0/1 flag, or a state (ExpectedValueRule).
+# summary-ja: 値が期待どおりでないときに発報する。例: status code、0/1 の flag、状態 (ExpectedValueRule)。
 import kanary
 
 

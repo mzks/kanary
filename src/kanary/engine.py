@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 import dataclasses
 from dataclasses import dataclass
@@ -15,7 +15,7 @@ from typing import Callable
 
 from .helpers.buffer import discarding_changes
 from .dispatch import SHUTDOWN_DRAIN_SECONDS, OutputWorker, current_worker
-from .constants import AlertState, DEESCALATED, ESCALATED, Severity, TransitionKind, UNACK
+from .constants import AlertState, DEESCALATED, ESCALATED, Severity, TransitionKind, UNACK, coerce_severity
 from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
 from .output import Output
 from .models import normalize_source_output
@@ -30,7 +30,7 @@ from .registry import (
 from .selectors import normalize_rule_inputs, resolve_rule_sources
 from .rule import Rule, RuleContext
 from .signature_compat import invoke_compat
-from .store import NullStore
+from .store import NullStore, RestoredRuleState
 from .source import Source
 
 logger = logging.getLogger("kanary.engine")
@@ -146,12 +146,63 @@ class _RuleEvaluation:
     severity: Severity
     evaluated_at: datetime
     active_since: datetime | None
+    restored: bool = False  # the last evaluation before a restart, as the state database has it
+
+
+def _read_test_evaluation(
+    rule_id: str, evaluation: Mapping[str, object]
+) -> tuple[AlertState, Severity, str | None, dict[str, object]]:
+    """(state, severity, message, payload) from the result of Engine.test_evaluate()."""
+    if not isinstance(evaluation, Mapping):
+        raise ValueError("the evaluation must be a JSON object: the output of test-evaluate")
+    judged_rule = evaluation.get("rule_id")
+    if judged_rule is not None and judged_rule != rule_id:
+        raise ValueError(f"the evaluation is of rule '{judged_rule}', not '{rule_id}'")
+    missing = [key for key in ("state", "severity") if evaluation.get(key) is None]
+    if missing:
+        raise ValueError(f"the evaluation has no {' or '.join(missing)}: give the output of test-evaluate")
+    raw_state, raw_severity = evaluation["state"], evaluation["severity"]
+    try:
+        state = AlertState(str(raw_state).upper())
+        if isinstance(raw_severity, int) and not isinstance(raw_severity, bool):
+            severity = Severity(raw_severity)
+        else:
+            severity = coerce_severity(str(raw_severity))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"the evaluation has an invalid state or severity: {raw_state!r}, {raw_severity!r}") from exc
+    message = evaluation.get("message")
+    payload = evaluation.get("payload")
+    return state, severity, str(message) if message is not None else None, dict(payload) if isinstance(payload, Mapping) else {}
 
 
 def _coerce_test_timestamp(value: object) -> object:
     if isinstance(value, str):
         return datetime.fromisoformat(value)
     return value
+
+
+def _test_poll_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """A source payload from the JSON test-poll printed (timestamps back to datetimes)."""
+    raw_channels = payload.get("channels")
+    if not isinstance(raw_channels, Mapping):
+        raise ValueError("payload.channels must be an object")
+    channels: dict[str, dict[str, object]] = {}
+    for name, raw in raw_channels.items():
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"channel '{name}' must be an object")
+        metadata = raw.get("metadata")
+        channels[str(name)] = {
+            "value": raw.get("value"),
+            "timestamp": _coerce_test_timestamp(raw.get("timestamp")),
+            "metadata": dict(metadata) if isinstance(metadata, Mapping) else {},
+        }
+    result: dict[str, object] = {"channels": channels, "status": payload.get("status", "ok")}
+    for key in ("error", "reason"):
+        if payload.get(key) is not None:
+            result[key] = payload[key]
+    if isinstance(payload.get("metadata"), Mapping) and payload["metadata"]:
+        result["metadata"] = dict(payload["metadata"])
+    return result
 
 
 class Engine:
@@ -186,7 +237,6 @@ class Engine:
         self._output_workers: dict[str, OutputWorker] = {}
         self.plugin_states: dict[str, PluginStatus] = {}
         self.alerts: dict[str, Alert] = {}
-        self._restored_rule_states: dict[str, tuple[AlertState, Severity]] = {}
         self._rule_evaluations: dict[str, _RuleEvaluation] = {}
         self.acknowledgements: dict[str, Acknowledgement] = {}
         self.silences: dict[str, Silence] = {}
@@ -374,11 +424,7 @@ class Engine:
                 if rule_id in self.rules
             }
             self.silences = restored.silences
-            self._restored_rule_states = {
-                rule_id: state
-                for rule_id, state in restored.latest_rule_states.items()
-                if rule_id in self.rules
-            }
+            self._restore_alerts(restored.latest_rule_states)
             for source in self.sources.values():
                 try:
                     self._initialize_source(source)
@@ -387,6 +433,47 @@ class Engine:
             output_inits = [self._start_output_worker(output_id, output) for output_id, output in self.outputs.items()]
             self._refresh_rule_plugin_resolution_status()
         _wait_for(output_inits, None)
+
+    def _restore_alerts(self, states: dict[str, RestoredRuleState]) -> None:
+        """Show each rule's alert as KANARY stopped with it, until the rule's first evaluation.
+
+        Nothing is sent: the state has not changed. The first evaluation compares with
+        it as usual, so hysteresis and the alert's active since carry over the restart.
+        """
+        now = self._now_fn()
+        for rule_id, last in states.items():
+            rule = self.rules.get(rule_id)
+            if rule is None or self._is_rule_excluded(rule_id):
+                continue
+            acknowledgement = self.acknowledgements.get(rule_id) if last.state == AlertState.ACKED else None
+            self.alerts[rule_id] = Alert(
+                rule_id=rule_id,
+                state=last.state,
+                severity=last.severity,
+                owner=rule.owner,
+                tags=tuple(rule.tags),
+                payload=dict(last.payload),
+                message=last.message,
+                active_since=last.active_since,
+                acked_at=acknowledgement.created_at if acknowledgement else None,
+                acked_by=acknowledgement.operator if acknowledgement else None,
+                ack_reason=acknowledgement.reason if acknowledgement else None,
+                active_silence_ids=tuple(silence.silence_id for silence in self._matching_active_silences(rule, now)),
+                runbook=getattr(rule, "runbook", None),
+                restored=True,
+            )
+            if last.state in (AlertState.FIRING, AlertState.ACKED):
+                # The rule last judged FIRING (ACKED is FIRING with an ack): a silence or
+                # an ack before its first evaluation applies to it as to any alert.
+                self._rule_evaluations[rule_id] = _RuleEvaluation(
+                    state=AlertState.FIRING,
+                    payload=dict(last.payload),
+                    message=last.message,
+                    severity=last.severity,
+                    evaluated_at=last.occurred_at,
+                    active_since=last.active_since,
+                    restored=True,
+                )
 
     def shutdown(self) -> None:
         """Terminate sources, send what the outputs still have queued (briefly), then close the store."""
@@ -638,6 +725,30 @@ class Engine:
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
             self._refresh_rule_plugin_resolution_status()
+            self._evaluate_reloaded_rules(replacements)
+
+    def _evaluate_reloaded_rules(self, rule_ids: Iterable[str]) -> None:
+        """Judge reloaded rules at once with the values their sources gave last.
+
+        Otherwise a changed rule waits for its source's next value, which for a source
+        that waits for pushed values may take long. A rule with a source that has given
+        no value since the start waits for it, as before.
+        """
+        wanted = set(rule_ids)
+        now = self._now_fn()
+        for rule in self._rules_in_dependency_order():
+            if rule.rule_id not in wanted or self._is_rule_excluded(rule.rule_id):
+                continue
+            source_ids = tuple(getattr(rule, "resolved_sources", []))
+            if not source_ids or any(
+                source_id not in self.source_states or self.source_states[source_id].current.observed_at is None
+                for source_id in source_ids
+            ):
+                continue
+            if getattr(rule.__class__, "__kanary_evaluate_style__", "new") == "legacy" and len(source_ids) != 1:
+                continue  # the timer evaluation cannot serve it either
+            logger.info("rule '%s' reloaded: evaluating it with the last values of %s", rule.rule_id, ", ".join(source_ids))
+            self.evaluate_rule_timer(rule.rule_id, now=now)
 
     def reload_output_plugins(
         self,
@@ -1061,18 +1172,32 @@ class Engine:
         self,
         rule_id: str,
         *,
-        state: AlertState,
+        state: AlertState | None = None,
         message: str | None = None,
         reason: str | None = None,
         now: datetime | None = None,
+        evaluation: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
+        """Send a made-up event of the rule through the outputs; the live alert is not changed.
+
+        Give either ``state`` or ``evaluation``, the result of test_evaluate(): then the
+        event has the state, severity, message, and values that evaluation judged.
+        """
+        if (state is None) == (evaluation is None):
+            raise ValueError("test fire needs either a state or an evaluation (the output of test-evaluate)")
         with self._lock:
             rule = self.rules[rule_id]
             current_time = now or self._now_fn()
             previous_alert = self.alerts.get(rule_id)
+            severity = rule.severity
+            judged_payload: dict[str, object] = {}
+            if evaluation is not None:
+                state, severity, judged_message, judged_payload = _read_test_evaluation(rule_id, evaluation)
+                message = message or judged_message
             base_message = message or f"synthetic {state.value} notification test"
             synthetic_message = f"[TEST-FIRE] {base_message}"
             synthetic_payload: dict[str, object] = {
+                **judged_payload,
                 "synthetic": True,
                 "test_fire": {
                     "reason": reason,
@@ -1082,12 +1207,13 @@ class Engine:
             alert = Alert(
                 rule_id=rule.rule_id,
                 state=state,
-                severity=rule.severity,
+                severity=severity,
                 owner=rule.owner,
                 tags=tuple(rule.tags),
                 payload=synthetic_payload,
                 message=synthetic_message,
                 last_evaluated_at=current_time,
+                runbook=getattr(rule, "runbook", None),
             )
             event = AlertEvent(
                 rule_id=rule.rule_id,
@@ -1249,8 +1375,21 @@ class Engine:
                 now,
             )
 
-        shorthand_keys = {"value", "timestamp", "metadata", "prev_value", "prev_timestamp", "prev_metadata"}
-        if shorthand_keys.intersection(normalized_payload):
+        if "channels" in normalized_payload:
+            # The output of test-poll: what the rule's one source returned.
+            resolved_sources = list(getattr(rule, "resolved_sources", []))
+            if len(resolved_sources) != 1:
+                raise ValueError(
+                    "a test-poll payload ('channels') is one source's values; rule "
+                    f"'{rule.rule_id}' reads {', '.join(resolved_sources) or 'no source'}: use the 'inputs' form"
+                )
+            return self._overlay_test_source_payloads(
+                rule,
+                {resolved_sources[0]: {"current": _test_poll_payload(normalized_payload)}},
+                now,
+            )
+
+        if "value" in normalized_payload or "prev_value" in normalized_payload:
             normalized_inputs = list(getattr(rule, "inputs", []))
             if len(normalized_inputs) != 1 or ":" not in normalized_inputs[0] or "*" in normalized_inputs[0]:
                 raise ValueError("single-input shorthand requires exactly one explicit input selector")
@@ -1267,8 +1406,9 @@ class Engine:
             )
 
         raise ValueError(
-            "test payload must contain 'inputs' or the single-input shorthand fields "
-            "('value', 'timestamp', 'metadata', 'prev_value', 'prev_timestamp', 'prev_metadata')"
+            "test payload must be one of: {'inputs': {'<source_id>:<input>': {'value': ...}}}; "
+            "the output of test-poll ({'channels': ...}); or, for a rule with one input, "
+            "{'value': ..., 'timestamp': ..., 'prev_value': ...}"
         )
 
     def _overlay_test_source_payloads(
@@ -1362,19 +1502,9 @@ class Engine:
         *,
         active_since: datetime | None,
         evaluated_at: datetime,
+        restored: bool = False,
     ) -> None:
-        previous = self.alerts.get(rule.rule_id)
-        restored = self._restored_rule_states.pop(rule.rule_id, None) if previous is None else None
-        comparison_previous = previous
-        if comparison_previous is None and restored is not None:
-            restored_state, restored_severity = restored
-            comparison_previous = Alert(
-                rule_id=rule.rule_id,
-                state=restored_state,
-                severity=restored_severity,
-                owner=rule.owner,
-                tags=tuple(rule.tags),
-            )
+        previous = self.alerts.get(rule.rule_id)  # may be restored from before a restart
         acknowledgement = self.acknowledgements.get(rule.rule_id)
         acked_at = acknowledgement.created_at if acknowledgement and state == AlertState.ACKED else None
         acked_by = acknowledgement.operator if acknowledgement and state == AlertState.ACKED else None
@@ -1402,11 +1532,13 @@ class Engine:
             acked_by=acked_by,
             ack_reason=ack_reason,
             active_silence_ids=active_silence_ids,
+            runbook=getattr(rule, "runbook", None),
+            restored=restored,
         )
         self.alerts[rule.rule_id] = alert
 
         event = self._derive_alert_event(
-            previous=comparison_previous,
+            previous=previous,
             alert=alert,
             occurred_at=now,
         )
@@ -1419,7 +1551,7 @@ class Engine:
             )
 
         if event is not None and (
-            comparison_previous is not None or alert.state == AlertState.FIRING
+            previous is not None or alert.state == AlertState.FIRING
         ):
             self._emit_alert_event(event)
 
@@ -1430,6 +1562,18 @@ class Engine:
         now: datetime,
     ) -> _RuleEvaluation:
         previous = self._rule_evaluations.get(rule.rule_id)
+        if previous is None:
+            existing = self.alerts.get(rule.rule_id)
+            if existing is not None and existing.state != AlertState.OK and existing.active_since is not None:
+                # Still alerting after a restart or a reload of the rule: it began before.
+                previous = _RuleEvaluation(
+                    state=AlertState.FIRING,
+                    payload=existing.payload,
+                    message=existing.message,
+                    severity=existing.severity,
+                    evaluated_at=now,
+                    active_since=existing.active_since,
+                )
         active_since = (
             previous.active_since
             if evaluation.state == AlertState.FIRING
@@ -1465,6 +1609,7 @@ class Engine:
                 now,
                 active_since=evaluation.active_since,
                 evaluated_at=evaluation.evaluated_at,
+                restored=evaluation.restored,
             )
             return
 
@@ -1486,6 +1631,7 @@ class Engine:
                 now,
                 active_since=evaluation.active_since,
                 evaluated_at=evaluation.evaluated_at,
+                restored=evaluation.restored,
             )
             return
 
@@ -1498,6 +1644,7 @@ class Engine:
             now,
             active_since=evaluation.active_since,
             evaluated_at=evaluation.evaluated_at,
+            restored=evaluation.restored,
         )
 
     def _rules_in_dependency_order(self) -> list[Rule]:
@@ -1936,16 +2083,20 @@ class Engine:
             logger.exception("output '%s' init failed", output_id)
 
     def _terminate_output(self, output_id: str, output: Output) -> None:
-        status = self._plugin_status("output", output_id)
         try:
             self._call_output_terminate(output)
         except Exception as exc:
+            logger.exception("output '%s' terminate failed", output_id)
+            # A removed output has no status any more (it runs after the removal, on the
+            # output's thread): do not bring one back for it.
+            status = self.plugin_states.get(self._plugin_key("output", output_id))
+            if status is None:
+                return
             self._set_plugin_failed(status)
             status.last_error = str(exc)
             status.last_error_detail = traceback.format_exc()
             status.last_failure_at = self._now_fn()
             status.last_updated_at = status.last_failure_at
-            logger.exception("output '%s' terminate failed", output_id)
 
     def _recover_output_emit(
         self,
@@ -2025,15 +2176,17 @@ class Engine:
             raise
 
     def _terminate_source(self, source: Source) -> None:
-        status = self._plugin_status("source", source.source_id)
         try:
             self._call_source_terminate(source)
         except Exception as exc:
-            self._set_plugin_failed(status)
-            status.last_error = str(exc)
-            status.last_error_detail = traceback.format_exc()
-            status.last_failure_at = self._now_fn()
-            status.last_updated_at = status.last_failure_at
+            # A removed source has no status any more: do not bring one back for it.
+            status = self.plugin_states.get(self._plugin_key("source", source.source_id))
+            if status is not None:
+                self._set_plugin_failed(status)
+                status.last_error = str(exc)
+                status.last_error_detail = traceback.format_exc()
+                status.last_failure_at = self._now_fn()
+                status.last_updated_at = status.last_failure_at
             raise
 
     def _evaluate_rule(

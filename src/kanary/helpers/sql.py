@@ -184,7 +184,7 @@ class SQLLongSource(SQLSource):
     """Read the newest row of every name; each name becomes an input.
 
     names maps upstream names to input names; when given, other names are
-    ignored. lookback_seconds limits the rows scanned to recent ones, which
+    ignored. lookback limits the rows scanned to recent ones, which
     keeps the query cheap on a large table. The upstream name is kept in each
     input's metadata.
     """
@@ -192,13 +192,13 @@ class SQLLongSource(SQLSource):
     name_column: str = "name"
     value_column: str = "value"
     names: dict[str, str] = {}
-    lookback_seconds: float | None = None
+    lookback: float | None = None
 
     def build_query(self) -> tuple[str, tuple[Any, ...]]:
         table = self._require_table()
         name, value, ts = (self.quote(c) for c in (self.name_column, self.value_column, self.timestamp_column))
         where, params = "", ()
-        if self.lookback_seconds:
+        if self.lookback:
             where = f" WHERE {ts} >= {_PLACEHOLDER[self._database_type()]}"
             params = (self._since(),)
         query = (
@@ -232,7 +232,7 @@ class SQLLongSource(SQLSource):
     def _since(self) -> Any:
         # Compare in the zone the timestamps are stored in, as a naive value.
         zone = to_timezone(self.timestamp_timezone) if self.timestamp_timezone else to_timezone("UTC")
-        since = (datetime.now(zone) - timedelta(seconds=self.lookback_seconds or 0)).replace(tzinfo=None)
+        since = (datetime.now(zone) - timedelta(seconds=self.lookback or 0)).replace(tzinfo=None)
         if self._database_type() == "sqlite":
             return since.isoformat(sep=" ", timespec="seconds")  # how SQLite stores datetime text
         return since

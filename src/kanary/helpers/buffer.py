@@ -3,7 +3,7 @@
 A Buffer is an ordinary object a source creates in init() and fills in poll()::
 
     def init(self):
-        self.buffer = kanary.Buffer(size=1024, seconds=kanary.hour)
+        self.buffer = kanary.Buffer(size=1024, max_age=3 * kanary.hour)
 
     def poll(self):
         self.buffer.add(("pressure", read_gauge()))   # the same items as kanary.inputs()
@@ -34,6 +34,7 @@ import threading
 from typing import Any
 
 from ..models import Measurement, SourceResult, normalize_input_items
+from ..units import format_time
 from ..values import coerce_datetime, is_number
 
 _scratch = threading.local()
@@ -111,11 +112,11 @@ class Series:
 
     # -- selecting ----------------------------------------------------------
 
-    def window(self, seconds: float) -> "Series":
-        """The samples of the last ``seconds``, counted back from the newest sample."""
+    def window(self, duration: float) -> "Series":
+        """The samples of the last ``duration`` (``10 * kanary.minute``), counted back from the newest sample."""
         if not self._samples:
             return self
-        cutoff = self._samples[-1].timestamp - timedelta(seconds=seconds)
+        cutoff = self._samples[-1].timestamp - timedelta(seconds=duration)
         return Series(self.name, (sample for sample in self._samples if sample.timestamp >= cutoff))
 
     def tail(self, count: int) -> "Series":
@@ -237,18 +238,20 @@ class Series:
 class Buffer:
     """Recent samples of every input, by name: ``buffer["pressure"]`` is a Series.
 
-    ``size`` limits the samples kept per input; ``seconds`` (when set) also drops
-    samples older than that, counted back from the input's newest sample.
+    Each input keeps at most ``size`` samples and, when ``max_age`` is set
+    (``3 * kanary.hour``), none older than that; whichever limit is reached first
+    drops the oldest samples. The age is counted back from the input's newest
+    sample, not from now: samples stay while no newer one arrives.
     ``print(buffer)`` shows what is kept.
     """
 
-    def __init__(self, *, size: int = 1024, seconds: float | None = None) -> None:
+    def __init__(self, *, size: int = 1024, max_age: float | None = None) -> None:
         if not isinstance(size, int) or isinstance(size, bool) or size < 1:
             raise ValueError(f"Buffer size must be a positive integer, not {size!r}")
-        if seconds is not None and (not is_number(seconds) or seconds <= 0):
-            raise ValueError(f"Buffer seconds must be a positive number or None, not {seconds!r}")
+        if max_age is not None and (not is_number(max_age) or max_age <= 0):
+            raise ValueError(f"Buffer max_age must be a positive duration or None, not {max_age!r}")
         self.size = size
-        self.seconds = seconds
+        self.max_age = max_age
         self._samples: dict[str, deque[Measurement]] = {}
 
     # -- reading ------------------------------------------------------------
@@ -276,8 +279,8 @@ class Buffer:
 
     def __str__(self) -> str:
         limits = f"at most {self.size} samples per input"
-        if self.seconds is not None:
-            limits += f", none older than {self.seconds:g} s"
+        if self.max_age is not None:
+            limits += f", none older than {format_time(self.max_age)}"
         lines = [f"Buffer ({limits}): {len(self)} inputs"]
         for name, samples in self._view().items():
             first, last = samples[0], samples[-1]
@@ -350,7 +353,7 @@ class Buffer:
             store.pop(name, None)
 
     def copy(self) -> "Buffer":
-        copied = Buffer(size=self.size, seconds=self.seconds)
+        copied = Buffer(size=self.size, max_age=self.max_age)
         copied._samples = _copy_samples(self._view())
         return copied
 
@@ -365,8 +368,8 @@ class Buffer:
                 samples[-1] = sample
             return
         samples.append(sample)
-        if self.seconds is not None:
-            cutoff = sample.timestamp - timedelta(seconds=self.seconds)
+        if self.max_age is not None:
+            cutoff = sample.timestamp - timedelta(seconds=self.max_age)
             while samples and samples[0].timestamp < cutoff:
                 samples.popleft()
 

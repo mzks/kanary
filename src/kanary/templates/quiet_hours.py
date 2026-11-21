@@ -2,6 +2,7 @@
 # kind: output
 # level: advanced
 # summary: Hold non-urgent alerts at night and send them in the morning, in order (QuietHours).
+# summary-ja: 急ぎでない alert を夜間は保留し、朝にまとめて送る (QuietHours)。
 import os
 
 import kanary
@@ -9,7 +10,7 @@ import kanary
 
 @kanary.output(
     output_id="template.quiet_hours",
-    minimum_severity="WARN",
+    minimum_severity=kanary.WARN,
 )
 class TemplateQuietHours(kanary.SlackOutput):
     description = "TODO: describe the channel and the quiet hours."
