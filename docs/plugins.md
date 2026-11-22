@@ -97,6 +97,14 @@ off) is accepted with a lint warning: the source runs `init()` and answers
 `NOT POLLED`. Six or seven fields (seconds, years) are not read: implementations put
 them in different places.
 
+The next run is found however far ahead it is (`0 9 * FEB MON#5`, a fifth Monday in
+February, runs next in 2044). Around daylight saving time the fields are read on the
+wall clock, and a run always comes after the one before in real time, never twice for
+one time: on the day the clock goes back, a time that occurs twice runs once; on the day
+it goes forward, only the first of the times the clock skips runs, an hour late
+(`30 2 * * *` at 03:30, also when KANARY starts at 03:10 that day; `*/15 2 * * *` once at 03:00). Where the number of runs matters,
+use a zone without daylight saving time (`CRON_TZ=UTC`, or Japan's) or `interval`.
+
 Examples:
 
 - `interval = 60.0`
@@ -418,9 +426,9 @@ For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `e
 
 One tag pattern, state, or transition may be written as a string instead of a list (`include_tags="infra"`), and states and transitions in any case (`"ok"`); an unknown state or transition name is an error when the file loads. To add `OK` to the defaults and drop recovery events too, use `exclude_states=kanary.Output.exclude_states + ["OK"]`. An explicitly configured list replaces rather than merges with the defaults, so debugging and audit outputs that need every state event should set `exclude_states=[]`.
 
-An `OK` goes only to an output that was sent a non-OK event for the rule since its last `OK` (a `FIRING`, an `ACKED`, or a state its `exclude_states` lets through): an `OK` closes what the output was told. So a rule that was `OK` before a silence or a suppression sends no `OK` when that ends, while a rule that fired, was silenced, and recovered during the silence sends its `OK` as the silence ends. After a restart, alerts restored as not `OK` count as sent. An `OK` held back this way is recorded as filtered in the output dispatch history.
+An `OK` goes only to an output that was sent a non-OK event for the rule since its last `OK` (a `FIRING`, an `ACKED`, or a state its `exclude_states` lets through): an `OK` closes what the output was told. "Sent" means its `emit()` worked: when the `FIRING` failed to go out (the destination was down through every retry), the output gets no `OK` for it either. So a rule that was `OK` before a silence or a suppression sends no `OK` when that ends, while a rule that fired, was silenced, and recovered during the silence sends its `OK` as the silence ends. After a restart, alerts restored as not `OK` count as sent. An `OK` held back this way is recorded as filtered in the output dispatch history.
 
-The `OK` has the severity this output was last sent for the alert (`event.effective_severity`, which `minimum_severity` checks): an output with `minimum_severity=kanary.ERROR` that was sent a `CRITICAL` alert gets its `OK` also when the alert went down to `WARN` before it recovered.
+The `OK` has the severity this output was last sent for the alert (`event.effective_severity`, which `minimum_severity` checks): an output with `minimum_severity=kanary.ERROR` that was sent a `CRITICAL` alert gets its `OK` also when the alert went down to `WARN` before it recovered. With `--state-db` this holds over a restart too: what each output was sent is kept.
 
 To drop a transition that passes the filters, inspect `previous_state` and `current_state` in `emit()`:
 
@@ -857,7 +865,7 @@ Override `recipients_for(event)` to choose recipients per event, for example fro
 
 A webhook URL is usually a secret: `url = os.environ.get("WEBHOOK_URL")`, as shown under plugin configuration above.
 
-`SlackOutput`, `MattermostOutput`, and `DiscordOutput` send a rich message in each service's format: a colored bar (green when OK, grey when silenced or suppressed, otherwise by severity: INFO blue, WARN yellow, ERROR red, CRITICAL purple), a title such as `🔴 FIRING ERROR oil.temperature`, the rule's message, and fields for state, severity, since, ack, owner, tags, and the judged values. Notifications and previews show the one-line `text(event)`. Set `viewer_url` to link the title to the KANARY viewer; `MattermostOutput` and `DiscordOutput` also take `username`, and `MattermostOutput` takes `icon_url`. Override `payload()` for another layout.
+`SlackOutput`, `MattermostOutput`, and `DiscordOutput` send a rich message in each service's format: a colored bar (green when OK, grey when silenced or suppressed, otherwise by severity: INFO blue, WARN yellow, ERROR red, CRITICAL purple), a title such as `🔴 FIRING ERROR oil.temperature`, the rule's message, and fields for state, severity, since, ack, owner, tags, and the judged values. An event sent before the rule was evaluated again after a restart (a silence that ended while KANARY was stopped) has an `Evaluated` field with the time of the values, "before the restart". Notifications and previews show the one-line `text(event)`. Set `viewer_url` to link the title to the KANARY viewer; `MattermostOutput` and `DiscordOutput` also take `username`, and `MattermostOutput` takes `icon_url`. Override `payload()` for another layout.
 
 `kanary.describe(event)` returns those parts as a `kanary.Notice` (`title`, `headline`, `symbol`, `color`, `color_hex`, `message`, `fields`, `time`, `text`, `link`), for an output of your own such as Teams or a pager, and for an overridden `payload()`.
 

@@ -171,6 +171,32 @@ class SourceThreadTest(PluginDirectoryCase):
         self.assertIn("database is down", summary["error"])
         self.assertEqual((status.state, status.last_error), ("FAILED", "database is down"))
 
+    def test_reloads_at_the_same_moment_leave_the_source_polling(self):
+        # An operator in the viewer and auto-reload, say: one reload waits for the other.
+        self.write("slow.py", '''
+            import time, kanary
+
+            @kanary.source(source_id="slow", interval=0.05)
+            class Slow:
+                def init(self):
+                    time.sleep(0.2)
+
+                def poll(self):
+                    return {"v": 1}
+        ''')
+        runtime = self.start_runtime()
+        status = runtime.engine._plugin_status("source", "slow")
+        self.assertTrue(wait_until(lambda: status.run_count >= 1))
+        reloads = [threading.Thread(target=runtime.reload_now, args=({"source": "slow"},)) for _ in range(2)]
+        for reload in reloads:
+            reload.start()
+        for reload in reloads:
+            reload.join()
+        thread = runtime._source_threads["slow"]
+        self.assertTrue(thread.is_alive())
+        runs = status.run_count
+        self.assertTrue(wait_until(lambda: status.run_count >= runs + 2), "the source stopped polling")
+
     def test_a_poll_result_that_breaks_the_contract_shows_the_source_failed(self):
         self.write("bad.py", '''
             import kanary

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import calendar
 from dataclasses import dataclass
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 import re
 
 from .units import parse_duration
@@ -37,8 +37,9 @@ _MACROS = {
 }
 _MONTHS = ("JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER")
 _WEEKDAYS = ("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")
-# A schedule should run within this long from now; one that does not never runs.
-_HORIZON = timedelta(days=366 * 5)
+# The Gregorian calendar repeats every 400 years: a schedule that does not run within
+# them never runs ("0 9 * FEB MON#5", a fifth Monday in February, runs next in 2044).
+_HORIZON = timedelta(days=146_097)
 _EVERY = re.compile(r"^@every(?:\s+(.*))?$", re.IGNORECASE)
 
 
@@ -128,17 +129,63 @@ class CronSchedule:
         return day_of_month or weekday
 
     def next_after(self, dt: datetime) -> datetime:
-        """The first run after dt (whole minutes), skipping days and hours that cannot match.
+        """The first run after dt, in whole minutes.
 
-        With a time zone of its own the schedule is read in that zone (a naive dt is
-        this host's local time) and the result is in that zone.
+        The fields are read on the wall clock: of the schedule's own time zone (CRON_TZ=),
+        else of this host. A naive dt gives a naive result, read on the wall clock alone.
+        An aware dt gives an aware result that is later than dt in real time, also around
+        daylight saving time: on the day the clock goes back, a time that occurs twice
+        runs once (its first occurrence); on the day it goes forward, a time the clock
+        skips runs an hour later (also when KANARY starts within that hour).
         """
-        if self.timezone is not None:
-            dt = dt.astimezone(self.timezone)
-        candidate = dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        if dt.tzinfo is None and self.timezone is None:
+            return self._next_wall_time(dt.replace(second=0, microsecond=0))
+        zone = self.timezone
+        wall = (dt.astimezone(zone) if zone is not None else dt.astimezone()).replace(tzinfo=None)
+        after = dt.astimezone(timezone.utc)
+        # From a little earlier on the wall clock: a skipped time (02:30) runs at a wall time
+        # after it (03:30), so at 03:10 it is still ahead. Earlier candidates are passed over
+        # below, as not later than dt in real time.
+        candidate = wall.replace(second=0, microsecond=0) - _CLOCK_CHANGE_LOOKBACK
+        while True:
+            candidate = self._next_wall_time(candidate)
+            real = self._real_time(candidate)
+            if real <= after:
+                continue
+            if not self._exists(candidate) and not self._first_skipped(candidate):
+                continue  # of the times the clock skipped, only the first runs
+            # As the clock shows it then: a time the clock skipped (02:30) is 03:30.
+            return real.astimezone(self.timezone) if self.timezone is not None else real.astimezone()
+
+    def _real_time(self, wall: datetime) -> datetime:
+        """The wall time in real time: the zone's rules, or this host's (naive -> local)."""
+        moment = wall.replace(tzinfo=self.timezone) if self.timezone is not None else wall.astimezone()
+        return moment.astimezone(timezone.utc)
+
+    def _exists(self, wall: datetime) -> bool:
+        """False for a wall time the clock skips (02:30 on the day it goes forward)."""
+        real = self._real_time(wall)
+        shown = real.astimezone(self.timezone) if self.timezone is not None else real.astimezone()
+        return shown.replace(tzinfo=None) == wall
+
+    def _first_skipped(self, wall: datetime) -> bool:
+        """The first time of the schedule in the stretch the clock skipped."""
+        start = wall
+        for _ in range(int(_CLOCK_CHANGE_LOOKBACK.total_seconds() // 60)):
+            if self._exists(start - timedelta(minutes=1)):
+                break
+            start -= timedelta(minutes=1)
+        return self._next_wall_time(start - timedelta(minutes=1)) == wall
+
+    def _next_wall_time(self, after: datetime) -> datetime:
+        """The first wall-clock minute after ``after`` (naive) that matches the fields."""
+        candidate = after + timedelta(minutes=1)
         deadline = candidate + _HORIZON
         while candidate <= deadline:
-            if not self._day_matches(candidate):
+            if candidate.month not in self.months:
+                year, month = (candidate.year + 1, 1) if candidate.month == 12 else (candidate.year, candidate.month + 1)
+                candidate = candidate.replace(year=year, month=month, day=1, hour=0, minute=0)
+            elif not self._day_matches(candidate):
                 candidate = candidate.replace(hour=0, minute=0) + timedelta(days=1)
             elif candidate.hour not in self.hours:
                 candidate = candidate.replace(minute=0) + timedelta(hours=1)
@@ -147,6 +194,10 @@ class CronSchedule:
             else:
                 return candidate
         raise ValueError(f"schedule {self.expression!r} never runs (no such day)")
+
+
+# More than any change of a clock for daylight saving time (one hour; two at Troll station).
+_CLOCK_CHANGE_LOOKBACK = timedelta(hours=3)
 
 
 def parse_schedule(expression: str) -> CronSchedule:

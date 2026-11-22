@@ -81,6 +81,7 @@ Kanary itself does not require any environment variables. Source-specific connec
 - Each source is polled in its own thread according to `interval`.
 - Rules are evaluated against the latest result from their source.
 - Plugin directories are watched continuously and Python file changes are detected automatically.
+- Plugin directories are on Python's import path (after Python's own modules and installed packages), so a plugin can import a helper module next to it (`from shared import LIMIT`). Such a helper is read from its file again on every scan of the plugin files, like the plugin files; `reload --dirty` reloads the plugins that import it, also through other helpers. A directory with an `__init__.py` is a package: its files are modules of it (`pkg/limits.py` is `pkg.limits`, so `from .values import LIMIT` works), each run once per scan, and they may define plugins too. Import helpers at the top of the plugin file: a running plugin keeps the helper it was loaded with until it is reloaded, while an `import` inside `evaluate()` or `poll()` gets the helper of the last scan, also when the change is not applied yet (with `--auto-reload off`).
 - Non-Python files such as local TOML config files are not watched; after changing them, run an explicit `kanaryctl reload ...`.
 - With the default `--auto-reload off`, discovered changes are applied explicitly with `kanaryctl reload ...`.
 
@@ -137,6 +138,9 @@ kanaryctl unsilence <silence_id> --operator operator_name
   Rerun full plugin discovery even when no watched Python file changed, then apply the result.
 - `reload --full`
   Perform an in-process engine restart. All sources, rules, and outputs are reinitialized. A plugin whose `init()` fails does not stop the restart (it keeps trying); a plugin that cannot be created at all does, and the running engine goes on.
+  The new engine starts from what the running one wrote to the state database. During the switch, acknowledgements and silences are refused with HTTP 503 (`kanaryctl` prints the error; try again a moment later), so none is lost between the two engines. When the state database does not take the running engine's last writes within 10 seconds (locked by another process, a full disk), the restart is given up (`reload_failed`) and the running engine goes on as before.
+  Sources go on polling during the switch (what they read waits); their threads stop only once the new engine runs, so a restart given up leaves them as they were. Every event of the running engine is sent (or fails) before the switch, so a receiver never gets a `FIRING` after the `OK` that follows it: when an output is still sending after 5 seconds (a slow or unreachable destination), the restart is given up the same way, with the output named in the error. Try again once it has sent, or restart the process.
+  Plugins the files no longer have are removed as `reload --all` removes them, and listed in `removed`: a removed rule's ack and judgment are not kept, so a rule added again later with the same id starts afresh.
 
 ## Log history Persistence
 
@@ -152,8 +156,12 @@ Stored data:
 - output dispatch summaries
 - operator actions
 - silences
+- what each output was sent and not yet the `OK` of, with the severity it was sent last (so the `OK` after a restart reaches the outputs it closes)
+- each rule's own last judgment (`FIRING` or `OK`) with its message and values, apart from what was shown (written when the judgment changes, and at shutdown and before `reload --full`, so a restored alert has the values it was last evaluated with): after a restart a parent that was `SILENCED` still holds the rules behind it, and a silence that began or ended while KANARY was stopped applies at the start
 
 The history API and the viewer's History panel only retain data when SQLite persistence is enabled.
+
+Writes to the database run on a thread of their own, in order, so evaluation and notifications never wait for it. A write the database refuses for now (another process holds it locked past SQLite's busy timeout, the disk is full) is tried again, after 1 s and then up to every 30 s, until it goes in: the history comes late but complete, and a restart restores what really happened. Meanwhile it is shown as `state_db_error` in `GET /health` and `GET /meta`, and as "State DB Write Error" in the viewer. What is still waiting at shutdown gets 10 seconds; writes given up then (or beyond 100,000 waiting) are logged.
 
 Kanary stamps newly created SQLite state DBs with a schema version.
 This versioning is intentionally minimal: if you point 0.3.x at an older legacy DB without a recognized schema version, Kanary rejects it and asks you to start with a fresh state DB path.
@@ -169,8 +177,8 @@ DELETE FROM alert_events
  WHERE occurred_at < '2024-01-01'
    AND id NOT IN (SELECT MAX(id) FROM alert_events GROUP BY rule_id);
 DELETE FROM output_dispatches WHERE occurred_at < '2024-01-01';
--- Keep acknowledgements: an alert still acknowledged keeps its ack from here.
-DELETE FROM operator_actions WHERE created_at < '2024-01-01' AND action_type NOT IN ('ack', 'unack');
+-- Keep acknowledgements and rule removals: an alert still acknowledged keeps its ack from here.
+DELETE FROM operator_actions WHERE created_at < '2024-01-01' AND action_type NOT IN ('ack', 'unack', 'rule_removed');
 DELETE FROM silences WHERE end_at < '2024-01-01';
 VACUUM;
 SQL

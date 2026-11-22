@@ -55,6 +55,18 @@ def _kanary_version() -> str:
 
 
 def main() -> int:
+    """The command; output piped into a reader that stops early (| head) ends it quietly."""
+    try:
+        code = _main()
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # Python would report the pipe once more when it flushes stdout at exit.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 1
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(description="Inspect and control a running KANARY instance")
     parser.add_argument(
         "--version",
@@ -220,7 +232,7 @@ def main() -> int:
                 for index, alert in enumerate(matches):
                     if index:
                         print()
-                    history = fetch_json(f"{args.base_url}/history/{quote(alert['rule_id'], safe='')}")
+                    history = fetch_json(f"{args.base_url}/history/{quote(alert['rule_id'], safe='')}?limit=5")
                     print_alert_detail(alert, apply_history_filters(history, since=None, limit=5))
                 return 0
             if args.json:  # the API's alerts as they are: a rule without one has no row here
@@ -230,7 +242,8 @@ def main() -> int:
             return 0
 
         if args.command == "history":
-            payload = fetch_json(f"{args.base_url}/history/{quote(args.rule_id, safe='')}")
+            limit = f"?limit={args.limit}" if args.limit and not args.since else ""  # --since filters what comes
+            payload = fetch_json(f"{args.base_url}/history/{quote(args.rule_id, safe='')}{limit}")
             payload = apply_history_filters(payload, since=args.since, limit=args.limit)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -485,6 +498,8 @@ def print_health(payload: dict) -> None:
     print(f"sources     {', '.join(payload.get('sources', [])) or '-'}")
     print(f"rules       {len(payload.get('rules', []))}")
     print(f"alert_count {payload.get('alert_count', 0)}")
+    if payload.get("state_db_error"):  # history waits for the database; alerts are still sent
+        print(f"state_db    {payload['state_db_error']} (since {payload.get('state_db_error_at')})")
 
 
 WAITING = "WAITING"  # a rule with no alert yet: not evaluated since KANARY started (and none stored)

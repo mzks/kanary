@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
@@ -27,10 +28,52 @@ class RestoredRuleState:
 
 
 @dataclass(slots=True)
+class RestoredJudgment:
+    """A rule's own last judgment (FIRING, OK), whatever a silence or a parent showed of it."""
+
+    state: AlertState
+    severity: Severity
+    message: str | None
+    payload: dict[str, Any]
+    evaluated_at: datetime
+    active_since: datetime | None
+
+
+@dataclass(slots=True)
 class RestoredState:
     acknowledgements: dict[str, Acknowledgement] = field(default_factory=dict)
     silences: dict[str, Silence] = field(default_factory=dict)
     latest_rule_states: dict[str, RestoredRuleState] = field(default_factory=dict)
+    judgments: dict[str, RestoredJudgment] = field(default_factory=dict)
+    # Per output, the alerts it was sent and not yet the OK of, with the severity sent last.
+    # None: not kept by this database yet (one from before), so not known.
+    output_notices: dict[str, dict[str, Severity]] | None = None
+
+
+# Each rule's own last judgment, kept apart from the alert events: those record what was
+# shown (SILENCED, SUPPRESSED), and a judgment can change while that does not. Added to
+# databases of schema version 1 when missing; older KANARY ignores it.
+_JUDGMENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS rule_judgments (
+    rule_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    severity INTEGER NOT NULL,
+    message TEXT,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    evaluated_at TEXT NOT NULL,
+    active_since TEXT
+)
+"""
+
+# What each output was told: an OK goes where it closes an alert, with that alert's severity.
+_OUTPUT_NOTICES_TABLE = """
+CREATE TABLE IF NOT EXISTS output_notices (
+    output_id TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    severity INTEGER NOT NULL,
+    PRIMARY KEY (output_id, rule_id)
+)
+"""
 
 
 class NullStore:
@@ -96,7 +139,21 @@ class NullStore:
     def cancel_silence(self, silence: Silence) -> None:
         return None
 
-    def get_rule_history(self, rule_id: str, rule_tags: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+    def record_judgment(self, rule_id: str, judgment: RestoredJudgment) -> None:
+        return None
+
+    def forget_judgment(self, rule_id: str) -> None:
+        return None
+
+    def record_output_notice(self, output_id: str, rule_id: str, severity: Severity | None) -> None:
+        return None
+
+    def forget_output_notices(self, *, output_id: str | None = None, rule_id: str | None = None) -> None:
+        return None
+
+    def get_rule_history(
+        self, rule_id: str, rule_tags: list[str] | None = None, *, limit: int | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
         return {
             "enabled": False,
             "alert_events": [],
@@ -132,6 +189,7 @@ class SQLiteStore:
         self._conn: sqlite3.Connection | None = None
         self.schema_version = 0
         self.target_schema_version = self.SCHEMA_VERSION
+        self._notices_known = False
 
     def initialize(self) -> None:
         with self._lock:
@@ -144,6 +202,10 @@ class SQLiteStore:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
                 self._ensure_schema(conn)
+                conn.execute(_JUDGMENTS_TABLE)
+                # A database from before kept no notices: what outputs were told is not known.
+                self._notices_known = _has_table(conn, "output_notices")
+                conn.execute(_OUTPUT_NOTICES_TABLE)
                 conn.commit()
             except BaseException:
                 conn.close()  # a database KANARY cannot use is not left open
@@ -325,7 +387,77 @@ class SQLiteStore:
                 acknowledgements=acknowledgements,
                 silences=silences,
                 latest_rule_states=latest_rule_states,
+                judgments=self._load_judgments(conn),
+                output_notices=self._load_output_notices(conn) if self._notices_known else None,
             )
+
+    def _load_output_notices(self, conn: sqlite3.Connection) -> dict[str, dict[str, Severity]]:
+        notices: dict[str, dict[str, Severity]] = {}
+        for row in conn.execute("SELECT output_id, rule_id, severity FROM output_notices"):
+            try:
+                notices.setdefault(row["output_id"], {})[row["rule_id"]] = Severity(int(row["severity"]))
+            except ValueError:
+                continue
+        return notices
+
+    def record_output_notice(self, output_id: str, rule_id: str, severity: Severity | None) -> None:
+        """The output was sent an alert of the rule (severity), or its OK (None)."""
+        with self._transaction() as conn:
+            if severity is None:
+                conn.execute("DELETE FROM output_notices WHERE output_id = ? AND rule_id = ?", (output_id, rule_id))
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO output_notices (output_id, rule_id, severity) VALUES (?, ?, ?)",
+                    (output_id, rule_id, int(severity)),
+                )
+
+    def forget_output_notices(self, *, output_id: str | None = None, rule_id: str | None = None) -> None:
+        """A removed output, or a removed rule: nothing of it is open any more."""
+        with self._transaction() as conn:
+            if output_id is not None:
+                conn.execute("DELETE FROM output_notices WHERE output_id = ?", (output_id,))
+            if rule_id is not None:
+                conn.execute("DELETE FROM output_notices WHERE rule_id = ?", (rule_id,))
+
+    def _load_judgments(self, conn: sqlite3.Connection) -> dict[str, RestoredJudgment]:
+        judgments: dict[str, RestoredJudgment] = {}
+        for row in conn.execute("SELECT * FROM rule_judgments"):
+            try:
+                payload = json.loads(row["payload_json"])
+                judgments[row["rule_id"]] = RestoredJudgment(
+                    state=AlertState(row["state"]),
+                    severity=Severity(int(row["severity"])),
+                    message=row["message"],
+                    payload=payload if isinstance(payload, dict) else {},
+                    evaluated_at=_parse_datetime(row["evaluated_at"]),
+                    active_since=_parse_datetime(row["active_since"]) if row["active_since"] else None,
+                )
+            except (TypeError, ValueError):
+                continue  # a row KANARY cannot read: the rule's next evaluation judges again
+        return judgments
+
+    def record_judgment(self, rule_id: str, judgment: RestoredJudgment) -> None:
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO rule_judgments
+                    (rule_id, state, severity, message, payload_json, evaluated_at, active_since)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    rule_id,
+                    judgment.state.value,
+                    int(judgment.severity),
+                    judgment.message,
+                    json.dumps(json_ready(judgment.payload), ensure_ascii=False, default=json_default),
+                    judgment.evaluated_at.isoformat(),
+                    judgment.active_since.isoformat() if judgment.active_since else None,
+                ),
+            )
+
+    def forget_judgment(self, rule_id: str) -> None:
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM rule_judgments WHERE rule_id = ?", (rule_id,))
 
     def _load_acknowledgements(self, conn: sqlite3.Connection) -> dict[str, Acknowledgement]:
         """The acks that still hold: each one for the alert the rule is in now.
@@ -456,8 +588,7 @@ class SQLiteStore:
         return states
 
     def append_alert_event(self, event: AlertEvent, *, definition_file: str | None, matched_outputs: list[str]) -> None:
-        conn = self._require_conn()
-        with self._lock:
+        with self._transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO alert_events (
@@ -494,7 +625,6 @@ class SQLiteStore:
                     json.dumps(matched_outputs, ensure_ascii=False),
                 ),
             )
-            conn.commit()
 
     def append_output_dispatch(
         self,
@@ -506,8 +636,7 @@ class SQLiteStore:
         uninitialized_outputs: list[str],
         failed_outputs: list[str],
     ) -> None:
-        conn = self._require_conn()
-        with self._lock:
+        with self._transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO output_dispatches (
@@ -534,7 +663,6 @@ class SQLiteStore:
                     json.dumps(failed_outputs, ensure_ascii=False),
                 ),
             )
-            conn.commit()
 
     def record_acknowledgement(self, acknowledgement: Acknowledgement) -> None:
         self._record_operator_action(
@@ -595,8 +723,7 @@ class SQLiteStore:
         )
 
     def create_silence(self, silence: Silence) -> None:
-        conn = self._require_conn()
-        with self._lock:
+        with self._transaction() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO silences (
@@ -629,7 +756,6 @@ class SQLiteStore:
                     silence.cancel_reason,
                 ),
             )
-            conn.commit()
         self._record_operator_action(
             action_type="create_silence",
             rule_id=None,
@@ -647,8 +773,7 @@ class SQLiteStore:
         )
 
     def cancel_silence(self, silence: Silence) -> None:
-        conn = self._require_conn()
-        with self._lock:
+        with self._transaction() as conn:
             conn.execute(
                 """
                 UPDATE silences
@@ -662,7 +787,6 @@ class SQLiteStore:
                     silence.silence_id,
                 ),
             )
-            conn.commit()
         self._record_operator_action(
             action_type="cancel_silence",
             rule_id=None,
@@ -678,9 +802,16 @@ class SQLiteStore:
             created_at=silence.cancelled_at or datetime.now().astimezone(),
         )
 
-    def get_rule_history(self, rule_id: str, rule_tags: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
-        conn = self._require_conn()
-        with self._lock:
+    def get_rule_history(
+        self, rule_id: str, rule_tags: list[str] | None = None, *, limit: int | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """A rule's events, output dispatches, and operator actions, newest first; with
+        limit, the newest ``limit`` of each (a rule that flaps for years has very many).
+
+        Newest by time, not by the order the rows were written: a dispatch is written once
+        every output is done, so a slow output's FIRING may be written after the ACKED."""
+        cap = f" LIMIT {int(limit)}" if limit is not None else ""
+        with self._reading() as conn:
             alert_events = [
                 {
                     "rule_id": row["rule_id"],
@@ -703,8 +834,8 @@ class SQLiteStore:
                     SELECT *
                     FROM alert_events
                     WHERE rule_id = ?
-                    ORDER BY occurred_at DESC, id DESC
-                    """,
+                    ORDER BY julianday(occurred_at) DESC, id DESC
+                    """ + cap,
                     (rule_id,),
                 )
             ]
@@ -715,8 +846,8 @@ class SQLiteStore:
                     SELECT *
                     FROM output_dispatches
                     WHERE rule_id = ?
-                    ORDER BY occurred_at DESC, id DESC
-                    """,
+                    ORDER BY julianday(occurred_at) DESC, id DESC
+                    """ + cap,
                     (rule_id,),
                 )
             ]
@@ -727,8 +858,8 @@ class SQLiteStore:
                 SELECT *
                 FROM operator_actions
                 WHERE rule_id = ?
-                ORDER BY created_at DESC, id DESC
-                """,
+                ORDER BY julianday(created_at) DESC, id DESC
+                """ + cap,
                 (rule_id,),
             ):
                 operator_actions.append(_operator_action_row(row))
@@ -757,6 +888,8 @@ class SQLiteStore:
             alert_events.sort(key=lambda row: _parse_datetime(row["occurred_at"]), reverse=True)
             output_dispatches.sort(key=lambda row: _parse_datetime(row["occurred_at"]), reverse=True)
             operator_actions.sort(key=lambda row: _parse_datetime(row["created_at"]), reverse=True)
+            if limit is not None:
+                operator_actions = operator_actions[: int(limit)]  # with the silences that cover the rule
             return {
                 "enabled": True,
                 "alert_events": alert_events,
@@ -771,102 +904,85 @@ class SQLiteStore:
         after_alert_id: int | None = None,
         after_action_id: int | None = None,
     ) -> dict[str, Any]:
-        primary_conn = self._require_conn()
-        shared_connection = str(self.path) == ":memory:"
-        # WAL allows this short read snapshot to run without taking the writer lock
-        # used by source evaluation and operator actions.
-        conn = (
-            primary_conn
-            if shared_connection
-            else sqlite3.connect(self.path, check_same_thread=False)
-        )
-        conn.row_factory = sqlite3.Row
-        if not shared_connection:
-            conn.execute("PRAGMA query_only=ON")
-            conn.execute("BEGIN")
         incremental = after_alert_id is not None or after_action_id is not None
-        try:
-            with self._lock if shared_connection else nullcontext():
-                alert_where: list[str] = [
-                    "NOT (ae.previous_state IS NULL AND ae.current_state = 'OK')"
-                ]
-                alert_params: list[object] = []
-                if incremental:
-                    alert_where.append("ae.id > ?")
-                    alert_params.append(after_alert_id or 0)
-                alert_order = "ASC" if incremental else "DESC"
-                alert_rows = list(
-                    conn.execute(
-                        f"""
-                    SELECT
-                        ae.id,
-                        ae.rule_id,
-                        ae.previous_state,
-                        ae.current_state,
-                        ae.previous_severity,
-                        ae.current_severity,
-                        ae.transition,
-                        ae.severity,
-                        ae.owner,
-                        ae.message,
-                        ae.tags_json,
-                        ae.occurred_at,
-                        ae.definition_file,
-                        ae.matched_outputs_json
-                    FROM alert_events AS ae
-                    WHERE {' AND '.join(alert_where)}
-                    ORDER BY ae.id {alert_order}
-                    LIMIT ?
-                    """,
-                        (*alert_params, limit + 1),
-                    )
+        with self._reading() as conn:
+            alert_where: list[str] = [
+                "NOT (ae.previous_state IS NULL AND ae.current_state = 'OK')"
+            ]
+            alert_params: list[object] = []
+            if incremental:
+                alert_where.append("ae.id > ?")
+                alert_params.append(after_alert_id or 0)
+            alert_order = "ASC" if incremental else "DESC"
+            alert_rows = list(
+                conn.execute(
+                    f"""
+                SELECT
+                    ae.id,
+                    ae.rule_id,
+                    ae.previous_state,
+                    ae.current_state,
+                    ae.previous_severity,
+                    ae.current_severity,
+                    ae.transition,
+                    ae.severity,
+                    ae.owner,
+                    ae.message,
+                    ae.tags_json,
+                    ae.occurred_at,
+                    ae.definition_file,
+                    ae.matched_outputs_json
+                FROM alert_events AS ae
+                WHERE {' AND '.join(alert_where)}
+                ORDER BY ae.id {alert_order}
+                LIMIT ?
+                """,
+                    (*alert_params, limit + 1),
                 )
+            )
 
-                action_where: list[str] = []
-                action_params: list[object] = []
-                if incremental:
-                    action_where.append("oa.id > ?")
-                    action_params.append(after_action_id or 0)
-                action_order = "ASC" if incremental else "DESC"
-                action_where_sql = f"WHERE {' AND '.join(action_where)}" if action_where else ""
-                action_rows = list(
-                    conn.execute(
-                        f"""
-                    SELECT oa.*
-                    FROM operator_actions AS oa
-                    {action_where_sql}
-                    ORDER BY oa.id {action_order}
-                    LIMIT ?
-                    """,
-                        (*action_params, limit + 1),
-                    )
+            action_where: list[str] = []
+            action_params: list[object] = []
+            if incremental:
+                action_where.append("oa.id > ?")
+                action_params.append(after_action_id or 0)
+            action_order = "ASC" if incremental else "DESC"
+            action_where_sql = f"WHERE {' AND '.join(action_where)}" if action_where else ""
+            action_rows = list(
+                conn.execute(
+                    f"""
+                SELECT oa.*
+                FROM operator_actions AS oa
+                {action_where_sql}
+                ORDER BY oa.id {action_order}
+                LIMIT ?
+                """,
+                    (*action_params, limit + 1),
                 )
+            )
 
-                alert_has_more = len(alert_rows) > limit
-                action_has_more = len(action_rows) > limit
-                alert_rows = alert_rows[:limit]
-                action_rows = action_rows[:limit]
+            alert_has_more = len(alert_rows) > limit
+            action_has_more = len(action_rows) > limit
+            alert_rows = alert_rows[:limit]
+            action_rows = action_rows[:limit]
 
-                max_alert_id = int(
-                    conn.execute("SELECT COALESCE(MAX(id), 0) FROM alert_events").fetchone()[0]
-                )
-                max_action_id = int(
-                    conn.execute("SELECT COALESCE(MAX(id), 0) FROM operator_actions").fetchone()[0]
-                )
+            max_alert_id = int(
+                conn.execute("SELECT COALESCE(MAX(id), 0) FROM alert_events").fetchone()[0]
+            )
+            max_action_id = int(
+                conn.execute("SELECT COALESCE(MAX(id), 0) FROM operator_actions").fetchone()[0]
+            )
 
-                if incremental:
-                    latest_alert_id = max((row["id"] for row in alert_rows), default=after_alert_id or 0)
-                    latest_action_id = max((row["id"] for row in action_rows), default=after_action_id or 0)
-                    if not alert_has_more:
-                        latest_alert_id = max(latest_alert_id, max_alert_id)
-                    if not action_has_more:
-                        latest_action_id = max(latest_action_id, max_action_id)
-                else:
-                    latest_alert_id = max_alert_id
-                    latest_action_id = max_action_id
-        finally:
-            if not shared_connection:
-                conn.close()
+            if incremental:
+                latest_alert_id = max((row["id"] for row in alert_rows), default=after_alert_id or 0)
+                latest_action_id = max((row["id"] for row in action_rows), default=after_action_id or 0)
+                if not alert_has_more:
+                    latest_alert_id = max(latest_alert_id, max_alert_id)
+                if not action_has_more:
+                    latest_action_id = max(latest_action_id, max_action_id)
+            else:
+                latest_alert_id = max_alert_id
+                latest_action_id = max_action_id
 
         alert_entries = [
             {
@@ -932,8 +1048,7 @@ class SQLiteStore:
         details: dict[str, Any],
         created_at: datetime,
     ) -> None:
-        conn = self._require_conn()
-        with self._lock:
+        with self._transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO operator_actions (
@@ -956,12 +1071,47 @@ class SQLiteStore:
                     created_at.isoformat(),
                 ),
             )
-            conn.commit()
+
+    @contextmanager
+    def _reading(self) -> Iterator[sqlite3.Connection]:
+        """A connection of its own for a read: with WAL, its snapshot does not wait for the
+        writes going on (nor for the store lock they hold). An in-memory database has only
+        the one connection."""
+        primary = self._require_conn()
+        if str(self.path) == ":memory:":
+            with self._lock:
+                yield primary
+            return
+        conn = sqlite3.connect(self.path, check_same_thread=False)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")  # one snapshot for every query of the read
+            yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """One write: committed, or rolled back when it fails (the database locked by
+        another process past the busy timeout, a full disk), so the next write starts clean."""
+        conn = self._require_conn()
+        with self._lock:
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     def _require_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             raise RuntimeError("store is not initialized")
         return self._conn
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
 
 
 def build_store(path: str | Path | None):

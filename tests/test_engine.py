@@ -4988,16 +4988,24 @@ class OutputTest(unittest.TestCase):
             status = engine.plugin_states["output:broken-init"]
             self.assertEqual((status.state, status.init_ok), ("FAILED", False))
             source = engine.sources["postgres"]
-            engine.evaluate_source(source.source_id, source.poll(), now=self.now)
-            source.now = self.now - timedelta(seconds=10)
             with self.assertLogs("kanary.engine", level="INFO") as captured:
                 engine.evaluate_source(source.source_id, source.poll(), now=self.now)
-            # The event was queued, and its delivery tried init() first.
+            # The events were queued, and their delivery tried init() first.
             self.assertGreaterEqual(BrokenInitOutput.init_calls, 2)
             self.assertTrue(any(
                 "alert dispatch summary:" in line and "matched=broken-init" in line and "failed=broken-init" in line
                 for line in captured.output
             ), captured.output)
+            # The stale alert's FIRING never went out, so its OK is not sent either.
+            source.now = self.now - timedelta(seconds=10)
+            calls = BrokenInitOutput.init_calls
+            with self.assertLogs("kanary.engine", level="INFO") as captured:
+                engine.evaluate_source(source.source_id, source.poll(), now=self.now)
+            self.assertTrue(any(
+                "rule=postgres.temperature.stale transition=FIRING->OK matched=- " in line and "filtered=broken-init" in line
+                for line in captured.output
+            ), captured.output)
+            self.assertEqual(BrokenInitOutput.init_calls, calls)
             # The destination is back: the next event goes out, after init().
             BrokenInitOutput.fail_init = False
             BrokenInitOutput.events = []

@@ -14,7 +14,7 @@ import tomllib
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .engine import Engine, NotApplicable, UnknownTarget
+from .engine import Engine, EngineRestarting, NotApplicable, UnknownTarget
 from .constants import DEFAULT_VIEWER_TITLE, AlertState, severity_name
 from .values import coerce_datetime, json_default, json_ready
 
@@ -150,6 +150,9 @@ class ControlAPI:
                             "rules": sorted(engine.rules),
                             "alert_count": len(engine.alerts),
                             "output_emit_enabled": engine.output_emit_enabled,
+                            # The last failed history write, until one works again; alerts are still sent.
+                            "state_db_error": engine.state_db_error,
+                            "state_db_error_at": engine.state_db_error_at,
                         },
                     )
                     return
@@ -216,7 +219,13 @@ class ControlAPI:
                         )
                         return
                     rule_id = unquote(request_path[len("/history/") :]).strip("/")
-                    self._write_json(HTTPStatus.OK, engine.get_rule_history(rule_id))
+                    try:
+                        # The newest `limit` of each section; without it, everything.
+                        limit = _parse_query_int(parse_qs(urlsplit(self.path).query), "limit", default=None, minimum=1)
+                    except ValueError as exc:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                        return
+                    self._write_json(HTTPStatus.OK, engine.get_rule_history(rule_id, limit=limit))
                     return
 
                 if request_path == "/alert-history":
@@ -471,6 +480,9 @@ class ControlAPI:
                     except KeyError as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
                         return
+                    except EngineRestarting as exc:
+                        self._write_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+                        return
                     except Exception as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                         return
@@ -498,6 +510,9 @@ class ControlAPI:
                         )
                     except KeyError as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
+                        return
+                    except EngineRestarting as exc:
+                        self._write_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
                         return
                     except Exception as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -534,6 +549,8 @@ class ControlAPI:
                     return action(str(operator))
                 except UnknownTarget as exc:
                     self._write_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                except EngineRestarting as exc:
+                    self._write_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
                 except NotApplicable as exc:
                     self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
                 except Exception as exc:
@@ -676,6 +693,9 @@ def _installation_metadata(engine: Engine | None = None, extra: dict[str, object
         "state_db_schema_version": getattr(getattr(engine, "store", None), "schema_version", 0) if engine is not None else 0,
         "state_db_target_schema_version": getattr(getattr(engine, "store", None), "target_schema_version", 1) if engine is not None else 1,
         "output_emit_enabled": getattr(engine, "output_emit_enabled", True) if engine is not None else True,
+        "state_db_error": getattr(engine, "state_db_error", None),
+        "state_db_error_at": getattr(engine, "state_db_error_at", None),
+        "state_db_failed_writes": getattr(engine, "state_db_failed_writes", 0),
     }
     if extra:
         result.update(extra)

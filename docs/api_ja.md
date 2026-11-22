@@ -10,20 +10,24 @@
 
 起動時に `--api-host` と `--api-port` を指定すると bind address を変更できます。
 
+[openapi.yaml](openapi.yaml) は同じ endpoint を OpenAPI 3.1 の定義として書いたものです（tool や client の生成用）。`tests/test_openapi.py` が、KANARY の提供する route とちょうど一致することを確かめます。
+
 ### Read endpoints
 
 - `GET /health`
   sourceやruleの読み込み状況と`output_emit_enabled`を含む、小さなruntime health summaryを返します。
   `time`、`timezone`、`utc_offset` は host の時計と time zone です。time zone 無しで送った時刻（silence の期間など）はこの zone で読みます。
+- `GET /meta`
+  install された version と project の link、state database（有効か、schema version、最後に失敗した書き込みと失敗の回数）、`output_emit_enabled`、`plugin_load_error`（最後の読み直しで plugin file が読み込めなかった理由）を返します。
 - `GET /peer-status`
   peer monitoring 用の compact な status payload を返します。
 - `GET /alerts`
   local node の current alert 一覧を返します。
-  再起動の後は、各 rule の alert を state database から止まったときの状態で戻し、その rule が評価されるまで `"restored": true` を付けます。戻した alert も ack や silence ができます。まだ alert の無い rule（一度も評価されていない、または `--state-db` なし）はこの一覧に入らず、viewer と `kanaryctl alerts` では `WAITING` と表示します。
+  再起動の後は、各 rule の alert を state database から止まったときの状態で戻し、その rule が評価されるまで `"restored": true` を付けます。message と値は、止まる前の最後の評価のものです。KANARY が止まっている間に始まった・終わった silence は、起動時に反映します。戻した alert も ack や silence ができます。まだ alert の無い rule（一度も評価されていない、または `--state-db` なし）はこの一覧に入らず、viewer と `kanaryctl alerts` では `WAITING` と表示します。
 - `GET /export-alerts`
   remote alert import 用の安定した形式で alert を返します。
 - `GET /history/{rule_id}`
-  1 つの rule に対する alert event、output dispatch summary、operator action を返します。
+  1 つの rule に対する alert event、output dispatch summary、operator action を新しい順に返します（書き込んだ順ではなく、起きた時刻の順です。dispatch は全 output が終わってから書くためです）。`?limit=N` でそれぞれ新しい N 件だけを返します（viewer は 200、`kanaryctl alerts RULE` は 5）。無ければすべてです。
   output dispatchには、`--no-output-emit`により実行されなかったmatched outputを`emit_skipped_outputs`として含めます。
 - `GET /alert-history`
   全 rule の alert event と operator action を、新しい順の統合タイムラインとして返します。
@@ -46,7 +50,7 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
 
 ### Write endpoints
 
-request body は JSON object です。それ以外（JSON でないもの、list、文字列）は 400 を返します。存在しない rule や silence を指定した operator の操作は 404 を返します。その alert の今の状態には当てはまらない操作（`FIRING` でない alert の acknowledge、acknowledge されていない alert の unack、cancel 済みの silence の cancel）は 409 を返します。error の応答には `error` の文があります。
+request body は JSON object です。それ以外（JSON でないもの、list、文字列）は 400 を返します。ack、unack、silence の endpoint の応答には `warnings` があります。何にも当たらない silence の対象や、転送した操作を受け取れなかった peer を知らせます（ローカルの操作はそれでも成立します）。存在しない rule や silence を指定した operator の操作は 404 を返します。その alert の今の状態には当てはまらない操作（`FIRING` でない alert の acknowledge、acknowledge されていない alert の unack、cancel 済みの silence の cancel）は 409 を返します。`reload --full` で engine が次の engine に引き継いでいる間は、ack、unack、silence の endpoint は 503 を返します。少し待ってからやり直してください。error の応答には `error` の文があります。
 
 - `POST /alerts/{rule_id}/ack`
   `FIRING` の alert を 1 つ acknowledge します（再起動の後に `FIRING` として復元された alert も含む）。
@@ -72,7 +76,7 @@ request body は JSON object です。それ以外（JSON でないもの、list
   `{"all":true}` は watched な Python file に変更が無くても、毎回 full discovery をやり直します。
   `{"full":true}` は discovery 成功後に in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、空 body も受け付けます。この場合は `{"all":true}` と同じ意味です。
-  reload した rule は、同じ reload の source と output が揃ってから評価するので、新しい rule の最初の alert は新しい output にも届きます。
+  reload が source、output、rule を入れ替えている間、評価は待ちます（読み出しと operator の操作は待ちません）。その間に読んだ値は、新しい source の最初の値も含め、すべてが揃ってから判定するので、その alert は同じ reload で加えた output にも届きます。
   応答は `sources` / `rules` / `outputs` ごとに、`matched`、`reloaded`、`removed`、`failed`（class か `__init__()` が失敗したので適用せず、動いている instance がそのまま続く）、`init_failed`（適用したが最初の `init()` が失敗した。やり直し続ける）、`errors`（それぞれの理由）を返します。`status` は、すべて適用できたら `reloaded`、一部だけなら `partial`、何も適用できなかったら `reload_failed` です（plugin file が load や検査に通らない場合も `reload_failed`）。`reloaded` 以外は HTTP 500 で、各 plugin を挙げた `error` 文字列が付きます。
 - `POST /test-poll/{source_id}`
   その source の `test_poll()` を、source の thread で poll と poll の間に実行し、その結果を fully-qualified input name で返します: `{"source_id": "postgres", "status": "ok", "metadata": {...}, "inputs": {"postgres:temperature": {"value": 21.5, "timestamp": "...", "metadata": {}}}}`（`reason` と `metadata` は poll が与えたときだけ）。これはそのまま `POST /test-evaluate/{rule_id}` の payload になります。結果は評価に使わず、source の状態と status も変わらず、通常の poll の予定もずれません。source が動いていない（`init()` に失敗した）場合や、30 秒以内に終わらない場合は 409 を返します。
@@ -84,7 +88,7 @@ request body は JSON object です。それ以外（JSON でないもの、list
 
   通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
 
-  判定には live rule の copy を使うので、`evaluate()` が `self` に加えた変更（counter や前回値）は live rule に届きません。copy できない rule（lock や接続を持つもの）は新しい instance で判定します。`kanary.Buffer` に加えたものは、test poll と同じく捨てます。
+  判定には live rule の copy と、前回の alert（`ctx.previous_alert`）や source snapshot の copy を使うので、`evaluate()` が加えた変更（`self` の counter や前回値、前回の alert、input）は live の状態に届きません。copy できない rule（lock や接続を持つもの）は新しい instance で判定します。`kanary.Buffer` に加えたものは、test poll と同じく捨てます。
 - `GET /test-evaluate-template/{rule_id}`
   1 つの rule 向けの canonical な `inputs` payload template を返します。単一 input rule の場合は shorthand template も含まれることがあります。
 - `POST /test-fire/{rule_id}`
@@ -99,7 +103,7 @@ request body は JSON object です。それ以外（JSON でないもの、list
 - Web viewer と `kanaryctl` は同じ API を使います
 - history は SQLite 永続化が有効なときだけ残ります
 - `/plugins/{type}/{plugin_id}/source` は loaded plugin と DISCOVERED plugin の source code を返します
-- `dirty` は完全な依存解析ではなく、実用上の reload ヒントです。Kanary は plugin 定義本体の変更と watched root 内の静的 import を見ますが、same-file helper の全変更や動的依存を完全には追いません。
+- `dirty` は、code が変わった plugin に付きます。見るのは、その class（plugin file にある継承元の class も含む）、file の中の plugin class 以外の部分（先頭の定数を変えると、その file の plugin がすべて変わったことになります）、それが import する plugin directory 内の module（別の helper を経由するものや相対 import も含む）です。code から見えない import（`importlib`、実行時に組み立てた名前）や Python 以外の file は追いません。それらは `reload --rule ...` か `--all` で適用してください。
 - raw file path は受け取りません
 - `/export-alerts` は remote import 用の endpoint です
 

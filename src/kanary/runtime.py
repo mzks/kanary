@@ -18,8 +18,8 @@ from typing import Any, Callable
 from .api import ControlAPI, PollUnavailableError
 from .constants import DEFAULT_VIEWER_TITLE
 from .dispatch import SHUTDOWN_DRAIN_SECONDS
-from .engine import Engine, source_initialized
-from .loader import RuleDirectoryLoader
+from .engine import HISTORY_DRAIN_SECONDS, Engine, source_initialized
+from .loader import RuleDirectoryLoader, installed_file
 from .models import PluginStatus
 from .schedule import compiled_schedule
 from .store import build_store
@@ -61,13 +61,14 @@ class PluginMetadata:
     plugin_type: str
     plugin_id: str
     definition_file: str | None
-    source_hash: str
-    dependency_files: tuple[str, ...]
+    source_hash: str  # its class, with the classes it extends from plugin files
+    file_hash: str  # the rest of its file: constants, functions, imports (not the other plugins)
+    dependency_files: tuple[str, ...]  # the plugin-directory modules it imports, also indirectly
     dependency_hash: str
 
     @property
-    def signature(self) -> tuple[str, str]:
-        return (self.source_hash, self.dependency_hash)
+    def signature(self) -> tuple[str, str, str]:
+        return (self.source_hash, self.file_hash, self.dependency_hash)
 
 
 @dataclass(slots=True)
@@ -113,6 +114,7 @@ class EngineRuntime:
         self._source_init_done: dict[str, threading.Event] = {}  # set once a thread's first init() ended
         self._test_poll_requests: dict[str, list[Future]] = {}
         self._test_poll_lock = threading.Lock()
+        self._reload_lock = threading.RLock()
         self.engine: Engine | None = None
         self._signature: tuple[tuple[str, int], ...] = ()
         self._discovered_snapshot = None
@@ -220,7 +222,11 @@ class EngineRuntime:
 
     def _watch_reload_loop(self) -> None:
         while not self._stop_event.wait(self.config.reload_interval):
-            self.reload_now_if_changed()
+            try:
+                self.reload_now_if_changed()
+            except Exception:
+                # The watch must go on: a file renamed during the scan, a bug in a reload.
+                logger.exception("watching the plugin directories failed; trying again")
 
     def _wake_silence_scheduler(self) -> None:
         self._silence_wakeup.set()
@@ -242,6 +248,10 @@ class EngineRuntime:
             engine.reconcile_silences()
 
     def reload_now_if_changed(self) -> bool:
+        with self._reload_lock:
+            return self._reload_if_changed()
+
+    def _reload_if_changed(self) -> bool:
         new_signature = self.loader.snapshot_signature()
         if new_signature == self._signature:
             return True
@@ -260,6 +270,16 @@ class EngineRuntime:
         self,
         request: dict[str, Any] | None = None,
         expected_signature: tuple[tuple[str, int], ...] | None = None,
+    ) -> dict[str, Any] | bool:
+        # One reload at a time: an operator's, another operator's, and auto-reload would
+        # otherwise stop and start the same sources' threads under each other.
+        with self._reload_lock:
+            return self._reload(request, expected_signature)
+
+    def _reload(
+        self,
+        request: dict[str, Any] | None,
+        expected_signature: tuple[tuple[str, int], ...] | None,
     ) -> dict[str, Any] | bool:
         force_refresh = request is None
         if request is not None:
@@ -331,27 +351,32 @@ class EngineRuntime:
             for plugin_id in plan.selected:
                 engine._plugin_status(plan.plugin_type, plugin_id).state = "RELOADING"
 
-        # Sources first (rules resolve against them), then outputs, then rules. The
-        # reloaded rules are judged once all of them are in place, so the first alert of
-        # a new rule also reaches an output added by the same reload.
-        self._apply_plan(plans["source"], self._reload_sources)
-        self._apply_plan(
-            plans["output"],
-            lambda plan: engine.reload_output_plugins(
-                replacements={output_id: plan.classes[output_id] for output_id in plan.instances},
-                removed_output_ids=plan.removed,
-                prepared=plan.instances,
-            ),
-        )
-        self._apply_plan(
-            plans["rule"],
-            lambda plan: engine.reload_rule_plugins(
-                replacements={rule_id: plan.classes[rule_id] for rule_id in plan.instances},
-                removed_rule_ids=plan.removed,
-                prepared=plan.instances,
-                evaluate=False,
-            ),
-        )
+        # Sources first (rules resolve against them), then outputs, then rules, while
+        # evaluations wait: a value read meanwhile, by a new source or an old one, is judged
+        # once all of them are in place, so its alert also reaches an output added now.
+        waits: list[Callable[[], None]] = []
+        with engine.holding_evaluations():
+            self._apply_plan(plans["source"], self._reload_sources)
+            self._apply_plan(
+                plans["output"],
+                lambda plan: engine.reload_output_plugins(
+                    replacements={output_id: plan.classes[output_id] for output_id in plan.instances},
+                    removed_output_ids=plan.removed,
+                    prepared=plan.instances,
+                    after=waits,
+                ),
+            )
+            self._apply_plan(
+                plans["rule"],
+                lambda plan: engine.reload_rule_plugins(
+                    replacements={rule_id: plan.classes[rule_id] for rule_id in plan.instances},
+                    removed_rule_ids=plan.removed,
+                    prepared=plan.instances,
+                    evaluate=False,
+                ),
+            )
+        for wait in waits:  # removed outputs stopping, new outputs' init()
+            wait()
         self._collect_init_failures(plans["source"], plans["output"])
         try:
             engine.evaluate_reloaded_rules(plans["rule"].instances)
@@ -484,28 +509,56 @@ class EngineRuntime:
 
         old_source_ids = set(self._source_threads)
         unthreaded = {source_id: source for source_id, source in old_engine.sources.items() if source_id not in old_source_ids}
-        self._stop_source_threads(old_source_ids)  # each thread terminates its own source
-        for source_id, source in unthreaded.items():
-            self._retire_source(old_engine, source_id, source)
-        # Queued events of the old engine go out first, so a FIRING still waiting
-        # there cannot arrive after the new engine's OK for the same rule.
-        if not old_engine.flush_outputs(timeout=SHUTDOWN_DRAIN_SECONDS):
-            logger.warning("some outputs were still sending when the full restart began")
-        try:
-            new_engine.start(init_sources=False)
-        except Exception as exc:
+
+        def give_up(reason: str) -> dict[str, Any]:
+            """The old engine goes on as it was: its sources' threads never stopped."""
             try:
                 new_engine.shutdown(terminate_sources=False)
             except Exception:
                 pass
-            self._start_source_threads(old_source_ids)  # the old engine goes on
-            logger.exception("full engine restart failed")
-            return {"status": "reload_failed", "target": "full", "error": f"{type(exc).__name__}: {exc}"}
+            old_engine.thaw()
+            logger.error("full engine restart not done; the running engine goes on: %s", reason)
+            return {"status": "reload_failed", "target": "full", "error": reason}
 
-        try:
-            old_engine.shutdown(terminate_sources=False)
-        except Exception:
-            logger.exception("old engine shutdown failed after full restart")
+        # The new engine starts from what the old one saved. From here on the old one
+        # changes nothing: no evaluations (its sources go on polling, and what they read
+        # waits), no acks or silences (the API answers 503 and asks to try again), so
+        # what it saved is all it did. Its source threads stop only once the new engine
+        # runs: a restart given up leaves them as they were.
+        old_engine.freeze()
+        with old_engine.holding_evaluations():
+            # Every event of the old engine goes out (or fails) first. One still being sent
+            # after the switch could reach its receiver after the new engine's next event
+            # of the rule (its FIRING after the OK): the restart waits for the destination
+            # instead, and is given up while it does not answer.
+            if not old_engine.flush_outputs(timeout=SHUTDOWN_DRAIN_SECONDS):
+                busy = ", ".join(sorted(old_engine.busy_outputs())) or "an output"
+                return give_up(
+                    f"output {busy} still sending after {SHUTDOWN_DRAIN_SECONDS:.0f} s; "
+                    "try again once it has sent (or restart KANARY)"
+                )
+            old_engine.save_latest_judgments()  # the values each alert last had come along
+            if not old_engine.flush_history(timeout=HISTORY_DRAIN_SECONDS):
+                # Restored without them, the new engine would send again what was sent.
+                return give_up(
+                    f"the state database did not take the running engine's last writes within "
+                    f"{HISTORY_DRAIN_SECONDS:.0f} s ({old_engine.state_db_error or 'still writing'})"
+                )
+            try:
+                new_engine.start(init_sources=False)
+            except Exception as exc:
+                logger.exception("full engine restart failed")
+                return give_up(f"{type(exc).__name__}: {exc}")
+            # What is gone from the plugins is removed as a reload removes it: an ack of a
+            # removed rule does not come back with a rule of the same id later.
+            removed = new_engine.forget_removed_plugins(old_engine)
+            self._stop_source_threads(old_source_ids)  # each thread terminates its own source
+            for source_id, source in unthreaded.items():
+                self._retire_source(old_engine, source_id, source)
+            try:
+                old_engine.shutdown(terminate_sources=False)  # closed: nothing evaluates it any more
+            except Exception:
+                logger.exception("old engine shutdown failed after full restart")
 
         self.engine = new_engine
         self.store = new_store
@@ -522,9 +575,9 @@ class EngineRuntime:
         )
         everything = {
             plugin_type: {
-                "matched": sorted(registry),
+                "matched": sorted(set(registry) | set(removed[plugin_type])),
                 "reloaded": sorted(registry),
-                "removed": [],
+                "removed": removed[plugin_type],
                 "failed": [],
                 "init_failed": [],
                 "errors": {},
@@ -728,7 +781,7 @@ class EngineRuntime:
                     return  # stopped or reloaded while poll() was running
                 # poll() may have waited for data, so stamp the result when it returned.
                 observed_at = datetime.now().astimezone()
-                engine.evaluate_source(source_id, payload, now=observed_at)
+                engine.evaluate_source(source_id, payload, now=observed_at, cancelled=stopped, source=source)
             except Exception:
                 logger.exception("source '%s' failed", source_id)
             self._serve_test_polls(engine, source_id, source)  # requests that came during the poll
@@ -859,24 +912,34 @@ class EngineRuntime:
         raise last_exc
 
     def _collect_plugin_metadata(self, snapshot) -> dict[tuple[str, str], PluginMetadata]:
-        dependency_map = _build_dependency_map(self.loader.rule_directories)
+        """What each plugin's code is made of, to tell which ones an edit changed: its class,
+        the rest of its file (a LIMIT at the top of it), and the helper modules it imports,
+        also through other helpers."""
+        registries = (("source", snapshot.sources), ("rule", snapshot.rules), ("output", snapshot.outputs))
+        dependencies_of = _build_dependency_map(self.loader.rule_directories)
+        plugin_classes: dict[str, set[str]] = {}  # file -> names of the plugin classes in it
+        for _plugin_type, registry in registries:
+            for plugin_cls in registry.values():
+                definition_file = getattr(plugin_cls, "__kanary_definition_file__", None)
+                if definition_file:
+                    plugin_classes.setdefault(_file_key(definition_file), set()).add(plugin_cls.__name__)
+        file_hashes: dict[str, str] = {}
         metadata: dict[tuple[str, str], PluginMetadata] = {}
-        for plugin_type, registry in (
-            ("source", snapshot.sources),
-            ("rule", snapshot.rules),
-            ("output", snapshot.outputs),
-        ):
+        for plugin_type, registry in registries:
             for plugin_id, plugin_cls in registry.items():
                 definition_file = getattr(plugin_cls, "__kanary_definition_file__", None)
-                dependencies = tuple(sorted(dependency_map.get(str(definition_file), set()))) if definition_file else ()
-                dependency_hash = _hash_dependencies(dependencies)
+                key = _file_key(definition_file) if definition_file else None
+                dependencies = tuple(sorted(dependencies_of.get(key, ()))) if key else ()
+                if key is not None and key not in file_hashes:
+                    file_hashes[key] = _hash_file_around_plugins(key, plugin_classes.get(key, set()))
                 metadata[(plugin_type, plugin_id)] = PluginMetadata(
                     plugin_type=plugin_type,
                     plugin_id=plugin_id,
                     definition_file=str(definition_file) if definition_file else None,
-                    source_hash=_hash_text(_safe_getsource(plugin_cls)),
+                    source_hash=_hash_text(_class_sources(plugin_cls)),
+                    file_hash=file_hashes.get(key, "") if key else "",
                     dependency_files=dependencies,
-                    dependency_hash=dependency_hash,
+                    dependency_hash=_hash_dependencies(dependencies),
                 )
         return metadata
 
@@ -916,7 +979,8 @@ class EngineRuntime:
             if loaded is not None and discovered is not None and loaded.signature != discovered.signature:
                 status.state = "DIRTY"
                 status.loaded = True
-                status.dirty_reason = "dependency_changed" if loaded.source_hash == discovered.source_hash else "definition_changed"
+                same_file = (loaded.source_hash, loaded.file_hash) == (discovered.source_hash, discovered.file_hash)
+                status.dirty_reason = "dependency_changed" if same_file else "definition_changed"
                 continue
             status.loaded = loaded is not None
             status.dirty_reason = None
@@ -927,9 +991,9 @@ class EngineRuntime:
         tracked_files: set[str] = set()
         for metadata in list(self._loaded_metadata.values()) + list(self._discovered_metadata.values()):
             if metadata.definition_file:
-                tracked_files.add(metadata.definition_file)
-            tracked_files.update(metadata.dependency_files)
-        return sorted(path for path in changed_files if path not in tracked_files)
+                tracked_files.add(_file_key(metadata.definition_file))
+            tracked_files.update(metadata.dependency_files)  # resolved already
+        return sorted(path for path in changed_files if _file_key(path) not in tracked_files)
 
     def _select_plugin_ids(self, plugin_type: str, *, target: str, pattern: str | None) -> set[str]:
         if self.engine is None:
@@ -1051,43 +1115,132 @@ def _changed_files(
     return sorted(path for path in paths if previous.get(path) != current.get(path))
 
 
-def _build_dependency_map(rule_directories: list[Path]) -> dict[str, set[str]]:
-    python_files: dict[str, Path] = {}
-    for root in rule_directories:
-        if not root.exists():
-            continue
-        for path in root.rglob("*.py"):
-            if path.is_file():
-                python_files[str(path)] = path
-    module_index: dict[str, str] = {}
-    for path_str, path in python_files.items():
-        for root in rule_directories:
-            try:
-                relative = path.relative_to(root)
-            except ValueError:
-                continue
-            module_name = ".".join(relative.with_suffix("").parts)
-            module_index[module_name] = path_str
-            break
+def _file_key(path: str | Path) -> str:
+    """One name for a file however it was reached (a relative path, a symlink, /tmp)."""
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
 
-    dependency_map: dict[str, set[str]] = {path: set() for path in python_files}
-    for path_str, path in python_files.items():
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except Exception:
+
+def _build_dependency_map(rule_directories: list[Path]) -> dict[str, set[str]]:
+    """For each Python file of the plugin directories, the ones it imports, also through
+    the ones those import (``from a import LIMIT`` where a.py has ``from b import LIMIT``).
+
+    A module is named from the plugin directory it is in, as the imports find it: ``limits``
+    for limits.py, ``pkg.limits`` for pkg/limits.py, ``pkg`` for pkg/__init__.py. Keys and
+    values are the files' resolved paths."""
+    modules: dict[str, str] = {}  # module name -> file
+    names_of: dict[str, tuple[str, bool]] = {}  # file -> (module name, is a package)
+    for root in rule_directories:
+        if not root.exists() or not root.is_dir():
             continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                names = [node.module]
-            else:
+        for path in sorted(root.rglob("*.py")):
+            if not path.is_file():
                 continue
-            for name in names:
-                dependency = module_index.get(name)
-                if dependency and dependency != path_str:
-                    dependency_map[path_str].add(dependency)
-    return dependency_map
+            parts = path.relative_to(root).with_suffix("").parts
+            package = parts[-1] == "__init__"
+            if package:
+                parts = parts[:-1]
+            if not parts:
+                continue
+            key = _file_key(path)
+            name = ".".join(parts)
+            modules.setdefault(name, key)
+            names_of.setdefault(key, (name, package))
+
+    direct: dict[str, set[str]] = {}
+    for key, (name, package) in names_of.items():
+        try:
+            tree = ast.parse(Path(key).read_text(encoding="utf-8"), filename=key)
+        except Exception:
+            direct[key] = set()
+            continue
+        direct[key] = {modules[imported] for imported in _imported_names(tree, name, package) if imported in modules} - {key}
+
+    closed: dict[str, set[str]] = {}
+    for key in direct:
+        seen: set[str] = set()
+        pending = list(direct[key])
+        while pending:
+            dependency = pending.pop()
+            if dependency in seen or dependency == key:
+                continue
+            seen.add(dependency)
+            pending.extend(direct.get(dependency, ()))
+        closed[key] = seen
+    return closed
+
+
+def _imported_names(tree: ast.AST, module_name: str, is_package: bool) -> set[str]:
+    """The modules a file imports, with the packages they are in (their __init__ runs too)."""
+    names: set[str] = set()
+
+    def with_packages(name: str) -> None:
+        parts = name.split(".")
+        names.update(".".join(parts[: index + 1]) for index in range(len(parts)))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                with_packages(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # from .limits import LIMIT: from the file's own package
+                package = module_name.split(".") if is_package else module_name.split(".")[:-1]
+                if node.level - 1 >= len(package):
+                    continue
+                package = package[: len(package) - (node.level - 1)]
+                base = ".".join(package + ([node.module] if node.module else []))
+            else:
+                base = node.module or ""
+            if not base:
+                continue
+            with_packages(base)
+            names.update(f"{base}.{alias.name}" for alias in node.names if alias.name != "*")  # from pkg import limits
+    return names
+
+
+def _hash_file_around_plugins(path: str, plugin_class_names: set[str]) -> str:
+    """The file without its plugin classes: what they all share. An edit to one plugin class
+    changes only that plugin; an edit to anything else in the file changes every plugin in it."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    try:
+        tree = ast.parse(text, filename=path)
+    except SyntaxError:
+        return _hash_text(text)
+    dropped: set[int] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name in plugin_class_names and node.end_lineno is not None:
+            first = min([decorator.lineno for decorator in node.decorator_list] + [node.lineno])
+            dropped.update(range(first, node.end_lineno + 1))
+    kept = [line for number, line in enumerate(text.splitlines(keepends=True), start=1) if number not in dropped]
+    return _hash_text("".join(kept))
+
+
+def _class_sources(plugin_cls: type[Any]) -> str:
+    """The plugin class's code, with that of the classes it extends that are plugin code too
+    (a base class in the same file, or in a helper): a change to the base changes the plugin."""
+    texts = []
+    for cls in plugin_cls.__mro__:
+        if cls is plugin_cls or _is_plugin_code(cls):
+            texts.append(_safe_getsource(cls))
+    return "\0".join(texts)
+
+
+def _is_plugin_code(cls: type[Any]) -> bool:
+    module = getattr(cls, "__module__", "") or ""
+    if module.startswith("_kanary_rules_"):
+        return True
+    if module == "kanary" or module.startswith("kanary.") or module == "builtins":
+        return False
+    try:
+        source_file = inspect.getsourcefile(cls)
+    except (OSError, TypeError):
+        return False
+    return bool(source_file) and not installed_file(source_file)
 
 
 def _safe_getsource(plugin_cls: type[Any]) -> str:

@@ -1,5 +1,7 @@
 const DEFAULT_REFRESH_MS = 5000;
 const HISTORY_BATCH_LIMIT = 500;
+// The newest entries of one rule's history shown with its alert (a flapping rule has very many).
+const RULE_HISTORY_LIMIT = 200;
 const HISTORY_ENTRY_LIMIT = 1000;
 const DASHBOARD_STATES = new Set(["FIRING", "ACKED", "SILENCED"]);
 
@@ -696,7 +698,7 @@ function renderBuildMeta() {
   }
 
   if (parts.length === 0) {
-    element.classList.toggle("hidden", !meta.plugin_load_error);
+    element.classList.toggle("hidden", !meta.plugin_load_error && !meta.state_db_error);
   } else {
     element.classList.remove("hidden");
   }
@@ -709,12 +711,23 @@ function renderBuildMeta() {
       </div>
     `
     : "";
+  // History could not be written (alerts are still sent): the history misses what happened since.
+  const stateDbErrorBlock = meta.state_db_error
+    ? `
+      <div class="viewer-build-warning">
+        <strong>State DB Write Error</strong>
+        <div>${escapeHtml(String(meta.state_db_error))}</div>
+        <div>${escapeHtml(formatDateTime(meta.state_db_error_at))} · ${escapeHtml(String(meta.state_db_failed_writes || 0))} failed writes; alerts are still sent</div>
+      </div>
+    `
+    : "";
   element.innerHTML = `
     ${parts.length > 0 ? `
       <strong>Project Metadata</strong>
       <div class="viewer-build-meta-links">${parts.join('<span aria-hidden="true">·</span>')}</div>
     ` : ""}
     ${loadErrorBlock}
+    ${stateDbErrorBlock}
   `;
 }
 
@@ -872,7 +885,7 @@ async function renderDetailPage() {
   // Ignore responses that arrive after the user moved to another alert.
   const requestedRuleId = alert.rule_id;
   try {
-    const history = await getJson(`/history/${encodeURIComponent(requestedRuleId)}`);
+    const history = await getJson(`/history/${encodeURIComponent(requestedRuleId)}?limit=${RULE_HISTORY_LIMIT}`);
     if (state.route === "detail" && state.selectedRuleId === requestedRuleId) {
       renderHistory(history);
     }

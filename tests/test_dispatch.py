@@ -240,9 +240,12 @@ class LifecycleTest(DispatchTestCase):
             self.assertTrue(engine.flush_outputs())
             self.assertEqual(len(attempts), 3)  # emit, retry, re-init + retry
             self.assertEqual(engine.plugin_states["output:down"].state, "FAILED")
-            self.feed(engine, 50.0)
+            self.feed(engine, 95.0, source="other", name="o")
             self.assertTrue(engine.flush_outputs())
             self.assertEqual(len(attempts), 4)  # already FAILED: a single attempt
+            self.feed(engine, 50.0)
+            self.assertTrue(engine.flush_outputs())
+            self.assertEqual(len(attempts), 4)  # its FIRING never went out: no OK to send
 
     def test_test_fire_reports_an_output_that_has_not_sent_yet(self):
         gate = threading.Event()

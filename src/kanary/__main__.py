@@ -278,6 +278,18 @@ def _run_new(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """The command; output piped into a reader that stops early (| head) ends it quietly."""
+    try:
+        code = _main()
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # Python would report the pipe once more when it flushes stdout at exit.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 1
+
+
+def _main() -> int:
     parser = build_parser()
     argv = sys.argv[1:]
     if not argv:

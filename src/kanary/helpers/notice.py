@@ -170,6 +170,11 @@ def event_fields(event: AlertEvent) -> list[tuple[str, str]]:
         if len(values) > MAX_VALUES:
             shown.append(f"… {len(values) - MAX_VALUES} more")
         fields.append(("Values", "\n".join(shown)))
+    if event.alert.restored:
+        # Sent before the rule was evaluated again (a silence that ended while KANARY was
+        # stopped): the message and values are from before the restart.
+        evaluated = event.alert.last_evaluated_at
+        fields.append(("Evaluated", f"{local_time(evaluated)}, before the restart" if evaluated else "before the restart"))
     if event.runbook:
         fields.append(("Runbook", event.runbook))  # the rule's: what to do, a link to a dashboard
     return fields

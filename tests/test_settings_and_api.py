@@ -209,8 +209,8 @@ class CronTest(unittest.TestCase):
         leap_day = parse_schedule("0 0 29 2 *").next_after(datetime(2026, 11, 22, 12, 0))
         self.assertEqual(leap_day, datetime(2028, 2, 29, 0, 0))
         self.assertLess(time.monotonic() - started, 0.2)
-        self.assertEqual(
-            parse_schedule("30 9 * * mon").next_after(datetime(2026, 11, 22, 12, 0, tzinfo=JST)),
+        self.assertEqual(  # read in its own zone, whatever the host's is
+            parse_schedule("CRON_TZ=Asia/Tokyo 30 9 * * mon").next_after(datetime(2026, 11, 22, 12, 0, tzinfo=JST)),
             datetime(2026, 11, 23, 9, 30, tzinfo=JST),
         )
 
@@ -258,6 +258,23 @@ class RuleHistoryOrderTest(unittest.TestCase):
         engine.acknowledge("hv", operator="alice")  # the engine's clock: UTC, 5 minutes later
         events = engine.get_rule_history("hv")["alert_events"]
         self.assertEqual([event["current_state"] for event in events], ["ACKED", "FIRING"])
+
+
+class RuleHistoryLimitTest(unittest.TestCase):
+    def test_the_newest_entries_of_each_section(self):
+        store = build_store(Path(tempfile.mkdtemp()) / "state.db")
+        engine = start(self, [range_rule("hv")], store=store)
+        for minute, value in enumerate((5, 0, 5, 0), start=1):
+            engine.evaluate_source("daq", {"hv": value}, now=T0 + timedelta(minutes=minute))
+        history = engine.get_rule_history("hv", limit=2)
+        self.assertEqual([event["current_state"] for event in history["alert_events"]], ["OK", "FIRING"])
+        self.assertEqual(len(engine.get_rule_history("hv")["alert_events"]), 4)
+        api = kanary.ControlAPI(engine_getter=lambda: engine, reload_callback=lambda body: {}, host="127.0.0.1", port=0)
+        thread = threading.Thread(target=api.start, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (api.shutdown(), thread.join(timeout=2.0)))
+        with urlopen(f"http://127.0.0.1:{api._server.server_address[1]}/history/hv?limit=1") as response:
+            self.assertEqual(len(json.loads(response.read())["alert_events"]), 1)
 
 
 class OutputSettingsTest(unittest.TestCase):

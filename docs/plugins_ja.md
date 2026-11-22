@@ -96,6 +96,12 @@ job を止めるときの書き方）は lint の警告付きで受け付けま�
 `kanaryctl test-poll` にも答えますが、poll はされず、Sources 画面には `NOT POLLED` と出ます。
 6 個や 7 個の欄（秒、年）は読みません。実装ごとに置く位置が違うためです。
 
+次の実行は、どれだけ先でも見つけます（2 月の第 5 月曜 `0 9 * FEB MON#5` の次は 2044 年）。
+夏時間の前後でも各欄は壁時計で読み、実行は実時刻で必ず前回より後になり、同じ時刻に 2 回動くことは
+ありません。時計が戻る日は、2 回ある時刻に 1 回だけ動きます。時計が進む日は、飛ばされる時刻のうち
+最初の 1 つだけが 1 時間遅れて動きます（`30 2 * * *` は 03:30。その日の 03:10 に KANARY を起動した場合も同じです。`*/15 2 * * *` は 03:00 に 1 回）。
+回数が大事な場合は、夏時間の無い zone（`CRON_TZ=UTC` や日本）か `interval` を使ってください。
+
 例:
 
 - `interval = 60.0`
@@ -419,9 +425,9 @@ payload を明示しない場合、Kanary は current source payload を自動�
 
 tag の pattern、state、transition が 1 つだけなら list でなく文字列でも書けます（`include_tags="infra"`）。state と transition の大文字小文字は問いません（`"ok"`）。不明な state や transition の名前は file の読み込み時にエラーになります。default に `OK` を追加して recovery event も除外する場合は、`exclude_states=kanary.Output.exclude_states + ["OK"]` と書けます。指定したリストは default との merge ではなく置き換えになるため、すべての state event を受け取るデバッグ・監査用 output では `exclude_states=[]` を明示します。
 
-`OK` は、その rule について前回の `OK` 以降に `OK` 以外の event（`FIRING`、`ACKED`、または `exclude_states` が通す state）を送った output にだけ届きます。`OK` は、その output に伝えたことを閉じるためのものだからです。このため、silence や suppression の前から `OK` だった rule は、それが終わっても `OK` を送りません。一方、発報してから silence され、silence 中に治った rule は、silence が終わったときに `OK` を送ります。再起動の後は、`OK` 以外で復元された alert を「送った」とみなします。こうして送らなかった `OK` は、output dispatch の履歴に filtered として記録されます。
+`OK` は、その rule について前回の `OK` 以降に `OK` 以外の event（`FIRING`、`ACKED`、または `exclude_states` が通す state）を送った output にだけ届きます。`OK` は、その output に伝えたことを閉じるためのものだからです。「送った」とは `emit()` が成功したことです。`FIRING` が送れなかった（送り先が落ちていて、retry もすべて失敗した）場合、その output にはその `OK` も送りません。このため、silence や suppression の前から `OK` だった rule は、それが終わっても `OK` を送りません。一方、発報してから silence され、silence 中に治った rule は、silence が終わったときに `OK` を送ります。再起動の後は、`OK` 以外で復元された alert を「送った」とみなします。こうして送らなかった `OK` は、output dispatch の履歴に filtered として記録されます。
 
-`OK` は、その output にその alert について最後に送った severity を持ちます（`minimum_severity` が見る `event.effective_severity`）。`minimum_severity=kanary.ERROR` の output に `CRITICAL` の alert を送っていれば、alert が `WARN` に下がってから治った場合も、その output に `OK` が届きます。
+`OK` は、その output にその alert について最後に送った severity を持ちます（`minimum_severity` が見る `event.effective_severity`）。`minimum_severity=kanary.ERROR` の output に `CRITICAL` の alert を送っていれば、alert が `WARN` に下がってから治った場合も、その output に `OK` が届きます。`--state-db` があれば、各 output に何を送ったかを保存するので、再起動を挟んでも同じです。
 
 filter を通る遷移を落としたい場合は、`emit()` 内で `previous_state` と `current_state` を確認します。
 
@@ -852,7 +858,7 @@ class MailAlert(kanary.MailOutput):
 
 webhook URL は通常 secret なので、上の plugin config の節のように `url = os.environ.get("WEBHOOK_URL")` と書きます。
 
-`SlackOutput`、`MattermostOutput`、`DiscordOutput` は、各 service の形式で rich な message を送ります: 色の帯（OK は緑、silence / suppress 中は灰色、それ以外は severity ごとに INFO 青、WARN 黄、ERROR 赤、CRITICAL 紫）、`🔴 FIRING ERROR oil.temperature` のような title、rule の message、state・severity・since・ack・owner・tag・判定した値の field です。通知や preview には 1 行の `text(event)` が出ます。`viewer_url` を設定すると title が KANARY viewer への link になります。`MattermostOutput` と `DiscordOutput` は `username`、`MattermostOutput` は `icon_url` も設定できます。別の形にするなら `payload()` を上書きします。
+`SlackOutput`、`MattermostOutput`、`DiscordOutput` は、各 service の形式で rich な message を送ります: 色の帯（OK は緑、silence / suppress 中は灰色、それ以外は severity ごとに INFO 青、WARN 黄、ERROR 赤、CRITICAL 紫）、`🔴 FIRING ERROR oil.temperature` のような title、rule の message、state・severity・since・ack・owner・tag・判定した値の field です。再起動の後、rule がまだ評価される前に送る event（KANARY が止まっている間に silence が終わった場合など）には、値の時刻と「再起動の前」を示す `Evaluated` field が付きます。通知や preview には 1 行の `text(event)` が出ます。`viewer_url` を設定すると title が KANARY viewer への link になります。`MattermostOutput` と `DiscordOutput` は `username`、`MattermostOutput` は `icon_url` も設定できます。別の形にするなら `payload()` を上書きします。
 
 `kanary.describe(event)` はこれらの部品を `kanary.Notice`（`title`、`headline`、`symbol`、`color`、`color_hex`、`message`、`fields`、`time`、`text`、`link`）として返します。Teams や pager など自分の output や、上書きした `payload()` で使えます。
 
