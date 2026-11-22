@@ -1352,8 +1352,8 @@ function updateDetailActionAvailability(alert) {
   const ackNotice = document.getElementById("ack-notice");
   const alreadyAcknowledged = alert.state === "ACKED";
   if (ackButton) {
-    // A rule that has no alert yet has nothing to acknowledge.
-    ackButton.disabled = state.pendingActions.has("acknowledge") || alreadyAcknowledged || Boolean(alert.waiting);
+    // Only a FIRING alert can be acknowledged (the API answers 409 for any other state).
+    ackButton.disabled = state.pendingActions.has("acknowledge") || alert.state !== "FIRING" || Boolean(alert.waiting);
   }
   if (unackButton) {
     unackButton.disabled = alert.state !== "ACKED" || state.pendingActions.has("acknowledge");
@@ -1376,7 +1376,7 @@ async function submitAck() {
   if (!alert) {
     return;
   }
-  if (alert.state === "ACKED" || state.pendingActions.has("acknowledge")) {
+  if (alert.state !== "FIRING" || state.pendingActions.has("acknowledge")) {
     return;
   }
   const operator = document.getElementById("ack-operator").value.trim();

@@ -67,7 +67,7 @@ docs/
 
 - `src/kanary/`: engine 本体と組み込み helper
 - `demo/`: 最小例
-- `examples/`: 実運用寄りの例
+- `examples/`: getting started のコード、factory pattern、SQLite のデモ（いろいろな種類の plugin は template: `src/kanary/templates/`）
 - `dev/`: 開発補助ツール
 - `tests/`: unittest
 - `docs/`: 利用者向け文書

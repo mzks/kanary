@@ -18,7 +18,6 @@ from .api import ControlAPI, PollUnavailableError
 from .constants import DEFAULT_VIEWER_TITLE
 from .dispatch import SHUTDOWN_DRAIN_SECONDS
 from .engine import Engine
-from .filtering import apply_excludes
 from .loader import RuleDirectoryLoader
 from .models import PluginStatus
 from .schedule import compiled_schedule
@@ -31,6 +30,8 @@ LOG_LEVEL_CHOICES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 AUTO_RELOAD_CHOICES = ("off", "dirty", "all")
 # How long a test poll requested from the API (kanaryctl test-poll) may take.
 TEST_POLL_TIMEOUT_SECONDS = 30.0
+# A source whose init() failed is tried again this often at most (or at its interval, if shorter).
+SOURCE_INIT_RETRY_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -43,7 +44,6 @@ class RuntimeConfig:
     enable_default_viewer: bool = True
     viewer_title: str = DEFAULT_VIEWER_TITLE
     output_emit_enabled: bool = True
-    print_alerts: bool = False
     exclude_plugins: list[str] | None = None
     log_level: str = DEFAULT_LOG_LEVEL
     state_db_path: Path | None = None
@@ -116,7 +116,7 @@ class EngineRuntime:
             output_emit_enabled=self.config.output_emit_enabled,
             silence_changed_callback=self._wake_silence_scheduler,
         )
-        self.engine.start()
+        self.engine.start(init_sources=False)  # each source's thread calls its init()
         self._publish_runtime_plugin_overlay()
         logger.info("engine started with %d sources, %d rules, %d outputs", len(self.engine.sources), len(self.engine.rules), len(self.engine.outputs))
         self._sync_source_threads()
@@ -309,34 +309,30 @@ class EngineRuntime:
             logger.warning("some outputs were still sending when the full restart began")
 
         new_store = build_store(self.config.state_db_path)
-        new_engine = Engine(
-            source_registry=self._discovered_snapshot.sources,
-            rule_registry=self._discovered_snapshot.rules,
-            output_registry=self._discovered_snapshot.outputs,
-            store=new_store,
-            node_id=self.config.node_id,
-            output_emit_enabled=self.config.output_emit_enabled,
-            silence_changed_callback=self._wake_silence_scheduler,
-        )
-
+        new_engine: Engine | None = None
         try:
-            new_engine.start()
-            failed_plugins = [
-                f"{status.plugin_type}:{status.plugin_id}"
-                for status in new_engine.plugin_states.values()
-                if status.state == "FAILED"
-            ]
-            if failed_plugins:
-                raise RuntimeError(
-                    "full restart produced failed plugins: "
-                    + ", ".join(sorted(failed_plugins))
-                )
+            # A plugin whose init() fails does not stop the restart: its thread keeps
+            # trying (a restart is most wanted while a database is down). What stops
+            # one is a plugin that cannot even be created (its class or __init__ fails).
+            new_engine = Engine(
+                source_registry=self._discovered_snapshot.sources,
+                rule_registry=self._discovered_snapshot.rules,
+                output_registry=self._discovered_snapshot.outputs,
+                store=new_store,
+                node_id=self.config.node_id,
+                output_emit_enabled=self.config.output_emit_enabled,
+                silence_changed_callback=self._wake_silence_scheduler,
+            )
+            new_engine.start(init_sources=False)
         except Exception as exc:
             try:
-                new_engine.shutdown()
+                if new_engine is not None:
+                    new_engine.shutdown()
+                else:
+                    new_store.close()
             except Exception:
                 pass
-            self._start_source_threads(old_source_ids)
+            self._start_source_threads(old_source_ids)  # the old engine goes on
             logger.exception("full engine restart failed")
             return {
                 "status": "reload_failed",
@@ -444,7 +440,9 @@ class EngineRuntime:
                 status = self.engine._plugin_status(plugin_type, plugin_id)
                 status.loaded = plugin_id in self._plugin_ids_for_type(self.engine.plugin_states, plugin_type)
                 status.dirty_reason = None
-                status.definition_file = self._discovered_metadata.get((plugin_type, plugin_id), self._loaded_metadata.get((plugin_type, plugin_id), None)).definition_file if self._discovered_metadata.get((plugin_type, plugin_id), self._loaded_metadata.get((plugin_type, plugin_id), None)) is not None else status.definition_file
+                metadata = self._discovered_metadata.get((plugin_type, plugin_id)) or self._loaded_metadata.get((plugin_type, plugin_id))
+                if metadata is not None:
+                    status.definition_file = metadata.definition_file
                 if status.state == "RELOADING":
                     status.state = "READY" if status.init_ok else "FAILED"
         else:
@@ -485,8 +483,6 @@ class EngineRuntime:
             del self._source_threads[source_id]
 
         for source_id in current_source_ids - existing_source_ids:
-            if not self._source_is_initialized(source_id):
-                continue
             stop_event = threading.Event()
             wake_event = threading.Event()
             thread = threading.Thread(
@@ -519,8 +515,6 @@ class EngineRuntime:
         for source_id in set(source_ids):
             if source_id not in self.engine.sources or source_id in self._source_threads:
                 continue
-            if not self._source_is_initialized(source_id):
-                continue
             stop_event = threading.Event()
             wake_event = threading.Event()
             thread = threading.Thread(
@@ -550,6 +544,9 @@ class EngineRuntime:
             raise PollUnavailableError("the engine is starting")
         if source_id not in engine.sources:
             raise KeyError(source_id)
+        if not self._source_is_initialized(source_id):
+            error = engine._plugin_status("source", source_id).last_error or "not yet"
+            raise PollUnavailableError(f"source '{source_id}' is not running: its init() failed ({error}); KANARY keeps trying it")
         future: Future = Future()
         with self._test_poll_lock:
             wake_event = self._source_wake_events.get(source_id)
@@ -606,6 +603,13 @@ class EngineRuntime:
             source = self.engine.sources.get(source_id)
             if source is None:
                 return
+            if not self._source_is_initialized(source_id) and not self._init_source(source_id, source, stop_event):
+                # Its database or device may still be starting (after a power cut, say): try again.
+                retry_at = time.monotonic() + min(float(source.interval or SOURCE_INIT_RETRY_SECONDS), SOURCE_INIT_RETRY_SECONDS)
+                while not stopped() and time.monotonic() < retry_at:
+                    wake_event.wait(retry_at - time.monotonic())
+                    wake_event.clear()
+                continue
             now = datetime.now().astimezone()
             schedule = compiled_schedule(source)
             if schedule is not None:
@@ -621,9 +625,7 @@ class EngineRuntime:
                     return  # stopped or reloaded while poll() was running
                 # poll() may have waited for data, so stamp the result when it returned.
                 observed_at = datetime.now().astimezone()
-                alerts = self.engine.evaluate_source(source_id, payload, now=observed_at)
-                if self.config.print_alerts:
-                    self._print_alerts(alerts)
+                self.engine.evaluate_source(source_id, payload, now=observed_at)
             except Exception:
                 logger.exception("source '%s' failed", source_id)
             self._serve_test_polls(source_id, source)  # requests that came during the poll
@@ -671,6 +673,24 @@ class EngineRuntime:
                 except Exception:
                     logger.exception("scheduled evaluation for rule '%s' failed", rule_id)
 
+    def _init_source(self, source_id: str, source, stop_event: threading.Event) -> bool:
+        """init() on the source's thread, with the reinit attempts of a failed poll; True when it worked."""
+        assert self.engine is not None
+        for attempt in range(1 + max(0, int(getattr(source, "max_reinit", 1)))):
+            if attempt and (stop_event.wait(attempt ** 2) or self._stop_event.is_set()):
+                return False
+            try:
+                self.engine._initialize_source(source)
+            except Exception as exc:
+                (logger.exception if attempt == 0 else logger.warning)(
+                    "source '%s' init failed: %s", source_id, exc
+                )
+                continue
+            if attempt:
+                logger.info("source '%s' init() succeeded on attempt %d", source_id, attempt + 1)
+            return True
+        return False
+
     def _poll_source_with_recovery(
         self,
         source_id: str,
@@ -717,29 +737,6 @@ class EngineRuntime:
         assert last_exc is not None
         self.engine.record_source_failure(source_id, str(last_exc), now=now)
         raise last_exc
-
-    def _print_alerts(self, alerts: dict) -> None:
-        rows = []
-        for alert in alerts.values():
-            rows.append(
-                {
-                    "rule_id": alert.rule_id,
-                    "state": alert.state.value,
-                    "severity": int(alert.severity),
-                    "message": alert.message,
-                    "payload": alert.payload,
-                    "last_evaluated_at": (
-                        alert.last_evaluated_at.isoformat() if alert.last_evaluated_at else None
-                    ),
-                }
-            )
-        if rows:
-            import json
-
-            print(json.dumps(rows, ensure_ascii=False, indent=2, default=_json_default))
-
-    def _apply_excludes(self, snapshot):
-        return apply_excludes(snapshot, self.config.exclude_plugins)
 
     def _collect_plugin_metadata(self, snapshot) -> dict[tuple[str, str], PluginMetadata]:
         dependency_map = _build_dependency_map(self.loader.rule_directories)
@@ -851,12 +848,6 @@ class EngineRuntime:
 
     def _plugin_ids_for_type(self, states: dict[str, PluginStatus], plugin_type: str) -> set[str]:
         return {status.plugin_id for status in states.values() if status.plugin_type == plugin_type and status.loaded}
-
-
-def _json_default(value: object) -> str:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _initial_schedule_run_at(schedule, now: datetime) -> datetime:

@@ -1,4 +1,5 @@
 import ast
+import difflib
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 import math
@@ -44,10 +45,6 @@ def validate_rule_class(rule_id: str, rule_cls: type[Any]) -> ValidationReport:
             f"rule '{rule_id}' has no tags: outputs with include_tags, silences by tag, "
             "and remote imports filtered by tag do not see it"
         )
-    if getattr(rule_cls, "__kanary_evaluate_style__", "new") == "legacy":
-        report.warnings.append(
-            f"rule '{rule_id}' uses legacy evaluate(payload, ctx); prefer evaluate(ctx)"
-        )
     return report
 
 
@@ -59,18 +56,6 @@ def validate_source_class(source_id: str, source_cls: type[Any]) -> ValidationRe
         report.errors.append(str(exc))
         return report
     report.warnings.extend(_decorator_warnings("source", source_id, source_cls))
-    if getattr(source_cls, "__kanary_init_style__", "new") == "legacy":
-        report.warnings.append(
-            f"source '{source_id}' uses legacy init(ctx); prefer init()"
-        )
-    if getattr(source_cls, "__kanary_poll_style__", "new") == "legacy":
-        report.warnings.append(
-            f"source '{source_id}' uses legacy poll(ctx); prefer poll()"
-        )
-    if getattr(source_cls, "__kanary_terminate_style__", "new") == "legacy":
-        report.warnings.append(
-            f"source '{source_id}' uses legacy terminate(ctx); prefer terminate()"
-        )
     return report
 
 
@@ -82,18 +67,6 @@ def validate_output_class(output_id: str, output_cls: type[Any]) -> ValidationRe
         report.errors.append(str(exc))
         return report
     report.warnings.extend(_decorator_warnings("output", output_id, output_cls))
-    if getattr(output_cls, "__kanary_init_style__", "new") == "legacy":
-        report.warnings.append(
-            f"output '{output_id}' uses legacy init(ctx); prefer init()"
-        )
-    if getattr(output_cls, "__kanary_emit_style__", "new") == "legacy":
-        report.warnings.append(
-            f"output '{output_id}' uses legacy emit(event, ctx); prefer emit(event)"
-        )
-    if getattr(output_cls, "__kanary_terminate_style__", "new") == "legacy":
-        report.warnings.append(
-            f"output '{output_id}' uses legacy terminate(ctx); prefer terminate()"
-        )
     return report
 
 
@@ -145,26 +118,13 @@ def validate_registries(
         if not rule_cls.resolved_sources:
             report.warnings.append(f"rule '{rule_id}' currently resolves zero sources")
 
-        if (
-            getattr(rule_cls, "evaluation_interval", None) is not None
-            and len(rule_cls.resolved_sources) > 1
-            and getattr(rule_cls, "__kanary_evaluate_style__", "new") == "legacy"
-        ):
-            report.errors.append(
-                f"rule '{rule_id}' uses evaluation_interval with multiple sources; "
-                "use evaluate(ctx) instead of legacy evaluate(payload, ctx)"
-            )
-
-        severity = getattr(rule_cls, "severity", None)
-        if severity is not None and not isinstance(severity, Severity):
-            report.errors.append(f"rule '{rule_id}' severity must be one of kanary.INFO/WARN/ERROR/CRITICAL")
-
         report.extend(_validate_rule_settings(rule_id, rule_cls))
 
-        matched_outputs = _matching_outputs(rule_cls, outputs)
-        rule_cls.matched_outputs = matched_outputs
-        if not matched_outputs:
+        rule_cls.matched_outputs = matching_outputs(rule_cls, outputs)  # the engine works it out again
+        if not rule_cls.matched_outputs:
             report.warnings.append(f"rule '{rule_id}' has no matching output")
+
+    report.extend(_validate_dependencies(rules))
 
     for rule_id, definitions in sorted((duplicate_rule_ids or {}).items()):
         report.errors.append(
@@ -186,7 +146,60 @@ def validate_registries(
     return report
 
 
-def _matching_outputs(rule_cls: type[Any], outputs: dict[str, type[Output]]) -> list[str]:
+def _validate_dependencies(rules: dict[str, type[Any]]) -> ValidationReport:
+    """suppressed_by / depends_on: unknown rule ids, and cycles.
+
+    In a cycle the rules hold each other back: once one fires, none of them
+    is ever notified again.
+    """
+    report = ValidationReport()
+    parents: dict[str, list[str]] = {}
+    for rule_id, rule_cls in rules.items():
+        listed: list[str] = []
+        for attr_name in ("suppressed_by", "depends_on"):
+            for parent_id in getattr(rule_cls, attr_name, None) or []:
+                if parent_id == rule_id:
+                    report.errors.append(f"rule '{rule_id}' lists itself in {attr_name}")
+                elif parent_id not in rules:
+                    close = difflib.get_close_matches(parent_id, list(rules), n=1)
+                    hint = f"; did you mean '{close[0]}'?" if close else ""
+                    report.warnings.append(
+                        f"rule '{rule_id}' {attr_name} '{parent_id}' is not a loaded rule (a typo, or excluded), "
+                        f"so it never holds this rule back{hint}"
+                    )
+                else:
+                    listed.append(parent_id)
+        parents[rule_id] = listed
+
+    reported: set[frozenset[str]] = set()
+    state: dict[str, int] = {}  # 1: on the current path, 2: done
+    path: list[str] = []
+
+    def visit(rule_id: str) -> None:
+        state[rule_id] = 1
+        path.append(rule_id)
+        for parent_id in parents.get(rule_id, []):
+            if state.get(parent_id) == 1:
+                cycle = path[path.index(parent_id):]
+                if frozenset(cycle) not in reported:
+                    reported.add(frozenset(cycle))
+                    chain = " -> ".join(f"'{item}'" for item in [*cycle, parent_id])
+                    report.errors.append(
+                        f"rules {chain} hold each other back (suppressed_by / depends_on form a cycle)"
+                    )
+            elif parent_id not in state:
+                visit(parent_id)
+        path.pop()
+        state[rule_id] = 2
+
+    for rule_id in rules:
+        if rule_id not in state:
+            visit(rule_id)
+    return report
+
+
+def matching_outputs(rule_cls: type[Any] | Any, outputs: dict[str, type[Output] | Output]) -> list[str]:
+    """The outputs a rule's alerts can reach (by tags, severity, and states); rule and outputs may be instances."""
     rule_tags = set(getattr(rule_cls, "tags", []))
     rule_severity = getattr(rule_cls, "severity", None)
     matched: list[str] = []
@@ -365,7 +378,81 @@ def _validate_plugin_file(path: Path) -> ValidationReport:
             f"file '{path.name}' uses open('{file_name}') with a cwd-relative path; prefer kanary.plugin_dir() / ... or Path(__file__).with_name(...)"
         )
 
+    report.warnings.extend(_evaluate_warnings(path, tree))
     return report
+
+
+# kanary.<name>(...) that make an evaluation; for the *_if ones the message is the second argument.
+_FIRING_HELPERS = {"firing", "fire", "info", "warn", "error", "critical"}
+_IF_HELPERS = {"fire_if", "firing_if", "info_if", "warn_if", "error_if", "critical_if"}
+_EVALUATION_HELPERS = _FIRING_HELPERS | _IF_HELPERS | {"ok", "ok_if"}
+
+
+def _evaluate_warnings(path: Path, tree: ast.AST) -> list[str]:
+    """Two easy mistakes in a rule's evaluate().
+
+    - kanary.firing(...) as a statement: its result is dropped and the rule stays OK.
+      (Falling off the end without a return is fine: that is OK on purpose.)
+    - a FIRING without a message (kanary.error(), return True): the notification
+      then shows only the rule id.
+    """
+    warnings: list[str] = []
+    for cls in (node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)):
+        for method in cls.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) or method.name != "evaluate":
+                continue
+            where = f"file '{path.name}' line {{line}}: {cls.name}.evaluate()"
+            for node in sorted(_walk_own_body(method), key=lambda item: getattr(item, "lineno", 0)):
+                if isinstance(node, ast.Expr) and (name := _helper_name(node.value)) in _EVALUATION_HELPERS:
+                    warnings.append(
+                        where.format(line=node.lineno)
+                        + f" calls kanary.{name}(...) without returning it, so the rule stays OK; write return kanary.{name}(...)"
+                    )
+                elif isinstance(node, ast.Call) and _fires_without_message(node):
+                    warnings.append(
+                        where.format(line=node.lineno)
+                        + f" fires with kanary.{_helper_name(node)}() without a message; the notification shows only the rule id"
+                    )
+                elif isinstance(node, ast.Return) and isinstance(node.value, ast.Constant) and node.value.value is True:
+                    warnings.append(
+                        where.format(line=node.lineno)
+                        + " returns True, a FIRING without a message; the notification shows only the rule id"
+                    )
+    return warnings
+
+
+def _walk_own_body(function: ast.AST):
+    """The nodes of a function, without those of functions and classes defined inside it."""
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        yield node
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def _helper_name(node: ast.AST) -> str | None:
+    """'firing' for a call kanary.firing(...), else None."""
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "kanary"
+    ):
+        return node.func.attr
+    return None
+
+
+def _fires_without_message(call: ast.Call) -> bool:
+    name = _helper_name(call)
+    if any(keyword.arg == "message" for keyword in call.keywords) or any(isinstance(arg, ast.Starred) for arg in call.args):
+        return False
+    if name in _FIRING_HELPERS:
+        return not call.args
+    if name in _IF_HELPERS:
+        return len(call.args) < 2
+    return False
 
 
 def _is_absolute_or_explicit_relative(value: str) -> bool:

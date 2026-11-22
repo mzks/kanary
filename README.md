@@ -78,7 +78,7 @@ Then move in this order:
 
 1. Read [demo/basic_monitoring.py](demo/basic_monitoring.py) to understand the smallest possible `Source`, `Rule`, and `Output`.
 2. Read [docs/getting_started.md](docs/getting_started.md) and work through the examples in [examples/getting_started.py](examples/getting_started.py).
-3. Browse `examples/` for PostgreSQL, Discord, peer monitoring, and remote alert import.
+3. Run `kanary new --list` for ready-made plugins (SQL, Slack, Discord, mail, peer monitoring, ...) and start from one of them.
 4. Create your own `plugins/` directory and start with one `Source` and one `Rule`.
 
 ## Minimal Example
@@ -264,22 +264,13 @@ Smallest example:
 
 - [demo/basic_monitoring.py](demo/basic_monitoring.py)
 
-More realistic examples:
+Examples:
 
-- [examples/getting_started.py](examples/getting_started.py)
-- [examples/factory_patterns.py](examples/factory_patterns.py)
-- [examples/fake_alarm_monitoring.py](examples/fake_alarm_monitoring.py)
-- [examples/fake_alarm_target.py](examples/fake_alarm_target.py)
-- [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py)
-- [examples/sqlite_console_output.py](examples/sqlite_console_output.py)
-- [examples/discord_webhook_output.py](examples/discord_webhook_output.py)
-- [examples/postgres_wide_format.py](examples/postgres_wide_format.py)
-- [examples/postgres_long_format.py](examples/postgres_long_format.py)
-- [examples/peer_monitoring.py](examples/peer_monitoring.py)
-- [examples/self_plugin_monitoring.py](examples/self_plugin_monitoring.py)
-- [examples/remote_alarm_import.py](examples/remote_alarm_import.py)
+- [examples/getting_started.py](examples/getting_started.py): the code of [docs/getting_started.md](docs/getting_started.md)
+- [examples/factory_patterns.py](examples/factory_patterns.py): many similar rules from one Python function or a loop
+- [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py) and [examples/sqlite_console_output.py](examples/sqlite_console_output.py): a demo to run with `dev/emulate_sqlite.py`, which keeps writing changing values to an SQLite table
 
-`demo/` is for the first working run. `examples/` is closer to real deployments and includes helper classes, remote monitoring, PostgreSQL wide/long table patterns, and webhook outputs.
+`demo/` is for the first working run. For a plugin of your own, start from a template: `kanary new --list` lists them, and [docs/templates.md](docs/templates.md) shows each one.
 
 ## Web Viewer
 

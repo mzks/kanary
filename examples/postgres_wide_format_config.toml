@@ -1,3 +1,0 @@
-dsn = "host=127.0.0.1 port=5432 dbname=example_db user=example_user password=replace-me"
-connect_timeout_seconds = 5
-statement_timeout_ms = 5000

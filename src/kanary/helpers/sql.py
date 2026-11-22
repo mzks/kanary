@@ -51,7 +51,8 @@ class SQLSource(Source):
     query: str = ""
     params: tuple[Any, ...] | dict[str, Any] = ()
     # Timestamps without a timezone (e.g. PostgreSQL "timestamp without time zone",
-    # SQLite text) are read in this IANA zone; None means UTC.
+    # SQLite text) are read in this zone ("UTC", "Asia/Tokyo", "+09:00");
+    # None means this host's local time.
     timestamp_timezone: str | None = None
 
     def connect(self) -> Any:
@@ -231,8 +232,8 @@ class SQLLongSource(SQLSource):
 
     def _since(self) -> Any:
         # Compare in the zone the timestamps are stored in, as a naive value.
-        zone = to_timezone(self.timestamp_timezone) if self.timestamp_timezone else to_timezone("UTC")
-        since = (datetime.now(zone) - timedelta(seconds=self.lookback or 0)).replace(tzinfo=None)
+        now = datetime.now(to_timezone(self.timestamp_timezone)) if self.timestamp_timezone else datetime.now()
+        since = (now - timedelta(seconds=self.lookback or 0)).replace(tzinfo=None)
         if self._database_type() == "sqlite":
             return since.isoformat(sep=" ", timespec="seconds")  # how SQLite stores datetime text
         return since

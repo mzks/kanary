@@ -15,15 +15,14 @@ class TemplateRemote(kanary.RemoteKanarySource):
     # url = "http://remote-kanary.example:8000/export-alerts"  # full URL instead of base_url
 
 
-# Create one local RemoteAlarm rule per remote alert. Discovery contacts the remote node
-# when this file is loaded; pass remote_alarm_ids=[...] to avoid that.
+# Create one local RemoteAlarm rule per remote alert. The ids are written out, so this
+# file loads even when the remote node is down.
 # kanary.import_remote_alarms(
 #     source="template.remote",
+#     remote_alarm_ids=["daq.link", "hv.crate1.range"],  # TODO: the remote rule ids
 #     prefix="remote.",              # local rule_id = prefix + remote rule_id + suffix
 #     add_tags=["remote"],
-#     include_tags=["detector"],     # only import matching remote alerts
-#     exclude_rule_ids=["*.debug"],
-#     severity=kanary.ERROR,         # used when the remote alert has no severity
+#     severity=kanary.ERROR,         # until the remote alert gives its own
 #     propagate_ack=True,            # local ack/unack is forwarded to the remote node
 #     propagate_silence=True,        # local silences are forwarded too
 # )

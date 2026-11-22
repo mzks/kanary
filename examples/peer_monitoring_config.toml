@@ -1,2 +1,0 @@
-peer_url = "http://127.0.0.1:8000/peer-status"
-timeout_seconds = 5.0

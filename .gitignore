@@ -217,3 +217,5 @@ uv.lock
 
 # Remove jsonl
 *.jsonl
+
+tmp/

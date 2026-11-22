@@ -247,10 +247,7 @@ To publish values computed from recent samples, such as a 10-minute average or a
 
 ### Remote Kanary Nodes
 
-You can read alerts from another Kanary node and mirror them as local rules.
-
-- [examples/peer_monitoring.py](../examples/peer_monitoring.py)
-- [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)
+You can read alerts from another Kanary node and mirror them as local rules (`kanary new -t remote`), and two nodes can watch each other (`kanary new -t peer`).
 
 Remote alert import uses `origin_node_id` and `mirror_path` to avoid import loops.
 

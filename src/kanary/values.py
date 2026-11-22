@@ -97,21 +97,61 @@ def _fixed_offset(offset: timedelta, original: Any) -> tzinfo:
 def to_datetime(value: Any, *, naive_timezone: Any = None) -> datetime | None:
     """Return a timezone-aware datetime from a datetime, ISO string, or unix time.
 
-    A value without a timezone is read in ``naive_timezone`` (anything
-    to_timezone() accepts, such as "Asia/Tokyo" or "+09:00"), or as UTC when
-    that is None.
+    A time without a time zone is read in ``naive_timezone`` (anything
+    to_timezone() accepts, such as "Asia/Tokyo" or "+09:00"), or as this
+    host's local time when that is None. Every time KANARY takes in (input
+    timestamps, silence windows, the state database) goes through here.
     """
     if value is None:
         return None
-    zone = to_timezone(naive_timezone) if naive_timezone else timezone.utc
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     if isinstance(value, datetime):
-        return value if value.tzinfo is not None else value.replace(tzinfo=zone)
+        if value.tzinfo is not None:
+            return value
+        if naive_timezone:
+            return value.replace(tzinfo=to_timezone(naive_timezone))
+        return value.astimezone()  # a naive datetime is taken as local time here
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return datetime.fromtimestamp(value, tz=timezone.utc)
-    if isinstance(value, str):
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=zone)
     raise TypeError(f"cannot convert {value!r} to a datetime")
+
+
+def plain_value(value: Any) -> Any:
+    """An input value with database and numpy numbers as Python numbers.
+
+    Decimal (SQL NUMERIC) and numpy floats become float, numpy integers int, so
+    rules compare and JSON writes them like any number. Anything else is
+    returned as it is.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        return float(value)
+    return value
+
+
+def json_default(value: Any) -> Any:
+    """For json.dumps(default=...): times as ISO text, numbers as numbers, anything else as text.
+
+    Payloads carry what sources and rules put in them, so one odd value must
+    not stop the API or the state database.
+    """
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    number = plain_value(value)
+    if number is not value:
+        return number
+    if isinstance(value, (set, frozenset, tuple)):
+        return list(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
 
 
 def flatten(document: Any, prefix: str = "") -> dict[str, Any]:
@@ -195,10 +235,8 @@ def is_number(value: Any) -> bool:
 
 
 def coerce_datetime(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz=timezone.utc)
-    raise TypeError("timestamp must be datetime or unix timestamp")
+    """to_datetime() for a value that must be a time."""
+    moment = to_datetime(value)
+    if moment is None:
+        raise TypeError("timestamp must be a datetime, ISO 8601 text, or unix time")
+    return moment

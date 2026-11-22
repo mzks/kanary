@@ -396,9 +396,12 @@ class BufferAddTest(unittest.TestCase):
         buffer.add(("p", 2.0, T0.timestamp() + 3600 * 24 * 365, {"unit": "Pa"}), ("q", 3.0, T0))
         self.assertEqual((buffer["p"].last.value, buffer["p"].last.metadata), (2.0, {"unit": "Pa"}))
         buffer.add({"r": 4.0}, timestamp=T0)
-        buffer.add(("s", 5.0, T0.replace(tzinfo=None)))  # naive: read as UTC
-        self.assertEqual((buffer["r"].last.timestamp, buffer["s"].last.timestamp), (T0, T0))
-        with self.assertRaisesRegex(TypeError, "timestamp must be a datetime, unix time"):
+        buffer.add(("s", 5.0, T0.astimezone().replace(tzinfo=None)))  # naive: this host's local time
+        buffer.add(("u", 6.0, T0.isoformat()))  # ISO 8601 text
+        self.assertEqual(
+            (buffer["r"].last.timestamp, buffer["s"].last.timestamp, buffer["u"].last.timestamp), (T0, T0, T0)
+        )
+        with self.assertRaisesRegex(TypeError, "timestamp must be a datetime"):
             buffer.add(("p", 1.0, "yesterday"))
 
     def test_unix_time_is_honoured_by_inputs_too(self):
@@ -1293,7 +1296,7 @@ class SQLTest(HelperTestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "plant.db"
             conn = sqlite3.connect(path)
-            now = datetime.now(timezone.utc).replace(microsecond=0)
+            now = datetime.now().replace(microsecond=0)  # stored without a zone: this host's local time
             recent = (now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
             older = (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
             ancient = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")

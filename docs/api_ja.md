@@ -14,6 +14,7 @@
 
 - `GET /health`
   sourceやruleの読み込み状況と`output_emit_enabled`を含む、小さなruntime health summaryを返します。
+  `time`、`timezone`、`utc_offset` は host の時計と time zone です。time zone 無しで送った時刻（silence の期間など）はこの zone で読みます。
 - `GET /peer-status`
   peer monitoring 用の compact な status payload を返します。
 - `GET /alerts`
@@ -41,16 +42,21 @@
 - `GET /plugins/{type}/{plugin_id}/source`
   読み込まれている、または DISCOVERED な 1 つの plugin の read-only source code を返します。
 
+JSON の severity は名前（`"ERROR"`）です。下の request は、大文字小文字を問わない名前か、`kanary.ERROR` の数値を受け付けます。
+
 ### Write endpoints
 
+存在しない rule や silence を指定した operator の操作は 404 を返します。その alert の今の状態には当てはまらない操作（`FIRING` でない alert の acknowledge、acknowledge されていない alert の unack、cancel 済みの silence の cancel）は 409 を返します。error の応答には `error` の文があります。
+
 - `POST /alerts/{rule_id}/ack`
-  1 つの alert を acknowledge します。
+  `FIRING` の alert を 1 つ acknowledge します（再起動の後に `FIRING` として復元された alert も含む）。
 - `POST /alerts/{rule_id}/unack`
   1 つの alert の acknowledgement を外します。
 - `POST /silences/duration`
   10 分のような相対 duration で silence を作ります。
 - `POST /silences/window`
   start/end を明示した time window で silence を作ります。
+  `start_at` と `end_at` は ISO 8601 の時刻で、time zone が無ければ host の local time です。どちらの silence endpoint も、読んだ期間を offset 付きで返します（`start_at`、`end_at`）。
 - `POST /silences/{silence_id}/cancel`
   既存の silence を cancel します。
 - `POST /reload`
@@ -122,6 +128,7 @@
   duration 指定で silence を作ります。
 - `silence-until`
   start/end 指定で silence を作ります。
+  `--start-at 2026-11-21T22:00` は KANARY の host の local time です（kanaryctl を動かす machine ではありません）。明示するなら offset を付けます（`2026-11-21T22:00+09:00`）。KANARY が読んだ期間を stderr に表示し、stdout は silence id です。
 - `unsilence`
   1 つの silence を cancel します。
 - `reload`
@@ -160,6 +167,7 @@ kanaryctl plugins sqlite --traceback
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
+kanaryctl silence-until --operator operator_name --start-at 2026-11-21T22:00 --end-at 2026-11-22T06:00 --rule 'daq.*'
 kanaryctl reload --rule 'sqlite.*'
 kanaryctl reload --dirty
 ```

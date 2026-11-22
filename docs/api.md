@@ -14,6 +14,7 @@ Use `--api-host` and `--api-port` to change the bind address.
 
 - `GET /health`
   Returns a small runtime health summary, including loaded sources, rules, and `output_emit_enabled`.
+  `time`, `timezone`, and `utc_offset` give the host's clock and time zone: a time sent without a time zone (a silence window, for example) is read in it.
 - `GET /peer-status`
   Returns a compact status payload intended for peer monitoring.
 - `GET /alerts`
@@ -41,16 +42,21 @@ Use `--api-host` and `--api-port` to change the bind address.
 - `GET /plugins/{type}/{plugin_id}/source`
   Returns read-only source code for one loaded or discovered plugin.
 
+In JSON, a severity is its name (`"ERROR"`); the requests below accept a name in any case, or `kanary.ERROR`'s number.
+
 ### Write Endpoints
 
+An operator action that names an unknown rule or silence returns 404; one that does not apply to the alert as it is (acknowledging an alert that is not `FIRING`, unacknowledging one that is not acknowledged, cancelling a cancelled silence) returns 409. Each error reply has an `error` text.
+
 - `POST /alerts/{rule_id}/ack`
-  Acknowledges one alert.
+  Acknowledges one `FIRING` alert (also one restored as `FIRING` after a restart).
 - `POST /alerts/{rule_id}/unack`
   Removes acknowledgement from one alert.
 - `POST /silences/duration`
   Creates a silence for a relative duration such as 10 minutes.
 - `POST /silences/window`
   Creates a silence for an explicit time window.
+  `start_at` and `end_at` are ISO 8601 times; without a time zone they are the host's local time. Both silence endpoints return the window as it was read (`start_at`, `end_at`, with the offset).
 - `POST /silences/{silence_id}/cancel`
   Cancels an existing silence.
 - `POST /reload`
@@ -124,6 +130,7 @@ Main subcommands:
   Creates a silence for a duration.
 - `silence-until`
   Creates a silence for an explicit start and end time.
+  `--start-at 2026-11-21T22:00` is the local time of the KANARY host (not of the machine running kanaryctl); add an offset (`2026-11-21T22:00+09:00`) to be explicit. The window as KANARY read it is printed on stderr; stdout is the silence id.
 - `unsilence`
   Cancels one silence.
 - `reload`
@@ -161,6 +168,7 @@ kanaryctl plugins sqlite --traceback
 kanaryctl ack sqlite.value1.stale --operator operator_name --reason "investigating"
 kanaryctl unack sqlite.value1.stale --operator operator_name --reason "re-open"
 kanaryctl silence-for --operator operator_name --minutes 10 --rule 'sqlite.*'
+kanaryctl silence-until --operator operator_name --start-at 2026-11-21T22:00 --end-at 2026-11-22T06:00 --rule 'daq.*'
 kanaryctl reload --rule 'sqlite.*'
 kanaryctl reload --dirty
 ```

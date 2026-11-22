@@ -72,7 +72,7 @@ source と output はそれぞれ専用の thread で動くので、遅いもの
 `interval` と `schedule` を両方省略した場合は、Kanary は
 `interval = 60.0` を使います。  
 `schedule` を使う場合は `interval` を同時に指定しないでください。class 自身（class 本体か decorator）に書いた方が、親 class から引き継いだもう一方より優先されます。
-旧来の `poll(ctx)`, `init(ctx)`, `terminate(ctx)` も互換のため引き続き動きますが、lint では warning を出し、文書上の正式 API は引数なしの形に統一します。
+0.8.0 より前の `poll(ctx)`、`init(ctx)`、`terminate(ctx)` は、今はエラーです。`ctx` 引数を外してください。
 
 `interval` は秒単位の polling 間隔です。`interval = 0` は return したらすぐ次の `poll()` を呼びます。値を待つ `poll()` 専用です（「向こうから届く値」参照）。  
 `schedule` は Unix cron 互換の 5-field 文字列で、Kanary server の local time
@@ -109,6 +109,8 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 
 それでも失敗した場合は source は `FAILED` のままになり、次の定期 poll または明示 reload まで復帰しません。
 
+`init()` も source 自身の thread で動きます。失敗すると（起動時、停電の後でまだ起動中の database など）、source は `FAILED` になり、その thread が `init()` を同じ `max_reinit` 回の試行で、`interval` ごと（最長でも 1 分おき）に成功するまでやり直し、その後は通常どおり poll します。その間も他の source は動き、KANARY はそれを待たずに起動します。
+
 ### input を返す
 
 通常の public API は `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` です。
@@ -140,6 +142,8 @@ return kanary.inputs(
 
 - `(name, value)`, `(name, value, timestamp)`, `(name, value, timestamp, metadata)` を受け付けます
 - item 側の timestamp が省略または `None` の場合、outer `timestamp=` があればそれを使い、無ければ Kanary server の current time を使います
+- timestamp は `datetime`、ISO 8601 の文字列、unix time のどれかです。[時刻と time zone](#時刻と-time-zone) を見てください
+- `Decimal`（database driver が `NUMERIC` に返す型）や numpy の数は普通の `float` / `int` になるので、rule でも JSON でも数として扱われます
 - outer `metadata=` は `SourceResult.metadata` になります
 - `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功し、結果として空の snapshot を返すことを表します。source snapshot は更新され、rule も評価されます
 - `kanary.no_update(reason=..., metadata=...)` は poll 自体は成功したが新しい snapshot は無いことを表します。直前の snapshot を保持したまま、その snapshot に対して rule を再評価します
@@ -147,6 +151,23 @@ return kanary.inputs(
 - 例外を送出した場合は source/plugin failure として扱われ、runtime の retry/reinit policy に入ります
 
 `kanary.SourceResult(...)` も advanced な書き方として引き続き使えます。
+
+#### 時刻と time zone
+
+time zone の無い時刻は、**KANARY を動かしている host の local time** として読みます。KANARY が時刻を受け取るところはすべて同じです: input の timestamp、`kanaryctl silence-until --start-at 2026-11-21T22:00`、HTTP API、state database。unix time は常に絶対時刻です。
+
+できるだけ time zone を付けてください。どの host で読んでも同じ意味になります:
+
+```python
+from datetime import datetime, timezone
+
+datetime.now().astimezone()      # 今。この host の offset 付き
+datetime.now(timezone.utc)       # 今。UTC
+kanary.to_datetime("2026-11-21 22:00", naive_timezone="Asia/Tokyo")  # 別の time zone の system から来た文字列
+"2026-11-21T22:00:00+09:00"      # offset 付きの ISO 8601 文字列（UTC なら "...Z"）
+```
+
+SQL では `timestamp with time zone`（PostgreSQL の `timestamptz`）を勧めます。time zone 無しで UTC（または host と違う zone）の時刻を入れている table には、SQL helper の source に `timestamp_timezone = "UTC"` を設定してください。`StaleRule` は 30 分より先の未来の timestamp を警告します。time zone の間違いはたいていこの形で現れます。
 
 典型的な使い分け:
 
@@ -236,7 +257,7 @@ Kanary は load/reload 時にこれらの selector から `resolved_sources` を
 
 `severity` は default / fallback severity として使われます。  
 `kanary.firing(..., severity=...)` または `kanary.Evaluation(severity=...)` を返すと、その評価だけ上書きできます。
-旧来の `evaluate(payload, ctx)` も互換のため引き続き動きますが、lint では warning を出し、正式 API は `evaluate(ctx)` です。
+0.8.0 より前の `evaluate(payload, ctx)` は、今はエラーです。値は `ctx` から読みます（`ctx.value()`、`ctx.source_payload()`）。
 
 ### RuleContext
 
@@ -276,7 +297,7 @@ input を扱う accessor を使います:
 
 単一 input に解決される rule では `ctx.value()` のように selector を省略できます。複数 input を扱う rule では通常 `ctx.inputs()` を反復します。  
 selector が複数 input に一致しうる場合、`ctx.value()` などの scalar helper は推測せず error にします。  
-今回の評価を trigger した source の normalized payload が必要な時は `ctx.source_payload()` を使います。cross-source の参照は `ctx.inputs()` を使ってください。
+`ctx.source_payload("source-id")` は 1 つの source の normalized payload です。source を 1 つだけ読む rule では id を省けます。cross-source の参照は `ctx.inputs()` を使ってください。
 
 ### 評価結果を返す
 
@@ -286,6 +307,7 @@ selector が複数 input に一致しうる場合、`ctx.value()` などの scal
 - `kanary.firing(message, severity=..., extra=...)`
 - `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)`
 - `kanary.fire_if(...)`, `kanary.warn_if(...)`, `kanary.error_if(...)`, `kanary.critical_if(...)`
+- `kanary.fire(...)` は `kanary.firing(...)` と、`kanary.firing_if(...)` は `kanary.fire_if(...)` と同じです。読みやすい方を使ってください
 
 例:
 
@@ -308,7 +330,7 @@ def evaluate(self, ctx):
 - `True` は `FIRING`, `False` は `OK`
 - `(severity, message)` はその severity で `FIRING`
 - `(None, message)` は `OK`
-- `severity` には `kanary.ERROR` のような定数だけでなく `"ERROR"` のような文字列も使えます
+- severity はどこでも同じ書き方ができます（rule の `severity`、`thresholds`、`kanary.firing(severity=...)`、output の `minimum_severity`）: `kanary.ERROR`、大文字小文字を問わない名前（`"ERROR"`、`"Error"`、`"error"`）、数値（`30`）。指定しない rule は `ERROR` です
 
 payload を明示しない場合、Kanary は current source payload を自動で引き継ぎます。追加情報を入れたい時は `extra={...}` を使って merge します。  
 `kanary.Evaluation(...)` も advanced な書き方として引き続き使えます。
@@ -340,7 +362,7 @@ payload を明示しない場合、Kanary は current source payload を自動�
 - `max_retry`
 - `max_reinit`
 
-旧来の `emit(event, ctx)`, `init(ctx)`, `terminate(ctx)` も互換のため引き続き動きますが、lint では warning を出し、正式 API では `ctx` を省きます。
+0.8.0 より前の `emit(event, ctx)`、`init(ctx)`、`terminate(ctx)` は、今はエラーです。`ctx` 引数を外してください。
 
 `emit()` はその output 専用の thread で動きます。engine は event をどの output に送るかを決めて queue に入れるだけなので、評価、他の output、operator の操作が送信を待つことはありません。各 output は event の順序を保ちます。output ごとに最大 1000 件まで待たせ、それを超えると最も古いものを捨てて log に出し、未送信として記録します。Outputs 画面に待ち件数と捨てた件数を表示します。停止時、queue に残った event は最大 5 秒まで送ります。
 
@@ -351,7 +373,9 @@ payload を明示しない場合、Kanary は current source payload を自動�
 
 default に `OK` を追加して recovery event も除外する場合は、`exclude_states=kanary.Output.exclude_states + ["OK"]` と書けます。指定したリストは default との merge ではなく置き換えになるため、すべての state event を受け取るデバッグ・監査用 output では `exclude_states=[]` を明示します。
 
-`SILENCED -> OK` は current state が `OK` なので default では除外されません。この遷移だけが不要な場合は `emit()` 内で `previous_state` と `current_state` を確認します。
+`OK` は、その rule について前回の `OK` 以降に `OK` 以外の event（`FIRING`、`ACKED`、または `exclude_states` が通す state）を送った output にだけ届きます。`OK` は、その output に伝えたことを閉じるためのものだからです。このため、silence や suppression の前から `OK` だった rule は、それが終わっても `OK` を送りません。一方、発報してから silence され、silence 中に治った rule は、silence が終わったときに `OK` を送ります。再起動の後は、`OK` 以外で復元された alert を「送った」とみなします。こうして送らなかった `OK` は、output dispatch の履歴に filtered として記録されます。
+
+filter を通る遷移を落としたい場合は、`emit()` 内で `previous_state` と `current_state` を確認します。
 
 ```python
 def emit(self, event):
@@ -373,7 +397,7 @@ def emit(self, event):
 - `SILENCED`
   active な silence の対象になり、通常の alert state が一時的に mute されている状態。
 - `SUPPRESSED`
-  `suppressed_by` に指定された別 rule が active なため、通常の alert state が抑制されている状態。
+  `suppressed_by` か `depends_on` にある rule が発報しているため、抑えられている alert。
 
 `exclude_transitions` に入る値:
 
@@ -441,7 +465,7 @@ def emit(self, event):
 
 `cancel(callback)` とすると指定 callback の登録だけを取り消せます。callback がすでに実行を始めている場合は停止できません。登録は memory 上だけに保持されるため process restart 後には引き継がれず、`terminate()` では `close()` を呼びます。
 
-`SILENCED` と `SUPPRESSED` を見て followup を取り消す Output は、default routing でそれらを除外させず、decorator に `exclude_states=[]` を指定する必要があります。完全な例は `examples/output_followups.py` にあります。
+`SILENCED` と `SUPPRESSED` を見て followup を取り消す Output は、default routing でそれらを除外させず、decorator に `exclude_states=[]` を指定する必要があります。`kanary new -t followups` で完全な例が出てきます。
 
 rule に `fire_after` の設定はありません。遅らせる目的によって置き場所が変わります:
 
@@ -460,6 +484,8 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 2. 4 秒待って `terminate() -> init()` を行い、その後 `emit()` を再試行
 
 それでも失敗すると output は `FAILED` になります。`FAILED` の間は、後続の event を待ちなしで 1 回だけ試します。送信先が落ちているときに、queue の event がすべて再試行の全手順を待つことはありません。1 回でも成功すれば `READY` に戻ります。失敗した event は再送しません。
+
+`init()` に失敗した output（送信先にまだ届かない）にも event は届きます。その thread は event を送る前に `init()` を呼び、何もしていない間も、10 秒後、その後は倍ずつ、最長 5 分おきに `init()` をやり直します。送信先が落ちている間に来た event は後から送られず、dispatch の履歴に失敗として残ります。
 
 ## 4. 組み込み helper class
 
@@ -592,7 +618,7 @@ metrics = {
 
 table 名と column 名は単純な識別子に限ります（`schema.table` は可）。join、view、`WHERE` など別のものを読むときは `query`（と driver の parameter style の `params`）を書きます。その場合は書いたとおりに実行し（新しい行を先頭に）、table の設定は使いません。別の driver を使うなら `connect()` を override して DB-API connection を返します。
 
-`timestamp_column` で各 input の timestamp を決めます。timezone の無い timestamp は `timestamp_timezone`（`kanary.to_timezone()` が読める time zone: `"Asia/Tokyo"` などの IANA 名、`"+09:00"`・`"+9"`・`"UTC+9"` などの offset、`"UTC"`）で、未設定なら UTC として読みます。offset は変わらないので、夏時間のある地域では IANA 名を使ってください。どちらの class も意図して短くしてあるので、別の形の source を書くときは `src/kanary/helpers/sql.py` を読んでください。
+`timestamp_column` で各 input の timestamp を決めます。timezone の無い timestamp は `timestamp_timezone`（`kanary.to_timezone()` が読める time zone: `"Asia/Tokyo"` などの IANA 名、`"+09:00"`・`"+9"`・`"UTC+9"` などの offset、`"UTC"`）で、未設定ならこの host の local time として読みます。offset は変わらないので、夏時間のある地域では IANA 名を使ってください。どちらの class も意図して短くしてあるので、別の形の source を書くときは `src/kanary/helpers/sql.py` を読んでください。
 
 #### 向こうから届く値（webhook、MQTT、callback）
 
@@ -620,7 +646,7 @@ def poll(self):
 - 何も届かないことは source にとって error ではありません。その input に `evaluation_interval` 付きの `StaleRule` を掛けます。
 - `interval = 0` は待つ `poll()` 専用です。すぐ return する `poll()` に使うと CPU を 1 コア使い切ります。
 
-`HTTPPushSource` と `MQTTSource` は `interval = 0` でしか動きません。`interval` と `schedule` は書かないでください。それ以外を書くと `init()` が理由付きで失敗します。`http-push`、`mqtt`、`push`（受け口を自分で書く）の template にそれぞれの例があり、完全な例は `examples/webhook_push_source.py` です。
+`HTTPPushSource` と `MQTTSource` は `interval = 0` でしか動きません。`interval` と `schedule` は書かないでください。それ以外を書くと `init()` が理由付きで失敗します。`http-push`、`mqtt`、`push`（受け口を自分で書く）の template にそれぞれの例があります。
 
 ### Rule 側
 
@@ -672,6 +698,7 @@ input の値が `expected` でなければ発報します。`expected` は 1 つ
 
 - measurement の timestamp の古さを判定
 - 複数 input に一致した場合は、どれか 1 つでも stale または timestamp 欠落なら `FIRING`
+- timestamp が `future_tolerance` 秒（default は `30 * kanary.minute`）より先の未来なら、"(time zone?)" 付きの `WARN` で `FIRING`。そういう input は決して stale に見えず、たいていは time zone の無い時刻が原因です。`future_tolerance = None` で切れます
 - payload の `values` は input 名から経過秒数への dict
 
 通常、Ruleは関連Sourceの更新時に評価されます。正の秒数を`evaluation_interval`へ指定すると、それとは独立した固定間隔でも評価します。
@@ -686,7 +713,7 @@ class PeerHeartbeatStale(kanary.StaleRule):
     timeout = 120.0
 ```
 
-定期評価は保存済みSource snapshotを使い、Sourceのpollや状態更新を行いません。複数SourceのRuleでは`ctx.inputs()`または`ctx.source_payload("source-id")`を使います。引数なしの`ctx.source_payload()`は曖昧なままです。wildcardはsnapshotに存在するinputだけを選択し、必須input集合を宣言しません。必須inputはcustom Rule内で明示的に確認してください。
+定期評価は保存済みSource snapshotを使い、Sourceのpollや状態更新を行いません。複数SourceのRuleでは`ctx.inputs()`または`ctx.source_payload("source-id")`を使います。id なしの`ctx.source_payload()`は、何がきっかけの評価でもエラーです。wildcardはsnapshotに存在するinputだけを選択し、必須input集合を宣言しません。必須inputはcustom Rule内で明示的に確認してください。
 
 #### RateRule
 
@@ -737,9 +764,10 @@ class Value1Threshold(kanary.ThresholdRule):
 
 #### import_remote_alarms
 
-- 複数の `RemoteAlarm` rule をまとめて生成する factory
-- `prefix`, `suffix`, `add_tags`, `include_rule_ids`, `exclude_rule_ids`, `include_tags`, `exclude_tags` を使える
-- `include_rule_ids`, `exclude_rule_ids`, `include_tags`, `exclude_tags` は glob pattern を使える
+- `remote_alarm_ids`（必須）の id ごとに `RemoteAlarm` rule を 1 つ生成する factory
+- id は意図して明示する形にしています。相手の node から読むと、file の読み込みが相手の稼働に左右されます。停電の後は両方の node が同時に起動します
+- `prefix`、`suffix`、`add_tags`、`owner`、`severity`、`include_rule_ids` / `exclude_rule_ids`（列挙した id に対する glob pattern）を使える
+- 生成された rule はそれぞれ独立した local rule として扱われる。remote の alert が発報している間は、その severity と message が表示される
 
 ### Output 側
 
@@ -860,19 +888,28 @@ Kanary では、繰り返しパターンごとに本体側へ built-in factory �
 - `kanary.PluginHealthSource` は自分が動いている engine を直接読み（HTTP も設定も不要）、他のすべての plugin について `<type>.<plugin_id>.failed`（`FAILED` の間 1。error は metadata）を出します。output には `output.<id>.queued` と `output.<id>.dropped`（前回の poll 以降に捨てた event 数）、rule には `rule.<id>.slow` も出します。
 - template の rule は、どれかの plugin が失敗したとき（それぞれの error を列挙）と、output が event を捨てたときに発報します。
 
-失敗した output についての alert は、他の output から届きます。output が 1 つだけなら viewer にしか出ません。KANARY 自体が止まったことは内側からは分からないので、別の KANARY から見張るか（`remote` template）、[examples/self_plugin_monitoring.py](../examples/self_plugin_monitoring.py) のように HTTP で `GET /plugins` を読みます。
+失敗した output についての alert は、他の output から届きます。output が 1 つだけなら viewer にしか出ません。KANARY 自体が止まったことは内側からは分からないので、別の KANARY から見張るか（`peer` template）、止まると知らせてくれる外部の service に heartbeat を送ります（`heartbeat` template）。
 
 ある project の中だけで使う繰り返しなら、この方法で十分なことが多いです。複数 deployment で同じパターンが繰り返し必要になった時点で、built-in helper を追加するかを検討するのが自然です。
 
 ## 状態と依存関係
 
-rule 間関係:
+rule 間の関係: `suppressed_by` と `depends_on` には、この rule の異常を説明する rule を指定します（id 1 つか list）。そのどれかが発報している間、この rule は `SUPPRESSED` になります。`SUPPRESSED` は default の `exclude_states` に含まれるので、通常の output には届きません。DAQ の link が落ちたときに、届くのは link の alert だけで、その先の channel ごとの alert は届きません。
 
-- `depends_on`
-- `suppressed_by`
+| | 親が発報中の `evaluate()` | 表示 |
+|---|---|---|
+| `suppressed_by` | 呼ぶ | `SUPPRESSED`。rule 自身の判定も付く: `suppressed by daq.link; would fire: daq:hv1=0 out of range [1000, 2000]` |
+| `depends_on` | 呼ばない | `SUPPRESSED`: `blocked by daq.link (not evaluated)` |
 
-`depends_on` は上位のルールが守られていない時, そもそも評価されません.
-`suppressed_by` に指定した rule が active な時は、対象 alert は `SUPPRESSED` になります。上位 rule が `SILENCED` の場合も active とみなされるため、下位 rule は suppression の対象になります。`SUPPRESSED` は default の `exclude_states` に含まれるため、通常の Output には通知されません。
+値を 1 つずつ判定する rule（`RangeRule`、`ThresholdRule` など）には `suppressed_by` を使います。viewer に、その rule が何と言うかが出ます。親が発報している間は `evaluate()` が動かない、または値を見せたくない rule には `depends_on` を使います。自分で履歴を持つ rule（rule の中の `kanary.Buffer` など）は、障害中に読んだ値を持ち続けて、障害の後に発報してしまうからです。
+
+- 「発報している」は親自身の判定です。親を silence や ACK しても、子は抑えられません。
+- 親は、それが抑える rule より先に評価されます。同じ source なら、rule を書いた順によらず、届くのは親の alert だけです。
+- 親が発報すると、別の source の rule もすぐに `SUPPRESSED` になります。
+- 親が復旧すると、rule は、復旧後にその source から来た最初の値で戻ります。同じ source なら同じ poll で、別の source ならその source の次の poll で戻ります（それまでは `recovered; waiting for a new value` と表示）。障害中に読んだ値で判定し直すことはしません。
+- rule 自身の source が、親の source より先に異常を拾った場合は、rule の alert が先に届きます。親は、それが抑える rule と同じかそれ以上の頻度で読まれるようにすると確実です。
+- 親が発報中に `evaluate()` が例外を出しても、rule は `SUPPRESSED` のままです（status に error が出ます）。
+- 自分自身を指定した rule や、互いに指定し合う循環はエラーです。存在しない rule 名は lint の警告になります。
 
 alert state:
 
@@ -885,7 +922,7 @@ alert state:
 - `SILENCED`
   active な silence の対象になり、期間中は通常の alert state が一時的に mute されている。
 - `SUPPRESSED`
-  `suppressed_by` にある別 rule が active なため、通常の alert state が抑制されている。
+  `suppressed_by` か `depends_on` にある rule が発報しているため、この alert は抑えられている。
 
 派生 transition:
 

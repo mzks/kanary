@@ -4,12 +4,11 @@ import difflib
 import inspect
 from typing import Any
 
-from .constants import Severity, coerce_severity
+from .constants import ERROR, Severity, coerce_severity
 from .output import Output, _DEFAULT_EXCLUDED_STATES
 from .rule import Rule
 from .schedule import parse_schedule
 from .selectors import normalize_rule_inputs
-from .signature_compat import detect_instance_method_style
 from .source import Source
 
 _RULES: dict[str, type[Rule]] = {}
@@ -149,9 +148,7 @@ def _definition_name(cls: type[object]) -> str:
 
 
 # Attributes Kanary reads even when no base class declares them.
-_EXTRA_KNOWN_ATTRS: dict[type[object], frozenset[str]] = {
-    Rule: frozenset({"thresholds", "direction"}),
-}
+_EXTRA_KNOWN_ATTRS: dict[type[object], frozenset[str]] = {}
 
 
 def _apply_attrs(cls: type[object], attrs: dict[str, object], base: type[object]) -> None:
@@ -222,11 +219,11 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
     if not inputs:
         raise ValueError(f"rule '{rule_id}' must define source or inputs")
 
-    severity = getattr(cls, "severity", None)
-    if not isinstance(severity, Severity):
-        raise ValueError(
-            f"rule '{rule_id}' severity must be one of kanary.INFO/WARN/ERROR/CRITICAL"
-        )
+    severity = getattr(cls, "severity", ERROR)  # as for a subclass of kanary.Rule
+    try:
+        cls.severity = coerce_severity(severity)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"rule '{rule_id}' {exc}") from exc
 
     if not hasattr(cls, "tags"):
         cls.tags = []  # allowed, as for a subclass of kanary.Rule; lint warns about it
@@ -237,16 +234,7 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
     evaluate = getattr(cls, "evaluate", None)
     if not callable(evaluate):
         raise ValueError(f"rule '{rule_id}' must implement evaluate(ctx)")
-    try:
-        cls.__kanary_evaluate_style__ = detect_instance_method_style(
-            evaluate,
-            new_arity=1,
-            legacy_arity=2,
-            new_signature="evaluate(self, ctx)",
-            legacy_signature="evaluate(self, payload, ctx)",
-        )
-    except ValueError as exc:
-        raise ValueError(f"rule '{rule_id}' {exc}") from exc
+    _check_method("rule", rule_id, evaluate, "evaluate(self, ctx)", arity=1, removed="the payload argument")
 
     _setdefault(cls, "owner", None)
     _setdefault(cls, "description", None)
@@ -259,24 +247,13 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
 
     for attr_name in ("depends_on", "suppressed_by"):
         value = getattr(cls, attr_name)
+        if isinstance(value, str):
+            value = [value]
+        elif isinstance(value, tuple):
+            value = list(value)
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            raise ValueError(f"rule '{rule_id}' {attr_name} must be list[str]")
-
-    thresholds = getattr(cls, "thresholds", None)
-    if thresholds is not None and thresholds != []:
-        if not isinstance(thresholds, list):
-            raise ValueError(f"rule '{rule_id}' thresholds must be list[tuple[number, Severity]]")
-        for item in thresholds:
-            if (
-                not isinstance(item, tuple)
-                or len(item) != 2
-                or not isinstance(item[0], (int, float))
-                or not isinstance(item[1], Severity)
-            ):
-                raise ValueError(f"rule '{rule_id}' thresholds must be list[tuple[number, Severity]]")
-        direction = getattr(cls, "direction", "high")
-        if direction not in {"high", "low"}:
-            raise ValueError(f"rule '{rule_id}' direction must be 'high' or 'low'")
+            raise ValueError(f"rule '{rule_id}' {attr_name} must be a rule id or a list of rule ids")
+        setattr(cls, attr_name, value)
 
     if "normalize_evaluation" not in cls.__dict__:
         cls.normalize_evaluation = Rule.normalize_evaluation
@@ -298,39 +275,8 @@ def prepare_source_class(cls: type[Any]) -> type[Any]:
     if not callable(getattr(cls, "poll", None)):
         raise ValueError(f"source '{source_id}' must implement poll()")
 
-    try:
-        init_style = detect_instance_method_style(
-            getattr(cls, "init"),
-            new_arity=0,
-            legacy_arity=1,
-            new_signature="init(self)",
-            legacy_signature="init(self, ctx)",
-        )
-    except ValueError as exc:
-        raise ValueError(f"source '{source_id}' {exc}") from exc
-    try:
-        poll_style = detect_instance_method_style(
-            getattr(cls, "poll"),
-            new_arity=0,
-            legacy_arity=1,
-            new_signature="poll(self)",
-            legacy_signature="poll(self, ctx)",
-        )
-    except ValueError as exc:
-        raise ValueError(f"source '{source_id}' {exc}") from exc
-    try:
-        terminate_style = detect_instance_method_style(
-            getattr(cls, "terminate"),
-            new_arity=0,
-            legacy_arity=1,
-            new_signature="terminate(self)",
-            legacy_signature="terminate(self, ctx)",
-        )
-    except ValueError as exc:
-        raise ValueError(f"source '{source_id}' {exc}") from exc
-    cls.__kanary_init_style__ = init_style
-    cls.__kanary_poll_style__ = poll_style
-    cls.__kanary_terminate_style__ = terminate_style
+    for name in ("init", "poll", "terminate"):
+        _check_method("source", source_id, getattr(cls, name), f"{name}(self)", arity=0, removed="the ctx argument")
 
     interval = getattr(cls, "interval", None)
     schedule = getattr(cls, "schedule", None)
@@ -395,31 +341,24 @@ def prepare_output_class(cls: type[Any]) -> type[Any]:
             raise ValueError(f"output '{output_id}' {attr_name} must be a non-negative integer")
     if not callable(getattr(cls, "emit", None)):
         raise ValueError(f"output '{output_id}' must implement emit(event)")
-    try:
-        cls.__kanary_init_style__ = detect_instance_method_style(
-            getattr(cls, "init"),
-            new_arity=0,
-            legacy_arity=1,
-            new_signature="init(self)",
-            legacy_signature="init(self, ctx)",
-        )
-        cls.__kanary_emit_style__ = detect_instance_method_style(
-            getattr(cls, "emit"),
-            new_arity=1,
-            legacy_arity=2,
-            new_signature="emit(self, event)",
-            legacy_signature="emit(self, event, ctx)",
-        )
-        cls.__kanary_terminate_style__ = detect_instance_method_style(
-            getattr(cls, "terminate"),
-            new_arity=0,
-            legacy_arity=1,
-            new_signature="terminate(self)",
-            legacy_signature="terminate(self, ctx)",
-        )
-    except ValueError as exc:
-        raise ValueError(f"output '{output_id}' {exc}") from exc
+    _check_method("output", output_id, getattr(cls, "init"), "init(self)", arity=0, removed="the ctx argument")
+    _check_method("output", output_id, getattr(cls, "emit"), "emit(self, event)", arity=1, removed="the ctx argument")
+    _check_method("output", output_id, getattr(cls, "terminate"), "terminate(self)", arity=0, removed="the ctx argument")
     return cls
+
+
+_POSITIONAL_KINDS = {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+
+
+def _check_method(kind: str, plugin_id: str, method: Any, signature: str, *, arity: int, removed: str) -> None:
+    """The method takes exactly `arity` positional arguments after self: poll(self), emit(self, event), ..."""
+    parameters = list(inspect.signature(method).parameters.values())
+    if parameters and parameters[0].name == "self":
+        parameters = parameters[1:]
+    if len(parameters) == arity and all(parameter.kind in _POSITIONAL_KINDS for parameter in parameters):
+        return
+    hint = f" ({removed} was removed in KANARY 0.8.0)" if len(parameters) == arity + 1 else ""
+    raise ValueError(f"{kind} '{plugin_id}' {signature.split('(')[0]}() must be {signature}{hint}")
 
 
 def _setdefault(cls: type[Any], attr_name: str, value: Any) -> None:

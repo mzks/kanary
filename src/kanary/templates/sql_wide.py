@@ -32,8 +32,8 @@ class TemplateSqlWide(kanary.SQLWideSource):
     table = "environment"
     timestamp_column = "observed_at"  # each input gets this row's time
     # Zone of timestamps stored without one: an IANA name ("Asia/Tokyo"), an offset
-    # ("+09:00", "+9"), or "UTC" (the default).
-    # timestamp_timezone = "Asia/Tokyo"
+    # ("+09:00", "+9"), or "UTC". The default is this host's local time.
+    # timestamp_timezone = "UTC"
 
     # Input name -> column. Leave empty to use every column of the table (except the
     # timestamp) under its own name. Non-numeric values go to metadata["text"].

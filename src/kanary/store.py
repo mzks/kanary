@@ -9,8 +9,9 @@ import sqlite3
 import threading
 from typing import Any
 
-from .constants import AlertState, Severity
+from .constants import AlertState, Severity, severity_name
 from .models import Acknowledgement, AlertEvent, Silence
+from .values import coerce_datetime, json_default
 
 
 @dataclass(slots=True)
@@ -80,7 +81,7 @@ class NullStore:
         rule_id: str,
         definition_file: str | None,
         previous_state: str,
-        previous_severity: int,
+        previous_severity: str | None,
         operator: str,
         reason: str,
         created_at: datetime,
@@ -138,11 +139,15 @@ class SQLiteStore:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self.path, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            self._ensure_schema(conn)
-            conn.commit()
+            try:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                self._ensure_schema(conn)
+                conn.commit()
+            except BaseException:
+                conn.close()  # a database KANARY cannot use is not left open
+                raise
             self._conn = conn
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
@@ -458,7 +463,7 @@ class SQLiteStore:
                     int(event.alert.severity),
                     event.alert.owner,
                     event.alert.message,
-                    json.dumps(event.alert.payload, ensure_ascii=False, default=_json_default),
+                    json.dumps(event.alert.payload, ensure_ascii=False, default=json_default),
                     json.dumps(list(event.alert.tags), ensure_ascii=False),
                     event.occurred_at.isoformat(),
                     definition_file,
@@ -542,7 +547,7 @@ class SQLiteStore:
         rule_id: str,
         definition_file: str | None,
         previous_state: str,
-        previous_severity: int,
+        previous_severity: str | None,
         operator: str,
         reason: str,
         created_at: datetime,
@@ -657,10 +662,10 @@ class SQLiteStore:
                     "rule_id": row["rule_id"],
                     "previous_state": row["previous_state"],
                     "current_state": row["current_state"],
-                    "previous_severity": row["previous_severity"],
-                    "current_severity": row["current_severity"] if row["current_severity"] is not None else row["severity"],
+                    "previous_severity": severity_name(row["previous_severity"]),
+                    "current_severity": severity_name(row["current_severity"] if row["current_severity"] is not None else row["severity"]),
                     "transition": row["transition"],
-                    "severity": row["severity"],
+                    "severity": severity_name(row["severity"]),
                     "owner": row["owner"],
                     "message": row["message"],
                     "payload": json.loads(row["payload_json"]),
@@ -844,9 +849,9 @@ class SQLiteStore:
                 "previous_state": row["previous_state"],
                 "current_state": row["current_state"],
                 "transition": row["transition"],
-                "severity": row["severity"],
-                "previous_severity": row["previous_severity"],
-                "current_severity": row["current_severity"] if row["current_severity"] is not None else row["severity"],
+                "severity": severity_name(row["severity"]),
+                "previous_severity": severity_name(row["previous_severity"]),
+                "current_severity": severity_name(row["current_severity"] if row["current_severity"] is not None else row["severity"]),
                 "owner": row["owner"],
                 "message": row["message"],
                 "tags": json.loads(row["tags_json"]),
@@ -938,7 +943,7 @@ def build_store(path: str | Path | None):
 
 
 def _parse_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value)
+    return coerce_datetime(value)  # rows written before 0.8.0 may lack a time zone: local time
 
 
 def _not_before(moment: datetime, other: datetime) -> bool:
@@ -946,13 +951,6 @@ def _not_before(moment: datetime, other: datetime) -> bool:
         return moment >= other
     except TypeError:  # one with a zone, one without (an old database)
         return moment.replace(tzinfo=None) >= other.replace(tzinfo=None)
-
-
-def _json_default(value: object) -> str:
-    isoformat = getattr(value, "isoformat", None)
-    if callable(isoformat):
-        return isoformat()
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _operator_action_row(row: sqlite3.Row) -> dict[str, Any]:

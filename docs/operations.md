@@ -77,7 +77,7 @@ Kanary itself does not require any environment variables. Source-specific connec
 
 - Kanary loads one or more plugin directories at startup.
 - `@kanary.source`, `@kanary.rule`, and `@kanary.output` are the registration points.
-- A source that fails during `init()` is marked `FAILED`, but the engine, API, and viewer still start.
+- A source or output whose `init()` fails is marked `FAILED`, but the engine, API, and viewer still start, and the plugin keeps trying its `init()` on its own thread (see "Failure recovery" in [plugins.md](plugins.md)). After a power cut KANARY may start before its database or mail server; it picks them up when they come back.
 - Each source is polled in its own thread according to `interval`.
 - Rules are evaluated against the latest result from their source.
 - Plugin directories are watched continuously and Python file changes are detected automatically.
@@ -136,7 +136,7 @@ kanaryctl unsilence <silence_id> --operator operator_name
 - `reload --all`
   Rerun full plugin discovery even when no watched Python file changed, then apply the result.
 - `reload --full`
-  Perform an in-process engine restart. All sources, rules, and outputs are reinitialized.
+  Perform an in-process engine restart. All sources, rules, and outputs are reinitialized. A plugin whose `init()` fails does not stop the restart (it keeps trying); a plugin that cannot be created at all does, and the running engine goes on.
 
 ## Log history Persistence
 
@@ -158,14 +158,31 @@ The history API and the viewer's History panel only retain data when SQLite pers
 Kanary stamps newly created SQLite state DBs with a schema version.
 This versioning is intentionally minimal: if you point 0.3.x at an older legacy DB without a recognized schema version, Kanary rejects it and asks you to start with a fresh state DB path.
 
+### Removing old history
+
+The database grows only when something happens: a row per state change, per delivery, and per operator action, not per evaluation. A hundred state changes a day add some tens of MB a year; a rule that flaps every poll adds far more, and is worth fixing in itself. To remove history older than a date, stop KANARY, back up the file, and run:
+
+```bash
+sqlite3 ./var/kanary.db <<'SQL'
+-- Keep each rule's newest event: KANARY restores the alerts from it after a restart.
+DELETE FROM alert_events
+ WHERE occurred_at < '2024-01-01'
+   AND id NOT IN (SELECT MAX(id) FROM alert_events GROUP BY rule_id);
+DELETE FROM output_dispatches WHERE occurred_at < '2024-01-01';
+-- Keep acknowledgements: an alert still acknowledged keeps its ack from here.
+DELETE FROM operator_actions WHERE created_at < '2024-01-01' AND action_type NOT IN ('ack', 'unack');
+DELETE FROM silences WHERE end_at < '2024-01-01';
+VACUUM;
+SQL
+```
+
+Times are stored as ISO 8601 text, so comparing with a date such as `'2024-01-01'` works.
+
 ## Demo And Examples
 
 - [demo/basic_monitoring.py](../demo/basic_monitoring.py)
 - [examples/getting_started.py](../examples/getting_started.py)
+- [examples/factory_patterns.py](../examples/factory_patterns.py)
 - [examples/sqlite_monitoring.py](../examples/sqlite_monitoring.py)
 - [examples/sqlite_console_output.py](../examples/sqlite_console_output.py)
-- [examples/discord_webhook_output.py](../examples/discord_webhook_output.py)
-- [examples/postgres_wide_format.py](../examples/postgres_wide_format.py)
-- [examples/postgres_long_format.py](../examples/postgres_long_format.py)
-- [examples/peer_monitoring.py](../examples/peer_monitoring.py)
-- [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)
+- templates: `kanary new --list`, [templates.md](templates.md)

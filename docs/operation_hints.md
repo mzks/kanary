@@ -59,7 +59,7 @@ For Sources and Outputs, create connections and threads in `init()` and close th
 
 ## Monitoring Kanary Itself
 
-One Kanary node can monitor a peer node's health. [peer_monitoring.py](../examples/peer_monitoring.py) shows how to expose a peer's heartbeat, API latency, and failed-plugin count as ordinary inputs.
+One Kanary node can monitor a peer node's health. The `peer` template (`kanary new -t peer`) reads the peer's API, its answer time, and its failed plugins as ordinary inputs, with the rules that fire on them; put it on both nodes to have them watch each other.
 
 A practical arrangement is for the primary node to own business Sources, Rules, and Outputs, while the monitoring node has only a small set of peer-monitoring Rules and their notification Outputs. When monitoring peers in both directions, verify that the monitoring path does not depend on the same network, power, or notification destination. Kanary does not provide automatic peer redundancy or consensus.
 
@@ -257,4 +257,4 @@ class OperationsFollowupOutput:
 
 `now()` invokes its callback synchronously with the current event. Callback exceptions propagate to `emit()`, so normal Output retry / reinitialization applies. `after()` uses an absolute offset from the first followup registration, and its callback receives the most recently received event at execution time. Callbacks run on the output's own thread between `emit()` calls, so they never overlap with `emit()`.
 
-To cancel followups on `SILENCED` and `SUPPRESSED`, the Output must receive those events, hence `exclude_states=[]`. Followups are stored only in memory and are lost on process restart or plugin reload. Always call `close()` from `terminate()`. See [output_followups.py](../examples/output_followups.py) for the complete example.
+To cancel followups on `SILENCED` and `SUPPRESSED`, the Output must receive those events, hence `exclude_states=[]`. Followups are stored only in memory and are lost on process restart or plugin reload. Always call `close()` from `terminate()`. `kanary new -t followups` writes a complete one.

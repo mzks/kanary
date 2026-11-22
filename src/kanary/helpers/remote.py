@@ -7,12 +7,12 @@ import re
 from typing import Any
 from urllib.request import Request, urlopen
 
-from ..constants import OK, AlertState, Severity
+from ..constants import OK, AlertState, Severity, coerce_severity
 from ..models import Evaluation, Measurement, SourceResult
-from ..patterns import matches_any_tag, matches_excluded_tag
 from ..registry import get_source_registry, register_rule
 from ..rule import Rule, RuleContext
 from ..source import Source
+from ..values import to_datetime
 
 
 class RemoteKanarySource(Source):
@@ -49,11 +49,6 @@ class RemoteKanarySource(Source):
                 )
             )
         return SourceResult(measurements=measurements, status="ok")
-
-    @classmethod
-    def discover_remote_alerts(cls) -> list[dict[str, Any]]:
-        instance = cls()
-        return instance.fetch_remote_alerts()
 
     def fetch_remote_alerts(self) -> list[dict[str, Any]]:
         payload = self._read_json("GET", self.alerts_path)
@@ -191,61 +186,49 @@ class RemoteAlarm(Rule):
 def import_remote_alarms(
     *,
     source: str,
-    remote_alarm_ids: list[str] | None = None,
+    remote_alarm_ids: list[str],
     prefix: str | None = None,
     suffix: str | None = None,
     add_tags: list[str] | None = None,
     owner: str | None = None,
-    severity: Severity = Severity.ERROR,
+    severity: Severity | str = Severity.ERROR,
     include_rule_ids: list[str] | None = None,
     exclude_rule_ids: list[str] | None = None,
-    include_tags: list[str] | None = None,
-    exclude_tags: list[str] | None = None,
     propagate_ack: bool = False,
     propagate_silence: bool = False,
 ) -> list[type[RemoteAlarm]]:
+    """One local RemoteAlarm rule per remote alert id.
+
+    The ids are written out: reading them from the remote node would make
+    loading this file depend on that node being up (after a power cut both
+    nodes start at once).
+    """
     source_cls = get_source_registry().get(source)
     if source_cls is None:
         raise ValueError(f"unknown source '{source}'")
-
-    discovered_alerts: list[dict[str, Any]]
-    if remote_alarm_ids is None:
-        if not issubclass(source_cls, RemoteKanarySource):
-            raise ValueError("remote_alarm_ids is required unless source is a RemoteKanarySource")
-        discovered_alerts = source_cls.discover_remote_alerts()
-    else:
-        discovered_alerts = [{"rule_id": remote_alarm_id} for remote_alarm_id in remote_alarm_ids]
+    if not remote_alarm_ids or isinstance(remote_alarm_ids, str):
+        raise ValueError("remote_alarm_ids must list the remote rule ids to import, e.g. ['daq.link', 'hv.*.range']")
+    severity = coerce_severity(severity)
 
     generated: list[type[RemoteAlarm]] = []
     include_rule_patterns = include_rule_ids or []
     exclude_rule_patterns = exclude_rule_ids or []
-    include_tag_patterns = list(include_tags or [])
-    exclude_tag_patterns = list(exclude_tags or [])
 
-    for alert in discovered_alerts:
-        remote_alarm_id = str(alert["rule_id"])
-        remote_tags = list(alert.get("tags") or [])
+    for remote_alarm_id in map(str, remote_alarm_ids):
         if include_rule_patterns and not any(fnmatch(remote_alarm_id, pattern) for pattern in include_rule_patterns):
             continue
         if exclude_rule_patterns and any(fnmatch(remote_alarm_id, pattern) for pattern in exclude_rule_patterns):
             continue
-        if include_tag_patterns and not matches_any_tag(remote_tags, include_tag_patterns):
-            continue
-        if exclude_tag_patterns and matches_excluded_tag(remote_tags, exclude_tag_patterns):
-            continue
 
         local_rule_id = _compose_local_rule_id(remote_alarm_id, prefix=prefix, suffix=suffix)
         class_name = _generated_class_name(local_rule_id)
-        rule_tags = sorted(set(remote_tags).union(add_tags or []))
         attrs = {
             "__module__": source_cls.__module__,
             "rule_id": local_rule_id,
             "source": source,
-            "severity": _coerce_severity(alert.get("severity")) or severity,
-            "tags": rule_tags,
-            "owner": owner if owner is not None else alert.get("owner"),
-            "description": alert.get("description"),
-            "runbook": alert.get("runbook"),
+            "severity": severity,  # the remote alert's own severity is used while it fires
+            "tags": sorted(set(add_tags or [])),
+            "owner": owner,
             "remote_alarm_id": remote_alarm_id,
             "propagate_ack": propagate_ack,
             "propagate_silence": propagate_silence,
@@ -264,7 +247,7 @@ def _join_url(base_url: str, path: str) -> str:
 def _parse_remote_datetime(value: Any):
     if not isinstance(value, str) or not value:
         return None
-    return datetime.fromisoformat(value)
+    return to_datetime(value)
 
 
 def _coerce_alert_state(value: Any) -> AlertState:
@@ -279,19 +262,10 @@ def _coerce_alert_state(value: Any) -> AlertState:
 
 
 def _coerce_severity(value: Any) -> Severity | None:
-    if isinstance(value, Severity):
-        return value
-    if isinstance(value, int):
-        try:
-            return Severity(value)
-        except ValueError:
-            return None
-    if isinstance(value, str):
-        try:
-            return Severity[value]
-        except KeyError:
-            return None
-    return None
+    try:
+        return None if value is None else coerce_severity(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _compose_local_rule_id(remote_alarm_id: str, *, prefix: str | None, suffix: str | None) -> str:

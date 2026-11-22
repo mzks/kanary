@@ -70,7 +70,7 @@ kanary ./demo
 
 1. [demo/basic_monitoring.py](demo/basic_monitoring.py) を読んで、最小の `Source`, `Rule`, `Output` を把握する
 2. [docs/getting_started_ja.md](docs/getting_started_ja.md) と [examples/getting_started.py](examples/getting_started.py) を読み、手を動かしながら流れを確認する
-3. `examples/` で PostgreSQL、Discord、peer monitoring、remote alert import の例を確認する
+3. `kanary new --list` で、すぐ使える plugin（SQL、Slack、Discord、mail、相互監視など）を見て、そこから始める
 4. 自分の `plugins/` directory を作り、最初は `Source` を 1 つ、`Rule` を 1 つだけ書く
 
 ## 最小例
@@ -255,20 +255,11 @@ Kanary 本体に必須の環境変数はありません。必要に応じて次�
 
 より実運用に近い例:
 
-- [examples/getting_started.py](examples/getting_started.py)
-- [examples/factory_patterns.py](examples/factory_patterns.py)
-- [examples/fake_alarm_monitoring.py](examples/fake_alarm_monitoring.py)
-- [examples/fake_alarm_target.py](examples/fake_alarm_target.py)
-- [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py)
-- [examples/sqlite_console_output.py](examples/sqlite_console_output.py)
-- [examples/discord_webhook_output.py](examples/discord_webhook_output.py)
-- [examples/postgres_wide_format.py](examples/postgres_wide_format.py)
-- [examples/postgres_long_format.py](examples/postgres_long_format.py)
-- [examples/peer_monitoring.py](examples/peer_monitoring.py)
-- [examples/self_plugin_monitoring.py](examples/self_plugin_monitoring.py)
-- [examples/remote_alarm_import.py](examples/remote_alarm_import.py)
+- [examples/getting_started.py](examples/getting_started.py): [docs/getting_started_ja.md](docs/getting_started_ja.md) のコード
+- [examples/factory_patterns.py](examples/factory_patterns.py): 似た rule をたくさん、Python の関数やループから作る
+- [examples/sqlite_monitoring.py](examples/sqlite_monitoring.py) と [examples/sqlite_console_output.py](examples/sqlite_console_output.py): `dev/emulate_sqlite.py`（SQLite の table に変化する値を書き続ける）と組で動かすデモ
 
-`demo/` は最初の 1 回を動かすための短い例です。`examples/` は helper class、remote monitoring、PostgreSQL、webhook output などを含む、より実運用に近い例です。
+`demo/` は最初の 1 回を動かすための短い例です。自分の plugin は template から始めてください。`kanary new --list` で一覧が出て、[docs/templates_ja.md](docs/templates_ja.md) にそれぞれの中身があります。
 
 ## Web viewer
 

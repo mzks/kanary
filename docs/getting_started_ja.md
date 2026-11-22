@@ -206,10 +206,7 @@ kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 
 ### Remote Kanary node の読み込み
 
-他の Kanary node の alert を source として読み、local rule として mirror できます。
-
-- [examples/peer_monitoring.py](../examples/peer_monitoring.py)
-- [examples/remote_alarm_import.py](../examples/remote_alarm_import.py)
+他の Kanary node の alert を source として読み、local rule として mirror できます（`kanary new -t remote`）。2 台で互いを見張ることもできます（`kanary new -t peer`）。
 
 ### Mail output と Mailpit
 

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .constants import AlertState, Severity, TransitionKind
+from .values import plain_value, to_datetime
 
 
 @dataclass(slots=True)
@@ -81,6 +82,13 @@ class Measurement:
     value: Any
     timestamp: datetime
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Every input value and time enters here: Decimal and numpy numbers become
+        # Python numbers, a time without a time zone is this host's local time.
+        self.value = plain_value(self.value)
+        if self.timestamp is not None:
+            self.timestamp = to_datetime(self.timestamp)
 
 
 @dataclass(slots=True)
@@ -306,15 +314,16 @@ def _coerce_item_metadata(value: Any) -> dict[str, Any]:
 
 
 def _resolve_timestamp(
-    value: datetime | float | None,
+    value: datetime | float | str | None,
     default_timestamp: datetime | None,
 ) -> datetime:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return datetime.fromtimestamp(value, tz=timezone.utc)  # unix time
     if value is not None:
-        raise TypeError(f"an input timestamp must be a datetime, unix time, or None, not {value!r}")
+        try:
+            return to_datetime(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"an input timestamp must be a datetime, ISO 8601 text, unix time, or None, not {value!r}"
+            ) from exc
     if isinstance(default_timestamp, datetime):
         return default_timestamp
     return datetime.now(timezone.utc)

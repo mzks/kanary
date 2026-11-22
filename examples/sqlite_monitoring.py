@@ -3,10 +3,11 @@ from datetime import datetime
 
 import kanary
 
-# SQLite example that focuses on measurement-level monitoring.
-# Query failures are treated as source plugin failures so Kanary's runtime
-# retry/reinit logic can recover them. Pair this example with
-# examples/self_plugin_monitoring.py if you want alerts about failed plugins.
+# A demo to run with dev/emulate_sqlite.py, which keeps writing changing values
+# to an SQLite table: a hand-written source and rule next to the ready-made ones.
+# Query failures are raised, so the runtime's retry/reinit recovers them; for
+# alerts about failed plugins, add `kanary new -t plugin-health`. For a real
+# database, start from `kanary new -t sql-wide` or `-t sql-long` instead.
 
 @kanary.source(source_id="sqlite", interval=5.0)
 class SqliteSource:
@@ -59,7 +60,6 @@ class SqliteSource:
     owner="expert_dev",
 )
 class Value1Stale:
-    owner = "expert_dev"
     timeout = 1 * kanary.minute
 
     def evaluate(self, ctx):

@@ -40,48 +40,19 @@ class InputView:
 @dataclass(slots=True)
 class RuleContext:
     now: datetime
-    source_id: str | None = None
-    source_state: SourceState | None = None
     source_states: Mapping[str, SourceState] | None = None
     declared_inputs: tuple[str, ...] = ()
     resolved_sources: tuple[str, ...] = ()
     previous_alert: Alert | None = None
+    # The rule's own last judgment (FIRING or OK). The previous alert may show it
+    # otherwise: SILENCED, ACKED, or SUPPRESSED by a parent.
+    last_judgment: AlertState | None = None
 
     def __post_init__(self) -> None:
         if self.source_states is None:
-            if self.source_id is not None and self.source_state is not None:
-                self.source_states = {self.source_id: self.source_state}
-            else:
-                self.source_states = {}
-        if self.source_id is not None and self.source_state is None:
-            self.source_state = self.source_states.get(self.source_id)
+            self.source_states = {}
         if not self.resolved_sources:
-            if self.source_id is not None:
-                self.resolved_sources = (self.source_id,)
-            else:
-                self.resolved_sources = tuple(sorted(self.source_states.keys()))
-        if not self.declared_inputs and self.source_id is not None:
-            self.declared_inputs = (f"{self.source_id}:*",)
-
-    @property
-    def current(self) -> dict[str, Any]:
-        if self.source_state is not None:
-            return self.source_state.current.payload
-        if len(self.resolved_sources) == 1:
-            state = self.source_states.get(self.resolved_sources[0]) if self.source_states else None
-            if state is not None:
-                return state.current.payload
-        return {}
-
-    @property
-    def previous(self) -> dict[str, Any]:
-        if self.source_state is not None:
-            return self.source_state.previous.payload
-        if len(self.resolved_sources) == 1:
-            state = self.source_states.get(self.resolved_sources[0]) if self.source_states else None
-            if state is not None:
-                return state.previous.payload
-        return {}
+            self.resolved_sources = tuple(sorted(self.source_states.keys()))
 
     def inputs(
         self,
@@ -188,12 +159,10 @@ class RuleContext:
     ) -> dict[str, Any]:
         target_source_id = source_id
         if target_source_id is None:
-            if self.source_id is not None:
-                target_source_id = self.source_id
-            elif len(self.resolved_sources) == 1:
-                target_source_id = self.resolved_sources[0]
-            else:
-                raise ValueError("source_payload() is ambiguous; specify source_id")
+            if len(self.resolved_sources) != 1:
+                read = ", ".join(self.resolved_sources) or "no source"
+                raise ValueError(f"source_payload() needs a source id: this rule reads {read}")
+            target_source_id = self.resolved_sources[0]
         state = (self.source_states or {}).get(target_source_id)
         if state is None:
             return {}
@@ -223,7 +192,10 @@ class RuleContext:
         return self.previous_alert.severity
 
     def was_alerting(self) -> bool:
-        return self.previous_state not in {None, AlertState.OK}
+        """True when the rule itself judged FIRING last time (silenced, acked, or suppressed or not)."""
+        if self.last_judgment is not None:
+            return self.last_judgment == AlertState.FIRING
+        return self.previous_state in {AlertState.FIRING, AlertState.ACKED}
 
     def age(self, name: str | None = None, default: Any = None) -> float | None:
         """Seconds between the input's timestamp and ctx.now."""
@@ -282,16 +254,10 @@ class Rule:
         payload: dict[str, Any],
     ) -> Evaluation:
         if isinstance(result, Evaluation):
-            base_payload = dict(payload)
-            if result.payload is None:
-                normalized_payload = base_payload
-            else:
-                normalized_payload = dict(result.payload)
+            # payload replaces the source payload; extra is added to whichever is used.
+            normalized_payload = dict(payload) if result.payload is None else dict(result.payload)
             if result.extra:
-                if result.payload is None:
-                    normalized_payload.update(result.extra)
-                else:
-                    normalized_payload.update(result.extra)
+                normalized_payload.update(result.extra)
             result.payload = normalized_payload
             return result
         if result is None:
@@ -408,6 +374,11 @@ def fire_if(
     if not condition:
         return None
     return firing(message, severity=severity, extra=extra, payload=payload)
+
+
+# The same functions under the other natural names: fire / firing, fire_if / firing_if.
+fire = firing
+firing_if = fire_if
 
 
 def info_if(condition: Any, message: str | None = None, *, extra: Mapping[str, Any] | None = None, payload: Mapping[str, Any] | None = None) -> Evaluation | None:

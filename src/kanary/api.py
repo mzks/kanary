@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from http import HTTPStatus
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,8 +14,9 @@ import tomllib
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .engine import Engine
-from .constants import DEFAULT_VIEWER_TITLE, AlertState
+from .engine import Engine, NotApplicable, UnknownTarget
+from .constants import DEFAULT_VIEWER_TITLE, AlertState, severity_name
+from .values import coerce_datetime, json_default
 
 WEB_ROOT = Path(__file__).with_name("web")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -135,10 +137,15 @@ class ControlAPI:
                         )
                         return
 
+                    now = datetime.now().astimezone()
                     self._write_json(
                         HTTPStatus.OK,
                         {
                             "status": "ok",
+                            # Times sent without a time zone are read in this one.
+                            "time": now,
+                            "timezone": now.tzname(),
+                            "utc_offset": now.strftime("%z")[:3] + ":" + now.strftime("%z")[3:],
                             "sources": sorted(engine.sources),
                             "rules": sorted(engine.rules),
                             "alert_count": len(engine.alerts),
@@ -305,7 +312,7 @@ class ControlAPI:
                                 "definition_file_name": Path(definition_file).name if definition_file else None,
                                 "description": getattr(plugin, "description", None) if plugin is not None else None,
                                 "tags": list(getattr(plugin, "tags", [])) if plugin is not None else [],
-                                "severity": int(plugin.severity) if status.plugin_type == "rule" and plugin is not None else None,
+                                "severity": severity_name(plugin.severity) if status.plugin_type == "rule" and plugin is not None else None,
                                 "owner": getattr(plugin, "owner", None) if status.plugin_type == "rule" and plugin is not None else None,
                                 "runbook": getattr(plugin, "runbook", None) if status.plugin_type == "rule" and plugin is not None else None,
                                 "inputs": list(getattr(plugin, "inputs", [])) if status.plugin_type == "rule" and plugin is not None else [],
@@ -332,10 +339,7 @@ class ControlAPI:
                 if self.path == "/reload":
                     payload = self._read_json_body(allow_empty=True)
                     try:
-                        try:
-                            result = reload_callback(payload)
-                        except TypeError:
-                            result = reload_callback()
+                        result = reload_callback(payload)
                     except Exception as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                         return
@@ -420,37 +424,21 @@ class ControlAPI:
                 if self.path.startswith("/alerts/") and self.path.endswith("/ack"):
                     rule_id = unquote(self.path[len("/alerts/") : -len("/ack")]).strip("/")
                     body = self._read_json_body()
-                    try:
-                        alert = engine.acknowledge(
-                            rule_id,
-                            operator=body["operator"],
-                            reason=body.get("reason"),
-                        )
-                    except KeyError as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
-                        return
-                    except Exception as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                        return
-                    self._write_json(HTTPStatus.OK, {"status": "acked", "rule_id": alert.rule_id})
+                    alert = self._operator_action(body, lambda operator: engine.acknowledge(
+                        rule_id, operator=operator, reason=body.get("reason")
+                    ))
+                    if alert is not None:
+                        self._write_json(HTTPStatus.OK, {"status": "acked", "rule_id": alert.rule_id})
                     return
 
                 if self.path.startswith("/alerts/") and self.path.endswith("/unack"):
                     rule_id = unquote(self.path[len("/alerts/") : -len("/unack")]).strip("/")
                     body = self._read_json_body()
-                    try:
-                        alert = engine.unacknowledge(
-                            rule_id,
-                            operator=body["operator"],
-                            reason=body.get("reason"),
-                        )
-                    except KeyError as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
-                        return
-                    except Exception as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                        return
-                    self._write_json(HTTPStatus.OK, {"status": "unacked", "rule_id": alert.rule_id})
+                    alert = self._operator_action(body, lambda operator: engine.unacknowledge(
+                        rule_id, operator=operator, reason=body.get("reason")
+                    ))
+                    if alert is not None:
+                        self._write_json(HTTPStatus.OK, {"status": "unacked", "rule_id": alert.rule_id})
                     return
 
                 if self.path == "/silences/duration":
@@ -478,7 +466,7 @@ class ControlAPI:
                         return
                     self._write_json(
                         HTTPStatus.OK,
-                        {"status": "silenced", "silence_id": silence.silence_id, "warnings": warnings},
+                        _silence_created(silence, warnings),
                     )
                     return
 
@@ -505,26 +493,18 @@ class ControlAPI:
                         return
                     self._write_json(
                         HTTPStatus.OK,
-                        {"status": "silenced", "silence_id": silence.silence_id, "warnings": warnings},
+                        _silence_created(silence, warnings),
                     )
                     return
 
                 if self.path.startswith("/silences/") and self.path.endswith("/cancel"):
                     silence_id = unquote(self.path[len("/silences/") : -len("/cancel")]).strip("/")
                     body = self._read_json_body()
-                    try:
-                        silence = engine.cancel_silence(
-                            silence_id,
-                            operator=body["operator"],
-                            reason=body.get("reason"),
-                        )
-                    except KeyError as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
-                        return
-                    except Exception as exc:
-                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-                        return
-                    self._write_json(HTTPStatus.OK, {"status": "unsilenced", "silence_id": silence.silence_id})
+                    silence = self._operator_action(body, lambda operator: engine.cancel_silence(
+                        silence_id, operator=operator, reason=body.get("reason")
+                    ))
+                    if silence is not None:
+                        self._write_json(HTTPStatus.OK, {"status": "unsilenced", "silence_id": silence.silence_id})
                     return
 
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -532,8 +512,24 @@ class ControlAPI:
             def log_message(self, format: str, *args) -> None:
                 return None
 
+            def _operator_action(self, body: dict, action: Callable[[str], object]) -> object | None:
+                """Run an ack, unack, or unsilence; on an error write the reply and return None."""
+                operator = body.get("operator")
+                if not operator:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": "missing field: operator"})
+                    return None
+                try:
+                    return action(str(operator))
+                except UnknownTarget as exc:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                except NotApplicable as exc:
+                    self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
+                except Exception as exc:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return None
+
             def _write_json(self, status: HTTPStatus, payload: dict) -> None:
-                body = json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default).encode()
+                body = json.dumps(payload, ensure_ascii=False, indent=2, default=json_default).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -576,15 +572,20 @@ class ControlAPI:
         return Handler
 
 
-def _json_default(value: object) -> str:
-    isoformat = getattr(value, "isoformat", None)
-    if callable(isoformat):
-        return isoformat()
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+def _silence_created(silence, warnings: list[str]) -> dict[str, object]:
+    # The window as KANARY read it (a time without a zone is this host's local time).
+    return {
+        "status": "silenced",
+        "silence_id": silence.silence_id,
+        "start_at": silence.start_at,
+        "end_at": silence.end_at,
+        "warnings": warnings,
+    }
 
 
 def _parse_datetime(value: str):
-    return _json_datetime_fromisoformat(value)
+    """A time from a request; without a time zone it is this host's local time."""
+    return coerce_datetime(value)
 
 
 def _parse_query_int(
@@ -614,12 +615,6 @@ def _parse_alert_state(value: str) -> AlertState:
         return AlertState(str(value))
     except ValueError as exc:
         raise ValueError(f"invalid alert state: {value}") from exc
-
-
-def _json_datetime_fromisoformat(value: str):
-    from datetime import datetime
-
-    return datetime.fromisoformat(value)
 
 
 def _duration_to_timedelta_minutes(duration_minutes: float):
@@ -777,7 +772,7 @@ def _export_alert_payload(engine: Engine, alert, rule) -> dict[str, object]:
         "node_id": engine.node_id,
         "rule_id": alert.rule_id,
         "state": alert.state.value,
-        "severity": alert.severity.value,
+        "severity": severity_name(alert.severity),
         "owner": alert.owner,
         "tags": list(alert.tags),
         "message": alert.message,

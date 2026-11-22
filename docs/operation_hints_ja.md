@@ -59,7 +59,7 @@ Source と Output では、接続や thread を `init()` で作り、`terminate(
 
 ## Kanary 自体の監視
 
-Kanary の監視には、別 node が peer の health を監視する構成が使えます。[peer_monitoring.py](../examples/peer_monitoring.py) は peer の heartbeat、API latency、failed plugin 数を通常の input として取り込む例です。
+Kanary の監視には、別 node が peer の health を監視する構成が使えます。`peer` template（`kanary new -t peer`）は、peer の API、その応答時間、失敗している plugin を通常の input として読み、それで発報する rule まで含みます。両方の node に置けば互いを見張れます。
 
 主系 node は業務 Source / Rule / Output を持ち、監視系 node は少数の peer 監視 Rule と、その通知用 Output だけを持つ構成が扱いやすくなります。相互監視にする場合も、監視経路が同じ network・電源・通知先へ依存しないかを確認してください。Kanary は peer の自動多重化や合意形成を行いません。
 
@@ -257,4 +257,4 @@ class OperationsFollowupOutput:
 
 `now()` は現在の event を渡して同期実行します。callback の例外は `emit()` に伝播するため、通常の Output retry / reinit の対象です。`after()` は最初の followup 登録時刻からの絶対 offset で実行され、callback にはその時点で最後に受け取った event が渡されます。callback は output の thread で `emit()` と `emit()` の間に実行され、`emit()` と重なりません。
 
-`SILENCED` と `SUPPRESSED` で followup を取り消すには、それらの event を受け取る必要があるため `exclude_states=[]` を指定しています。followup は memory 上だけに保持され、process restart / plugin reload では失われます。`terminate()` で必ず `close()` を呼びます。完全な例は [output_followups.py](../examples/output_followups.py) にあります。
+`SILENCED` と `SUPPRESSED` で followup を取り消すには、それらの event を受け取る必要があるため `exclude_states=[]` を指定しています。followup は memory 上だけに保持され、process restart / plugin reload では失われます。`terminate()` で必ず `close()` を呼びます。`kanary new -t followups` で完全な例が出てきます。

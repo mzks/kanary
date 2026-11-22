@@ -71,7 +71,7 @@ Optional:
 
 If you omit both `interval` and `schedule`, Kanary uses `interval = 60.0`.
 If you use `schedule`, do not set `interval` at the same time. One written on the class itself (in its body or decorator) replaces the other one inherited from a base class.
-The older `poll(ctx)`, `init(ctx)`, and `terminate(ctx)` signatures still work for compatibility, but lint warns and the documentation now treats the argument-less form as the formal API.
+The `poll(ctx)`, `init(ctx)`, and `terminate(ctx)` of KANARY before 0.8.0 are an error now: drop the `ctx` argument.
 
 `interval` is a polling interval in seconds. `interval = 0` calls `poll()` again as soon as it returns; use it only for a `poll()` that waits for data (see "Values that arrive by themselves").
 `schedule` is a Unix cron-compatible 5-field string interpreted in the local time
@@ -108,6 +108,8 @@ Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
 
 If all attempts fail, the source stays `FAILED` until the next scheduled poll or an explicit reload.
 
+`init()` runs on the source's own thread too. When it fails (at start, a database that is still booting after a power cut), the source is `FAILED` and its thread tries `init()` again, with the same `max_reinit` attempts, every `interval` (at most a minute apart) until it works; then it polls as usual. The other sources start meanwhile, and KANARY starts without waiting for them.
+
 ### Returning inputs
 
 The usual public API is `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, and `kanary.skip(...)`.
@@ -139,6 +141,8 @@ Rules:
 
 - `(name, value)`, `(name, value, timestamp)`, and `(name, value, timestamp, metadata)` are accepted
 - if the item timestamp is omitted or `None`, Kanary uses the outer `timestamp=` if present, otherwise the server's current time
+- a timestamp is a `datetime`, ISO 8601 text, or unix time; see [Times and time zones](#times-and-time-zones)
+- `Decimal` (what database drivers return for `NUMERIC`) and numpy numbers become plain `float` / `int`, so rules and JSON treat them as numbers
 - outer `metadata=` becomes `SourceResult.metadata`
 - `kanary.no_data(reason=..., metadata=...)` means the poll succeeded and produced an empty snapshot; Kanary updates the source snapshot and still evaluates rules
 - `kanary.no_update(reason=..., metadata=...)` means the poll succeeded but there is no new snapshot; Kanary keeps the last snapshot and still evaluates rules against it
@@ -146,6 +150,23 @@ Rules:
 - raising an exception means source/plugin failure and triggers the runtime retry/reinit policy
 
 `kanary.SourceResult(...)` remains available as an advanced form.
+
+#### Times and time zones
+
+A time without a time zone is read as **the local time of the host that runs KANARY**. This holds everywhere KANARY takes a time in: input timestamps, `kanaryctl silence-until --start-at 2026-11-21T22:00`, the HTTP API, and the state database. A unix time is always absolute.
+
+Give times a time zone when you can, so they mean the same on any host:
+
+```python
+from datetime import datetime, timezone
+
+datetime.now().astimezone()      # now, with this host's offset
+datetime.now(timezone.utc)       # now, in UTC
+kanary.to_datetime("2026-11-21 22:00", naive_timezone="Asia/Tokyo")  # text from a system on another zone
+"2026-11-21T22:00:00+09:00"      # ISO 8601 text with the offset ("...Z" for UTC)
+```
+
+In SQL, prefer `timestamp with time zone` (PostgreSQL `timestamptz`). For a table that stores times without a zone in UTC (or any zone other than the host's), set `timestamp_timezone = "UTC"` on the SQL helper sources. `StaleRule` warns when a timestamp is more than 30 minutes in the future, which is how a wrong zone usually shows.
 
 Typical guidance:
 
@@ -223,9 +244,9 @@ Kanary resolves `resolved_sources` from these selectors at load/reload time and 
 
 `evaluate(ctx)` must be fast and free of I/O: rules are evaluated one at a time (see "Where Plugin Code Runs"), and one slower than 100 ms is reported as `SLOW`.
 
-`severity` is required. It acts as the default or fallback severity.
+`severity` (default `ERROR`) is the rule's default or fallback severity.
 If you return `kanary.firing(..., severity=...)` or `kanary.Evaluation(severity=...)`, that specific evaluation overrides the class-level severity.
-The older `evaluate(payload, ctx)` signature still works for compatibility, but lint warns and the formal API is `evaluate(ctx)`.
+The `evaluate(payload, ctx)` of KANARY before 0.8.0 is an error now: read the values from `ctx` (`ctx.value()`, `ctx.source_payload()`).
 
 Optional metadata:
 
@@ -273,7 +294,7 @@ Each `InputView` has:
 
 For a single resolved input, you can omit the selector and call `ctx.value()` directly. Multi-input rules should usually iterate over `ctx.inputs()`.
 If the selector would match more than one input, `ctx.value()` and the other scalar helpers raise an error instead of guessing.
-If you need the normalized payload for the source that triggered the current evaluation, use `ctx.source_payload()`. Use `ctx.inputs()` for cross-source data access.
+`ctx.source_payload("source-id")` is the normalized payload of one source; a rule that reads a single source may leave out the id. Use `ctx.inputs()` for cross-source data access.
 
 ### Returning evaluations
 
@@ -283,6 +304,7 @@ The usual public API is one of:
 - `kanary.firing(message, severity=..., extra=...)`
 - `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)`
 - `kanary.fire_if(...)`, `kanary.warn_if(...)`, `kanary.error_if(...)`, `kanary.critical_if(...)`
+- `kanary.fire(...)` is the same as `kanary.firing(...)`, and `kanary.firing_if(...)` the same as `kanary.fire_if(...)`: use whichever reads better
 
 Example:
 
@@ -305,7 +327,7 @@ Accepted shorthand forms:
 - `True` means `FIRING`, `False` means `OK`
 - `(severity, message)` means `FIRING` with that severity
 - `(None, message)` means `OK`
-- `severity` may be a constant such as `kanary.ERROR` or a string such as `"ERROR"`
+- a severity is written the same way everywhere (a rule's `severity`, `thresholds`, `kanary.firing(severity=...)`, an output's `minimum_severity`): `kanary.ERROR`, its name in any case (`"ERROR"`, `"Error"`, `"error"`), or its number (`30`). A rule that sets none is `ERROR`
 
 If you do not specify a payload explicitly, Kanary automatically inherits the current source payload. Use `extra={...}` to merge additional fields into that payload.
 `kanary.Evaluation(...)` remains available as an advanced form.
@@ -337,7 +359,7 @@ Optional:
 - `max_retry`
 - `max_reinit`
 
-The older `emit(event, ctx)`, `init(ctx)`, and `terminate(ctx)` signatures still work for compatibility, but lint warns and the formal API omits `ctx`.
+The `emit(event, ctx)`, `init(ctx)`, and `terminate(ctx)` of KANARY before 0.8.0 are an error now: drop the `ctx` argument.
 
 `emit()` runs on the output's own thread. The engine only decides which outputs an event goes to and adds it to their queues, so evaluation, other outputs, and operator actions never wait for a delivery. Each output keeps the order of its events. Up to 1000 events wait per output; beyond that the oldest is dropped, logged, and recorded as not sent. The Outputs page shows how many events are queued and how many were dropped. On shutdown, queued events get up to 5 seconds to go out.
 
@@ -348,7 +370,9 @@ For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `e
 
 To add `OK` to the defaults and drop recovery events too, use `exclude_states=kanary.Output.exclude_states + ["OK"]`. An explicitly configured list replaces rather than merges with the defaults, so debugging and audit outputs that need every state event should set `exclude_states=[]`.
 
-Because `SILENCED -> OK` has `OK` as its current state, it is not excluded by default. If only that transition is unwanted, inspect `previous_state` and `current_state` in `emit()`.
+An `OK` goes only to an output that was sent a non-OK event for the rule since its last `OK` (a `FIRING`, an `ACKED`, or a state its `exclude_states` lets through): an `OK` closes what the output was told. So a rule that was `OK` before a silence or a suppression sends no `OK` when that ends, while a rule that fired, was silenced, and recovered during the silence sends its `OK` as the silence ends. After a restart, alerts restored as not `OK` count as sent. An `OK` held back this way is recorded as filtered in the output dispatch history.
+
+To drop a transition that passes the filters, inspect `previous_state` and `current_state` in `emit()`:
 
 ```python
 def emit(self, event):
@@ -370,7 +394,7 @@ Common values for `exclude_states`:
 - `SILENCED`
   An alert covered by an active silence, with its normal alert state temporarily muted.
 - `SUPPRESSED`
-  An alert whose normal state is suppressed because another rule in `suppressed_by` is active.
+  An alert held back by a rule in its `suppressed_by` or `depends_on` that is firing.
 
 Common values for `exclude_transitions`:
 
@@ -438,7 +462,7 @@ Each `after()` delay is an absolute offset from the first followup registered fo
 
 Use `cancel(callback)` to cancel only registrations for that callback. Cancellation cannot stop a callback that has already started. Registrations are kept only in memory and do not survive a process restart; call `close()` from `terminate()`.
 
-An output that cancels followups on `SILENCED` or `SUPPRESSED` must set `exclude_states=[]` in its decorator so those events are not removed by default routing. See `examples/output_followups.py` for a complete example.
+An output that cancels followups on `SILENCED` or `SUPPRESSED` must set `exclude_states=[]` in its decorator so those events are not removed by default routing. `kanary new -t followups` writes a complete one.
 
 There is no `fire_after` setting on rules. Where it goes depends on what the delay is for:
 
@@ -455,6 +479,8 @@ Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
 
 1. waits 1 second and retries `emit()`
 2. waits 4 seconds, runs `terminate() -> init()`, and retries `emit()`
+
+An output whose `init()` failed (its server not reachable yet) still gets its events: its thread runs `init()` before sending each one, and while it is idle it tries `init()` again after 10 s, then twice as long each time, up to every 5 minutes. An event that comes while the destination is down is not sent later: it is recorded as failed in the dispatch history.
 
 If all attempts fail, the output is `FAILED`. While it is `FAILED`, each later event gets a single attempt without waits, so a dead destination does not hold every queued event through the whole sequence; the first success makes the output `READY` again. Events that failed are not sent again.
 
@@ -589,7 +615,7 @@ A wide table suits a fixed set of quantities written together; a long table suit
 
 Table and column names must be plain identifiers (`schema.table` is allowed). To read anything else, such as a join, a view, or a `WHERE` clause, set `query` (with `params` in the driver's parameter style); it is then used as written, newest rows first, and the table settings are ignored. For another driver, override `connect()` and return any DB-API connection.
 
-`timestamp_column` sets each input's timestamp. Timestamps stored without a timezone are read in `timestamp_timezone` (a time zone as `kanary.to_timezone()` reads it: an IANA name such as `"Asia/Tokyo"`, an offset such as `"+09:00"`, `"+9"`, or `"UTC+9"`, or `"UTC"`), or as UTC when it is unset. An offset never changes, so use an IANA name where daylight saving time applies. The two classes are short on purpose; read them in `src/kanary/helpers/sql.py` when writing a source for another shape.
+`timestamp_column` sets each input's timestamp. Timestamps stored without a timezone are read in `timestamp_timezone` (a time zone as `kanary.to_timezone()` reads it: an IANA name such as `"Asia/Tokyo"`, an offset such as `"+09:00"`, `"+9"`, or `"UTC+9"`, or `"UTC"`), or as this host's local time when it is unset. An offset never changes, so use an IANA name where daylight saving time applies. The two classes are short on purpose; read them in `src/kanary/helpers/sql.py` when writing a source for another shape.
 
 #### Values that arrive by themselves (webhook, MQTT, callbacks)
 
@@ -617,7 +643,7 @@ def poll(self):
 - Nothing arriving is not an error for the source: put a `StaleRule` with `evaluation_interval` on its inputs.
 - `interval = 0` is only for a `poll()` that waits: one that returns at once would spin a CPU core.
 
-`HTTPPushSource` and `MQTTSource` run with `interval = 0` and nothing else: leave `interval` and `schedule` out; any other makes `init()` fail with a message. The `http-push`, `mqtt`, and `push` (your own listener) templates show each, and `examples/webhook_push_source.py` is a complete example.
+`HTTPPushSource` and `MQTTSource` run with `interval = 0` and nothing else: leave `interval` and `schedule` out; any other makes `init()` fail with a message. The `http-push`, `mqtt`, and `push` (your own listener) templates show each.
 
 ### Rule Helpers
 
@@ -670,6 +696,7 @@ Fires when an input's value is not `expected`, which is one value or a list such
 - checks measurement age via its timestamp
 - when multiple inputs are matched, any stale or timestamp-missing input fires the rule
 - `values` in the payload maps input names to their age in seconds
+- a timestamp more than `future_tolerance` seconds in the future (default `30 * kanary.minute`) fires a `WARN` with "(time zone?)": such an input would never look stale, and it is usually a time written without its time zone. `future_tolerance = None` turns this off
 
 Rules are normally evaluated when one of their Sources updates. Set `evaluation_interval` to a positive number of seconds to also evaluate a Rule on an independent fixed interval:
 
@@ -683,7 +710,7 @@ class PeerHeartbeatStale(kanary.StaleRule):
     timeout = 120.0
 ```
 
-Scheduled evaluation uses saved Source snapshots and does not poll or update a Source. For a multi-Source Rule, use `ctx.inputs()` or `ctx.source_payload("source-id")`; argument-less `ctx.source_payload()` remains ambiguous. Wildcards only select inputs that exist in a snapshot and do not declare a required input set. Check required inputs explicitly in custom Rule code.
+Scheduled evaluation uses saved Source snapshots and does not poll or update a Source. For a multi-Source Rule, use `ctx.inputs()` or `ctx.source_payload("source-id")`: without the id, `ctx.source_payload()` is an error there, however the rule was triggered. Wildcards only select inputs that exist in a snapshot and do not declare a required input set. Check required inputs explicitly in custom Rule code.
 
 #### RateRule
 
@@ -742,10 +769,10 @@ class Value1Threshold(kanary.ThresholdRule):
 
 #### import_remote_alarms
 
-- factory that generates multiple `RemoteAlarm` rules
-- supports `prefix`, `suffix`, `add_tags`, `include_rule_ids`, `exclude_rule_ids`, `include_tags`, and `exclude_tags`
-- `include_rule_ids`, `exclude_rule_ids`, `include_tags`, and `exclude_tags` support glob patterns
-- each generated rule is treated as an independent local rule
+- factory that generates one `RemoteAlarm` rule per id in `remote_alarm_ids` (required)
+- the ids are written out on purpose: reading them from the remote node would make loading the file depend on that node being up, and after a power cut both nodes start at once
+- supports `prefix`, `suffix`, `add_tags`, `owner`, `severity`, and `include_rule_ids` / `exclude_rule_ids` (glob patterns over the listed ids)
+- each generated rule is treated as an independent local rule; while the remote alert fires, its own severity and message are shown
 
 ### Output Helpers
 
@@ -863,7 +890,7 @@ That example includes:
 - `kanary.PluginHealthSource` reads the engine it runs in (no HTTP, no settings) and publishes, for every other plugin, `<type>.<plugin_id>.failed` (1 while `FAILED`, with the error in the metadata); for outputs also `output.<id>.queued` and `output.<id>.dropped` (events dropped since the previous poll); for rules `rule.<id>.slow`.
 - The template's rules fire when any plugin has failed (listing each with its error) and when an output drops events.
 
-An alert about a failed output goes out through the other outputs; with a single output only the viewer shows it. KANARY itself stopping cannot be seen from inside: watch it from another KANARY (the `remote` template), or read its `GET /plugins` over HTTP as [examples/self_plugin_monitoring.py](../examples/self_plugin_monitoring.py) does.
+An alert about a failed output goes out through the other outputs; with a single output only the viewer shows it. KANARY itself stopping cannot be seen from inside: watch it from another KANARY (the `peer` template), or send a heartbeat to a service that alerts when it stops (the `heartbeat` template).
 - `make_threshold_rule(...)`
   Generates one `ThresholdRule`-based rule class.
 
@@ -871,15 +898,22 @@ This approach is often enough when only one project needs the factory. If the pa
 
 ## States And Dependencies
 
-Rule relationships:
+Rule relationships: `suppressed_by` and `depends_on` name the rules (one id or a list) whose failure explains this rule's. While one of them fires, the rule is `SUPPRESSED`, and `SUPPRESSED` is excluded from outputs by default: when a DAQ link goes down, you get the link's alert, not one per channel behind it.
 
-- `depends_on`
-- `suppressed_by`
+| | `evaluate()` while the parent fires | shown as |
+|---|---|---|
+| `suppressed_by` | called | `SUPPRESSED`, with what the rule judged: `suppressed by daq.link; would fire: daq:hv1=0 out of range [1000, 2000]` |
+| `depends_on` | not called | `SUPPRESSED`: `blocked by daq.link (not evaluated)` |
 
-`depends_on` expresses a prerequisite for meaningful evaluation. For example, you might only evaluate an instrument timeout while a network rule is healthy.
+Use `suppressed_by` for a rule that judges each value on its own (`RangeRule`, `ThresholdRule`, ...): the viewer shows what it would say. Use `depends_on` for a rule whose `evaluate()` cannot work, or should not see the values, while the parent fires: one that keeps its own history (a `kanary.Buffer` in the rule) would otherwise keep the values read during the failure and fire after it.
 
-`suppressed_by` is for automatic alert suppression during higher-level failures. For example, if `database.connection.failed` is firing, dependent stale alerts can become `SUPPRESSED`.
-An upper rule in `SILENCED` state is still active for dependency purposes, so it can suppress lower rules. `SUPPRESSED` is excluded from outputs by default.
+- "Fires" is the parent's own judgment: silencing or acknowledging the parent does not hold its children back.
+- A parent is evaluated before the rules it holds back, so on one source the parent's alert comes alone, whatever order the rules are written in.
+- When the parent fires, a rule on another source becomes `SUPPRESSED` at once.
+- When the parent recovers, the rule comes back with the first value its sources give after the recovery: in the same poll on the same source, otherwise at its source's next poll (it shows `recovered; waiting for a new value` until then). The values read during the failure are not judged again.
+- If the rule's own source sees the problem before the parent's source does, the rule's alert is sent first: suppression works best when the parent is read at least as often as the rules behind it.
+- An `evaluate()` that raises while its parent fires leaves the rule `SUPPRESSED` (its status shows the error).
+- A rule that lists itself, or rules that list each other in a cycle, are an error; a name that is not a rule is a lint warning.
 
 Alert states:
 
@@ -892,7 +926,7 @@ Alert states:
 - `SILENCED`
   An active silence covers the alert and temporarily mutes its normal alert state.
 - `SUPPRESSED`
-  Another active rule listed in `suppressed_by` suppresses the alert's normal state.
+  A rule in `suppressed_by` or `depends_on` fires, so this alert is held back.
 
 Derived transitions:
 

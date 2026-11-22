@@ -13,8 +13,9 @@ import kanary
     severity=kanary.WARN,  # default severity for kanary.firing(); INFO / WARN / ERROR / CRITICAL
     tags=["TODO"],  # Outputs route on tags
     # owner="detector-team",
-    # depends_on=["network.down"],    # while any of these fire, this rule stays OK ("blocked by")
-    # suppressed_by=["power.outage"],  # while any of these fire, this rule becomes SUPPRESSED
+    # While any of these fire, this rule is SUPPRESSED (not notified):
+    # suppressed_by=["daq.link"],  # still evaluated: the viewer shows what it would say
+    # depends_on=["daq.link"],     # not evaluated at all (it keeps history, or cannot work without them)
     # evaluation_interval=30 * kanary.second,  # also evaluate on a timer, not only on source updates
 )
 class TemplateRule:

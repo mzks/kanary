@@ -49,4 +49,5 @@ class OutputDropping(kanary.RangeRule):
 
 # An alert about a failed output goes out through the other outputs; with a single
 # output, only the viewer shows it. KANARY itself stopping cannot be seen from inside:
-# for that, watch it from another KANARY (the "remote" template) or an outside check.
+# for that, watch it from another KANARY (the "peer" template) or from outside (the
+# "heartbeat" template).

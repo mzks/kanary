@@ -4,11 +4,11 @@ from collections.abc import Mapping
 from difflib import get_close_matches
 from typing import Any
 
-from ..constants import Severity, coerce_severity
+from ..constants import WARN, Severity, coerce_severity
 from ..models import Evaluation
 from ..rule import InputView, Rule, RuleContext, firing, ok
 from ..selectors import selector_label
-from ..units import best_per_time_unit, format_per_time, format_time
+from ..units import best_per_time_unit, format_per_time, format_time, minute
 from ..values import coerce_datetime, is_number
 
 
@@ -129,9 +129,16 @@ class ExpectedValueRule(ValueRule):
 
 
 class StaleRule(ValueRule):
-    """Fire when an input's timestamp is older than ``timeout`` seconds, or missing."""
+    """Fire when an input's timestamp is older than ``timeout`` seconds, or missing.
+
+    A timestamp more than ``future_tolerance`` seconds ahead of now fires a WARN:
+    it is usually a time written without its time zone (a clock on UTC read as
+    local time, or the other way round), and such an input would never look
+    stale. None turns this check off.
+    """
 
     timeout: float
+    future_tolerance: float | None = 30 * minute
     missing_fires = True
 
     def value_of(self, item: InputView, ctx: RuleContext) -> float | None:
@@ -139,18 +146,29 @@ class StaleRule(ValueRule):
             return None
         return (ctx.now - coerce_datetime(item.timestamp)).total_seconds()
 
-    def check(self, value: float, ctx: RuleContext) -> bool:
-        return value > self.timeout
+    def check(self, value: float, ctx: RuleContext) -> Severity | bool:
+        if value > self.timeout:
+            return True
+        return WARN if self._too_far_ahead(value) else False
 
     def phrase(self, fired: bool) -> str:
         return f"(timeout {format_time(self.timeout)})"
 
     def format_value(self, value: float) -> str:
-        return f"{format_time(value)} old"
+        if value >= 0:
+            return f"{format_time(value)} old"
+        hint = " (time zone?)" if self._too_far_ahead(value) else ""
+        return f"{format_time(-value)} in the future{hint}"
+
+    def _too_far_ahead(self, age: float) -> bool:
+        return self.future_tolerance is not None and -age > self.future_tolerance
 
     def _check_settings(self) -> None:
         if not is_number(getattr(self, "timeout", None)) or self.timeout <= 0:
             raise ValueError("StaleRule.timeout must be a positive number of seconds")
+        tolerance = self.future_tolerance
+        if tolerance is not None and (not is_number(tolerance) or tolerance < 0):
+            raise ValueError("StaleRule.future_tolerance must be None or a non-negative number of seconds")
 
 
 class RangeRule(ValueRule):
@@ -260,6 +278,9 @@ class ThresholdRule(ValueRule):
     def _check_settings(self) -> None:
         if self.direction not in {"high", "low"}:
             raise ValueError(f"direction must be 'high' or 'low', not {self.direction!r}")
+        if not is_number(self.hysteresis) or self.hysteresis < 0:
+            raise ValueError("hysteresis must be a non-negative number")
+        self.thresholds = _threshold_list(self.thresholds)
 
 
 class RateRule(RangeRule):
@@ -297,6 +318,22 @@ class RateRule(RangeRule):
     def _unit(self) -> tuple[float, str]:
         bounds = [abs(bound) for bound in (self.low, self.high) if bound]
         return best_per_time_unit(max(bounds, default=1.0))
+
+
+def _threshold_list(thresholds: Any) -> list[tuple[float, Severity]]:
+    """[(value, severity), ...] with the severities as kanary.WARN, "warn", ...: the form check() uses."""
+    shape = "thresholds must be a list of (value, severity), e.g. [(80, kanary.WARN), (95, kanary.CRITICAL)]"
+    if not isinstance(thresholds, (list, tuple)) or not thresholds:
+        raise ValueError(shape)
+    checked: list[tuple[float, Severity]] = []
+    for item in thresholds:
+        if not isinstance(item, (list, tuple)) or len(item) != 2 or not is_number(item[0]):
+            raise ValueError(shape)
+        try:
+            checked.append((item[0], coerce_severity(item[1])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{shape}: {exc}") from exc
+    return checked
 
 
 def _no_value_text(names: list[str], errors: Mapping[str, Any]) -> str:

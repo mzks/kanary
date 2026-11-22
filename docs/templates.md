@@ -23,6 +23,8 @@ This page is generated from `src/kanary/templates/` by `kanary new --catalog > d
 | source | [http-push](#http-push) | Receive values over HTTP POST and evaluate them as soon as they arrive (HTTPPushSource). |
 | source | [mqtt](#mqtt) | Subscribe to MQTT topics and evaluate each message as soon as it arrives (MQTTSource; needs paho-mqtt). |
 | source | [plugin-health](#plugin-health) | Watch this KANARY's own plugins: alert when a source, rule, or output fails, or an output drops events (PluginHealthSource). |
+| source | [heartbeat](#heartbeat) | Tell an outside service that this KANARY is alive (healthchecks.io, Uptime Kuma push, ...); it alerts you when the pings stop. |
+| source | [peer](#peer) | Watch another KANARY: alert when it does not answer or its plugins fail (source and rules in one file); put one on each node to watch each other. |
 | rule | [rule](#rule) | Write your own evaluate(ctx) with full access to inputs, history, and severities. |
 | rule | [range](#range) | Fire when a value leaves [low, high], or enters a forbidden band (RangeRule). |
 | rule | [threshold](#threshold) | Raise severity step by step as a value crosses several thresholds (ThresholdRule). |
@@ -35,6 +37,7 @@ This page is generated from `src/kanary/templates/` by `kanary new --catalog > d
 | output | [discord](#discord) | Post alerts to a Discord channel through a webhook (DiscordOutput). |
 | output | [file-log](#file-log) | Append every alert event to a JSON Lines file (FileOutput). |
 | output | [mail](#mail) | Send alert events by e-mail over SMTP (MailOutput). |
+| output | [startup](#startup) | Post one message when KANARY starts, e.g. to know that monitoring is back after a power cut (Slack here; any chat output works). |
 
 **[ADVANCED](#advanced)**: Less common helpers, custom logic, or several features together.
 
@@ -470,8 +473,8 @@ class MySqlWideSource(kanary.SQLWideSource):
     table = "environment"
     timestamp_column = "observed_at"  # each input gets this row's time
     # Zone of timestamps stored without one: an IANA name ("Asia/Tokyo"), an offset
-    # ("+09:00", "+9"), or "UTC" (the default).
-    # timestamp_timezone = "Asia/Tokyo"
+    # ("+09:00", "+9"), or "UTC". The default is this host's local time.
+    # timestamp_timezone = "UTC"
 
     # Input name -> column. Leave empty to use every column of the table (except the
     # timestamp) under its own name. Non-numeric values go to metadata["text"].
@@ -527,8 +530,8 @@ class MySqlLongSource(kanary.SQLLongSource):
     value_column = "metric_value"
     timestamp_column = "observed_at"
     # Zone of timestamps stored without one: an IANA name ("Asia/Tokyo"), an offset
-    # ("+09:00", "+9"), or "UTC" (the default).
-    # timestamp_timezone = "Asia/Tokyo"
+    # ("+09:00", "+9"), or "UTC". The default is this host's local time.
+    # timestamp_timezone = "UTC"
     # Only scan rows of the last 10 minutes: keeps the query cheap on a large table.
     lookback = 10 * kanary.minute
 
@@ -713,7 +716,111 @@ class OutputDropping(kanary.RangeRule):
 
 # An alert about a failed output goes out through the other outputs; with a single
 # output, only the viewer shows it. KANARY itself stopping cannot be seen from inside:
-# for that, watch it from another KANARY (the "remote" template) or an outside check.
+# for that, watch it from another KANARY (the "peer" template) or from outside (the
+# "heartbeat" template).
+```
+
+[Contents](#contents)
+
+#### heartbeat
+
+source · Tell an outside service that this KANARY is alive (healthchecks.io, Uptime Kuma push, ...); it alerts you when the pings stop.
+
+```console
+$ kanary new -t heartbeat my.heartbeat
+```
+
+```python
+import kanary
+
+
+@kanary.source(source_id="my.heartbeat", interval=1 * kanary.minute)
+class MyHeartbeatSource(kanary.HTTPStatusSource):
+    description = "Pings an outside dead man's switch: when the pings stop, it alerts (KANARY, its host, or its network is down)."
+
+    # The ping URL of the check; set the check's period a little longer than the
+    # interval above (and a grace time), so one late ping does not alert.
+    urls = {"ping": "https://hc-ping.com/TODO-check-uuid"}  # TODO
+    timeout = 10.0
+
+
+@kanary.rule(
+    rule_id="my.heartbeat.not_delivered",
+    inputs="my.heartbeat:ping.status",
+    severity=kanary.WARN,
+    tags=["kanary"],
+)
+class HeartbeatNotDelivered(kanary.ExpectedValueRule):
+    description = "The heartbeat did not reach the outside service, which will soon alert the people it notifies."
+    runbook = "TODO: check this host's network to the outside, and the service's status page."
+    expected = 200
+    missing_fires = True  # no answer at all fires too
+
+
+# This is the watch KANARY cannot do for itself: from inside, it cannot report that
+# it stopped. To ping only while its own plugins work, read them in poll() first
+# (the "plugin-health" template) and skip the request while one fails.
+```
+
+[Contents](#contents)
+
+#### peer
+
+source · Watch another KANARY: alert when it does not answer or its plugins fail (source and rules in one file); put one on each node to watch each other.
+
+```console
+$ kanary new -t peer my.peer
+```
+
+```python
+import kanary
+
+
+@kanary.source(source_id="my.peer", interval=30 * kanary.second)
+class MyPeerSource(kanary.HTTPJSONSource):
+    description = "TODO: which KANARY this watches."
+
+    url = "http://peer-kanary.example:8000/peer-status"  # TODO: the other node's API
+    timeout = 5.0
+
+    def poll(self):
+        # No answer is what this source reports (up = 0), not a failure of its own.
+        try:
+            status = self.fetch_json()
+        except Exception as exc:
+            return kanary.inputs(("up", 0, None, {"error": f"{type(exc).__name__}: {exc}"}))
+        counts = status.get("counts") or {}
+        firing = (status.get("alert_states") or {}).get("FIRING")
+        return kanary.inputs(("up", 1), ("failed_plugins", counts.get("failed_plugins")), ("firing", firing))
+
+
+@kanary.rule(
+    rule_id="my.peer.down",
+    inputs="my.peer:up",
+    severity=kanary.ERROR,
+    tags=["kanary"],
+)
+class PeerDown(kanary.ExpectedValueRule):
+    description = "The other KANARY does not answer: it, its host, or the network between is down."
+    runbook = "TODO: how to reach the other host; kanaryctl --base-url http://peer-kanary.example:8000 plugins"
+    expected = 1
+
+
+@kanary.rule(
+    rule_id="my.peer.plugins_failed",
+    inputs="my.peer:failed_plugins",
+    severity=kanary.WARN,
+    tags=["kanary"],
+    suppressed_by="my.peer.down",  # no answer says it all
+)
+class PeerPluginsFailed(kanary.RangeRule):
+    description = "Plugins of the other KANARY fail: it runs, but does not watch everything."
+    high = 0
+
+
+# Put the same file on the other node with this node's URL, and each watches the
+# other. Both may stop together (one power line, one network): for that, add an
+# outside watch as well (the "heartbeat" template).
 ```
 
 [Contents](#contents)
@@ -739,8 +846,9 @@ import kanary
     severity=kanary.WARN,  # default severity for kanary.firing(); INFO / WARN / ERROR / CRITICAL
     tags=["TODO"],  # Outputs route on tags
     # owner="detector-team",
-    # depends_on=["network.down"],    # while any of these fire, this rule stays OK ("blocked by")
-    # suppressed_by=["power.outage"],  # while any of these fire, this rule becomes SUPPRESSED
+    # While any of these fire, this rule is SUPPRESSED (not notified):
+    # suppressed_by=["daq.link"],  # still evaluated: the viewer shows what it would say
+    # depends_on=["daq.link"],     # not evaluated at all (it keeps history, or cannot work without them)
     # evaluation_interval=30 * kanary.second,  # also evaluate on a timer, not only on source updates
 )
 class MyRule:
@@ -1294,6 +1402,48 @@ class MyMailOutput(kanary.MailOutput):
 
 [Contents](#contents)
 
+#### startup
+
+output · Post one message when KANARY starts, e.g. to know that monitoring is back after a power cut (Slack here; any chat output works).
+
+```console
+$ kanary new -t startup my.startup
+```
+
+```python
+from datetime import datetime
+import os
+import socket
+
+import kanary
+
+
+@kanary.output(
+    output_id="my.startup",
+    # It sends no alerts, only the message below.
+    exclude_states=["OK", "FIRING", "ACKED", "SILENCED", "SUPPRESSED"],
+)
+class MyStartupOutput(kanary.SlackOutput):
+    description = "Says once that KANARY started (or this output was reloaded)."
+
+    url = os.environ.get("SLACK_WEBHOOK_URL")  # TODO: or the webhook of your channel
+
+    def init(self):
+        super().init()
+        # init() runs again when the output recovers from a failed send: say it once.
+        # If the destination cannot be reached yet, init() fails and is tried again.
+        if not getattr(self, "announced", False):
+            started = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+            self.post_json({"text": f"KANARY started on {socket.gethostname()} at {started}"})
+            self.announced = True
+
+
+# For Discord, subclass kanary.DiscordOutput and post {"content": ...}; for
+# Mattermost, kanary.MattermostOutput and {"text": ...}; for mail, kanary.MailOutput.
+```
+
+[Contents](#contents)
+
 ## ADVANCED
 
 ### Sources
@@ -1685,15 +1835,14 @@ class MyRemoteSource(kanary.RemoteKanarySource):
     # url = "http://remote-kanary.example:8000/export-alerts"  # full URL instead of base_url
 
 
-# Create one local RemoteAlarm rule per remote alert. Discovery contacts the remote node
-# when this file is loaded; pass remote_alarm_ids=[...] to avoid that.
+# Create one local RemoteAlarm rule per remote alert. The ids are written out, so this
+# file loads even when the remote node is down.
 # kanary.import_remote_alarms(
 #     source="my.remote",
+#     remote_alarm_ids=["daq.link", "hv.crate1.range"],  # TODO: the remote rule ids
 #     prefix="remote.",              # local rule_id = prefix + remote rule_id + suffix
 #     add_tags=["remote"],
-#     include_tags=["detector"],     # only import matching remote alerts
-#     exclude_rule_ids=["*.debug"],
-#     severity=kanary.ERROR,         # used when the remote alert has no severity
+#     severity=kanary.ERROR,         # until the remote alert gives its own
 #     propagate_ack=True,            # local ack/unack is forwarded to the remote node
 #     propagate_silence=True,        # local silences are forwarded too
 # )

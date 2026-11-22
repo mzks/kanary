@@ -23,8 +23,8 @@ class TemplateSqlLong(kanary.SQLLongSource):
     value_column = "metric_value"
     timestamp_column = "observed_at"
     # Zone of timestamps stored without one: an IANA name ("Asia/Tokyo"), an offset
-    # ("+09:00", "+9"), or "UTC" (the default).
-    # timestamp_timezone = "Asia/Tokyo"
+    # ("+09:00", "+9"), or "UTC". The default is this host's local time.
+    # timestamp_timezone = "UTC"
     # Only scan rows of the last 10 minutes: keeps the query cheap on a large table.
     lookback = 10 * kanary.minute
 

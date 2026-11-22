@@ -115,15 +115,19 @@ def main() -> int:
     silence_for_parser = subparsers.add_parser("silence-for", help="Create a silence for a duration")
     silence_for_parser.add_argument("--operator", required=True)
     silence_for_parser.add_argument("--minutes", required=True, type=float)
-    silence_for_parser.add_argument("--start-at")
+    silence_for_parser.add_argument(
+        "--start-at", help="ISO 8601 time; without a time zone it is the KANARY host's local time"
+    )
     silence_for_parser.add_argument("--rule", action="append", default=[])
     silence_for_parser.add_argument("--tag", action="append", default=[])
     silence_for_parser.add_argument("--reason")
 
     silence_until_parser = subparsers.add_parser("silence-until", help="Create a silence for a time window")
     silence_until_parser.add_argument("--operator", required=True)
-    silence_until_parser.add_argument("--start-at", required=True)
-    silence_until_parser.add_argument("--end-at", required=True)
+    silence_until_parser.add_argument(
+        "--start-at", required=True, help="ISO 8601 time, e.g. 2026-11-21T22:00 (the KANARY host's local time) or ...+09:00"
+    )
+    silence_until_parser.add_argument("--end-at", required=True, help="ISO 8601 time, read like --start-at")
     silence_until_parser.add_argument("--rule", action="append", default=[])
     silence_until_parser.add_argument("--tag", action="append", default=[])
     silence_until_parser.add_argument("--reason")
@@ -319,6 +323,7 @@ def main() -> int:
             )
             for warning in payload.get("warnings", []):
                 print(f"warning: {warning}", file=sys.stderr)
+            print_silence_window(payload)
             print(payload.get("silence_id", payload.get("status", "unknown")))
             return 0
 
@@ -337,6 +342,7 @@ def main() -> int:
             )
             for warning in payload.get("warnings", []):
                 print(f"warning: {warning}", file=sys.stderr)
+            print_silence_window(payload)
             print(payload.get("silence_id", payload.get("status", "unknown")))
             return 0
 
@@ -860,6 +866,22 @@ def silence_sort_key(row: dict) -> tuple[int, str]:
         "CANCELLED": 3,
     }.get(silence_display_status(row), 4)
     return (rank, str(row.get("start_at") or ""))
+
+
+def print_silence_window(payload: dict) -> None:
+    """The window as KANARY read it (on stderr: stdout stays the silence id for scripts).
+
+    A time given without a time zone is the KANARY host's local time.
+    """
+    start_at, end_at = payload.get("start_at"), payload.get("end_at")
+    if not start_at or not end_at:
+        return
+    def shown(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).isoformat(sep=" ", timespec="minutes")
+        except ValueError:
+            return value
+    print(f"silenced from {shown(start_at)} to {shown(end_at)}", file=sys.stderr)
 
 
 def parse_iso_datetime(value: str | None) -> datetime | None:

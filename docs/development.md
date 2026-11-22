@@ -69,7 +69,7 @@ docs/
 
 - `src/kanary/`: engine and built-in helpers
 - `demo/`: smallest examples
-- `examples/`: more realistic examples
+- `examples/`: the getting-started code, factory patterns, and the SQLite demo (plugins of every kind are templates: `src/kanary/templates/`)
 - `dev/`: development utilities
 - `tests/`: unittest suite
 - `docs/`: user-facing documentation
