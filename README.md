@@ -144,9 +144,9 @@ Internally, Kanary handles plugin loading, periodic source polling, rule evaluat
 If you want shorter definitions later, you can switch to built-in helper classes such as `RangeRule`, `StaleRule`, and `ThresholdRule`.
 Users can create plugin class factory too.
 
-For sources, the usual public API is `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, and `kanary.skip(...)`.
+A source's `poll()` returns `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, or `kanary.skip(...)`.
 For rules, the usual public API is `kanary.ok(...)`, `kanary.firing(...)`, `kanary.warn(...)`, `kanary.error(...)`, and `kanary.critical(...)`.
-`kanary.SourceResult(...)` and `kanary.Evaluation(...)` remain available as advanced forms.
+`kanary.Evaluation(...)` remains available as an advanced form.
 
 ## Running Kanary
 
@@ -219,7 +219,7 @@ kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test
 ```
 
 Rule code should normally use input-based access such as `ctx.value()` for a single input or `ctx.inputs()` for multiple inputs.
-`test-evaluate` is the exception: it accepts an `inputs` map keyed by fully-qualified input names.
+`test-evaluate` is the exception: it accepts an `inputs` map keyed by fully-qualified input names, the form `test-poll` prints.
 Use `kanaryctl test-evaluate <rule_id> --print-template` to print a canonical payload skeleton before writing test data.
 
 Targeted plugin reload:

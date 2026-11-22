@@ -12,7 +12,7 @@ import logging
 import threading
 from typing import Any
 
-from ..models import SourceResult
+from ..models import PollResult
 from ..source import Source
 from ..values import flatten, to_datetime, to_number
 from .inbox import Inbox
@@ -83,7 +83,7 @@ class HTTPPushSource(Source):
         self._thread = threading.Thread(target=self._server.serve_forever, name=f"kanary-push-{self.source_id}", daemon=True)
         self._thread.start()
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         return self.inbox.wait(timeout=1.0)
 
     def terminate(self) -> None:
@@ -184,7 +184,7 @@ class MQTTSource(Source):
         client.connect_async(self.host, int(self.port), keepalive=int(self.keepalive))
         client.loop_start()
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         return self.inbox.wait(timeout=1.0)
 
     def terminate(self) -> None:

@@ -112,7 +112,7 @@ If all attempts fail, the source stays `FAILED` until the next scheduled poll or
 
 ### Returning inputs
 
-The usual public API is `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, and `kanary.skip(...)`.
+`poll()` returns one of `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, and `kanary.skip(...)`.
 
 Tuple/list style:
 
@@ -143,13 +143,28 @@ Rules:
 - if the item timestamp is omitted or `None`, Kanary uses the outer `timestamp=` if present, otherwise the server's current time
 - a timestamp is a `datetime`, ISO 8601 text, or unix time; see [Times and time zones](#times-and-time-zones)
 - `Decimal` (what database drivers return for `NUMERIC`) and numpy numbers become plain `float` / `int`, so rules and JSON treat them as numbers
-- outer `metadata=` becomes `SourceResult.metadata`
+- outer `metadata=` is the snapshot's `metadata`, next to its inputs: `ctx.source_payload()["metadata"]`, and in what `kanaryctl test-poll` prints
 - `kanary.no_data(reason=..., metadata=...)` means the poll succeeded and produced an empty snapshot; Kanary updates the source snapshot and still evaluates rules
 - `kanary.no_update(reason=..., metadata=...)` means the poll succeeded but there is no new snapshot; Kanary keeps the last snapshot and still evaluates rules against it
 - `kanary.skip(reason=..., metadata=...)` means the poll should be ignored entirely; Kanary keeps the last snapshot and does not evaluate rules
 - raising an exception means source/plugin failure and triggers the runtime retry/reinit policy
 
-`kanary.SourceResult(...)` remains available as an advanced form.
+To add inputs to what a helper source returns, give its result to `kanary.inputs()`:
+
+```python
+class Pumps(kanary.HTTPJSONSource):
+    source_id = "pumps"
+    url = "http://pump-controller.local/status.json"
+
+    def poll(self):
+        result = super().poll()
+        values = {item.name: item.value for item in result.inputs}
+        if values.get("power"):
+            return kanary.inputs(result, ("efficiency", values["flow"] / values["power"]))
+        return result
+```
+
+The result's inputs and metadata come first, then the other items; an item replaces an input of the same name. A result of `kanary.no_update()` or `kanary.skip()` is returned as it is, since there is no new snapshot to add to, and `kanary.no_data()` has no inputs. A result has `.status` (`"ok"`, `"empty"`, `"no_update"`, or `"skip"`) and `.inputs`, each with `.name`, `.value`, `.timestamp`, and `.metadata`, like the samples of a `kanary.Buffer`.
 
 #### Times and time zones
 
@@ -294,7 +309,18 @@ Each `InputView` has:
 
 For a single resolved input, you can omit the selector and call `ctx.value()` directly. Multi-input rules should usually iterate over `ctx.inputs()`.
 If the selector would match more than one input, `ctx.value()` and the other scalar helpers raise an error instead of guessing.
-`ctx.source_payload("source-id")` is the normalized payload of one source; a rule that reads a single source may leave out the id. Use `ctx.inputs()` for cross-source data access.
+`ctx.source_payload("source-id")` is the whole snapshot of one source, with the source's own input names; a rule that reads a single source may leave out the id. Use `ctx.inputs()` for cross-source data access.
+
+```python
+{
+    "status": "ok",              # "empty" after kanary.no_data()
+    "reason": "...",             # only when the poll gave one
+    "metadata": {"rows": 12},    # only when the poll gave some
+    "inputs": {"temperature": {"value": 21.5, "timestamp": datetime(...), "metadata": {}}},
+}
+```
+
+Before 0.8.0 the inputs were under `"channels"`.
 
 ### Returning evaluations
 
@@ -515,7 +541,7 @@ class Vacuum(kanary.Source):
         )
 ```
 
-A buffer holds, per input name, the samples added to it, oldest first. Each sample is a `kanary.Measurement` with `.value`, `.timestamp`, and `.metadata`.
+A buffer holds, per input name, the samples added to it, oldest first. Each sample has `.name`, `.value`, `.timestamp`, and `.metadata`.
 
 Adding:
 
@@ -693,7 +719,7 @@ Fires when an input's value is not `expected`, which is one value or a list such
 
 #### StaleRule
 
-- checks measurement age via its timestamp
+- checks the age of each input via its timestamp
 - when multiple inputs are matched, any stale or timestamp-missing input fires the rule
 - `values` in the payload maps input names to their age in seconds
 - a timestamp more than `future_tolerance` seconds in the future (default `30 * kanary.minute`) fires a `WARN` with "(time zone?)": such an input would never look stale, and it is usually a time written without its time zone. `future_tolerance = None` turns this off
@@ -754,7 +780,7 @@ class Value1Threshold(kanary.ThresholdRule):
 #### RemoteKanarySource
 
 - reads `/export-alerts` from another Kanary node
-- returns each remote alert as a measurement-like input
+- returns each remote alert as an input: 1 while it is not OK, the alert in its metadata
 - can forward `ack`, `unack`, `silence`, and `unsilence` to the remote API
 - typically configured with `base_url` and `interval`
 - uses the hostname as the default node ID
@@ -873,15 +899,15 @@ This keeps the generated plugins as normal, independent plugins after registrati
 
 For example:
 
-- generate one source from a measurement mapping
-- generate several `ThresholdRule` classes from a list of measurements
+- generate one source from a mapping of input names to values
+- generate several `ThresholdRule` classes from a list of inputs
 
 See [examples/factory_patterns.py](../examples/factory_patterns.py) for a concrete example.
 
 That example includes:
 
 - `make_constant_source(...)`
-  Generates a simple source class from a measurement dictionary.
+  Generates a simple source class from a dictionary of input names to values.
 
 ## 6. Self-Monitoring Pattern
 

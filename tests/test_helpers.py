@@ -406,7 +406,7 @@ class BufferAddTest(unittest.TestCase):
 
     def test_unix_time_is_honoured_by_inputs_too(self):
         result = kanary.inputs(("p", 1.0, T0.timestamp()))
-        self.assertEqual(result.measurements[0].timestamp, T0)
+        self.assertEqual(result.inputs[0].timestamp, T0)
 
     def test_a_poll_result_is_added_when_ok(self):
         buffer = kanary.Buffer()
@@ -476,7 +476,7 @@ class BufferInSourceTest(unittest.TestCase):
         source.init()
         statuses = [source.poll().status for _ in range(5)]
         self.assertEqual(statuses, ["skip"] * 5)  # spans of 0 to 4 minutes
-        self.assertEqual(source.poll().measurements[0].value, 1.0)  # 6 samples over 5 minutes
+        self.assertEqual(source.poll().inputs[0].value, 1.0)  # 6 samples over 5 minutes
 
     def test_a_helper_result_can_be_kept(self):
         class Reading(kanary.Source):
@@ -498,7 +498,7 @@ class BufferInSourceTest(unittest.TestCase):
 
         source = Averaged()
         source.init()
-        means = [source.poll().measurements[0].value for _ in range(3)]
+        means = [source.poll().inputs[0].value for _ in range(3)]
         self.assertEqual(means, [1.0, 1.5, 2.0])
 
 
@@ -558,10 +558,10 @@ class PrometheusTest(unittest.TestCase):
             "gone": "node_not_here",
         }})()
         result = source.poll()
-        values = {m.name: m.value for m in result.measurements}
+        values = {m.name: m.value for m in result.inputs}
         self.assertEqual(values, {"load1": 1.5, "root_free": 1.2e10, "temp.temp1": 45.0, "temp.temp2": 47.5, "errors": 12.0})
         self.assertEqual(result.metadata["missing"], ["gone"])
-        errors = next(m for m in result.measurements if m.name == "errors")
+        errors = next(m for m in result.inputs if m.name == "errors")
         self.assertEqual(errors.timestamp, datetime(2025, 11, 18, 12, 0, tzinfo=timezone.utc))  # the page's own time
 
     def test_several_matches_need_a_label_in_the_name(self):
@@ -578,11 +578,11 @@ class InboxTest(unittest.TestCase):
         inbox.put(("t", 1.0, T0), ("h", 40.0, T0))
         inbox.put({"t": 2.0}, timestamp=T0 + timedelta(seconds=1))
         result = inbox.wait(timeout=0.1)
-        self.assertEqual({m.name: m.value for m in result.measurements}, {"t": 2.0, "h": 40.0})
+        self.assertEqual({m.name: m.value for m in result.inputs}, {"t": 2.0, "h": 40.0})
         self.assertEqual(result.metadata, {"arrived": 3, "dropped": 0})
         inbox.put(("h", 41.0))
         later = inbox.wait(timeout=0.1)
-        self.assertEqual({m.name: m.value for m in later.measurements}, {"t": 2.0, "h": 41.0})  # t keeps its value
+        self.assertEqual({m.name: m.value for m in later.inputs}, {"t": 2.0, "h": 41.0})  # t keeps its value
 
     def test_nothing_arrived_is_skip(self):
         started = time.monotonic()
@@ -598,8 +598,8 @@ class InboxTest(unittest.TestCase):
         result = inbox.wait(timeout=5.0)
         timer.join()
         self.assertLess(time.monotonic() - started, 2.0)
-        self.assertEqual(result.measurements[0].value, 5.0)
-        self.assertGreater(result.measurements[0].timestamp, T0)  # stamped when it arrived
+        self.assertEqual(result.inputs[0].value, 5.0)
+        self.assertGreater(result.inputs[0].timestamp, T0)  # stamped when it arrived
 
     def test_take_returns_every_sample_and_the_size_is_bounded(self):
         inbox = kanary.Inbox(size=3)
@@ -618,9 +618,9 @@ class InboxTest(unittest.TestCase):
             started = time.monotonic()
             shown = inbox.wait(timeout=5.0)
             self.assertLess(time.monotonic() - started, 1.0)  # no waiting
-        self.assertEqual(shown.measurements[0].value, 2.0)
+        self.assertEqual(shown.inputs[0].value, 2.0)
         self.assertEqual(len(inbox), 1)  # still there for the real poll
-        self.assertEqual(inbox.wait(timeout=0.1).measurements[0].value, 2.0)
+        self.assertEqual(inbox.wait(timeout=0.1).inputs[0].value, 2.0)
 
 
 class HTTPPushSourceTest(unittest.TestCase):
@@ -647,7 +647,7 @@ class HTTPPushSourceTest(unittest.TestCase):
         self.assertEqual(kanary.HTTPPushSource.interval, 0)
         self.assertEqual(self.post(source, {"temperature": 21.5, "humidity": {"value": 40, "timestamp": "2026-11-18T21:00:00+09:00"}}), 202)
         result = source.poll()
-        values = {m.name: (m.value, m.timestamp) for m in result.measurements}
+        values = {m.name: (m.value, m.timestamp) for m in result.inputs}
         self.assertEqual(values["temperature"][0], 21.5)
         self.assertEqual(values["humidity"], (40, T0))
 
@@ -657,7 +657,7 @@ class HTTPPushSourceTest(unittest.TestCase):
         self.assertEqual(self.post(source, {"t": 1}, path="/other", token="s3cret"), 404)
         self.assertEqual(self.post(source, [1, 2], path="/inputs", token="s3cret"), 400)
         self.assertEqual(self.post(source, {"t": 1}, path="/inputs", token="s3cret"), 202)
-        self.assertEqual(source.poll().measurements[0].value, 1)
+        self.assertEqual(source.poll().inputs[0].value, 1)
 
     def test_a_broken_content_length_is_answered(self):
         source = self.start()
@@ -789,13 +789,13 @@ class MQTTSourceTest(unittest.TestCase):
         self.message(source, "plant/pumps/p2/state", b"ON")
         self.message(source, "plant/env", b'{"rh": "40", "co2": {"ppm": 420}}')
         self.message(source, "elsewhere", b"1")
-        values = {m.name: m.value for m in source.poll().measurements}
+        values = {m.name: m.value for m in source.poll().inputs}
         self.assertEqual(values, {
             "mqtt.connected": 1, "room_a.temperature": 21.5, "plant.pumps.p1.flow": 3.0,
             "plant.pumps.p1.state": "RUNNING", "plant.pumps.p2.state": 1.0, "env.rh": 40.0, "env.co2.ppm": 420.0,
         })
         source._on_disconnect(client, None, None, "connection lost", None)
-        self.assertEqual({m.name: m.value for m in source.poll().measurements}["mqtt.connected"], 0)
+        self.assertEqual({m.name: m.value for m in source.poll().inputs}["mqtt.connected"], 0)
         source.terminate()
         self.assertTrue(client.stopped)
 
@@ -836,16 +836,16 @@ class PluginHealthTest(unittest.TestCase):
         with self.assertLogs("kanary", level="ERROR"):
             engine.start()
         self.addCleanup(engine.shutdown)
-        channels = engine.test_poll("health")["channels"]
-        mine = sorted(name for name in channels if "quiet" in name or "broken" in name or "health" in name)
-        self.assertEqual(mine, ["output.quiet.dropped", "output.quiet.failed", "output.quiet.queued", "source.broken.failed"])
-        self.assertEqual(channels["source.broken.failed"]["value"], 1)
-        self.assertEqual(channels["source.broken.failed"]["metadata"]["error"], "no database")
-        self.assertEqual(channels["output.quiet.failed"]["value"], 0)
+        shown = engine.test_poll("health")["inputs"]
+        mine = sorted(name for name in shown if "quiet" in name or "broken" in name or "health." in name)
+        self.assertEqual(mine, ["health:output.quiet.dropped", "health:output.quiet.failed", "health:output.quiet.queued", "health:source.broken.failed"])
+        self.assertEqual(shown["health:source.broken.failed"]["value"], 1)
+        self.assertEqual(shown["health:source.broken.failed"]["metadata"]["error"], "no database")
+        self.assertEqual(shown["health:output.quiet.failed"]["value"], 0)
         with mock.patch.object(engine, "output_backlog", return_value={"queued": 4, "dropped": 7}):
             engine.test_poll("health")
-            channels = engine.test_poll("health")["channels"]
-        self.assertEqual((channels["output.quiet.queued"]["value"], channels["output.quiet.dropped"]["value"]), (4, 0))
+            shown = engine.test_poll("health")["inputs"]
+        self.assertEqual((shown["health:output.quiet.queued"]["value"], shown["health:output.quiet.dropped"]["value"]), (4, 0))
         with self.assertRaisesRegex(RuntimeError, "reads the engine it runs in"):
             Health().poll()
 
@@ -894,12 +894,12 @@ class CommandTest(HelperTestCase):
 
     def test_command_source_parses_stdout_and_exit_code(self):
         result = self.command_source("print('load=0.5 mode=auto')").poll()
-        values = {m.name: m.value for m in result.measurements}
+        values = {m.name: m.value for m in result.inputs}
         self.assertEqual(values, {"load": 0.5, "exit_code": 0})
         self.assertEqual(result.metadata["text"], {"mode": "auto"})
 
         failing = self.command_source("import sys; print('oops: not parsable'); sys.stderr.write('bad'); sys.exit(3)").poll()
-        self.assertEqual({m.name: m.value for m in failing.measurements}, {"exit_code": 3})
+        self.assertEqual({m.name: m.value for m in failing.inputs}, {"exit_code": 3})
         self.assertEqual(failing.metadata["stderr"], "bad")
 
     def test_command_source_timeout_raises(self):
@@ -940,9 +940,9 @@ class CommandTest(HelperTestCase):
             return cls()
 
         result = remote("echo load=0.5; exit 255  # comment").poll()
-        self.assertEqual({m.name: m.value for m in result.measurements}, {"load": 0.5, "exit_code": 255})
+        self.assertEqual({m.name: m.value for m in result.inputs}, {"load": 0.5, "exit_code": 255})
         self.assertEqual(result.metadata, {"program": "ssh", "host": "h"})
-        self.assertEqual({m.name: m.value for m in remote("echo 7").poll().measurements}, {"value": 7.0, "exit_code": 0})
+        self.assertEqual({m.name: m.value for m in remote("echo 7").poll().inputs}, {"value": 7.0, "exit_code": 0})
         no_marker = mock.Mock(returncode=255, stdout="", stderr="Permission denied (publickey).")
         with mock.patch("kanary.helpers.command.subprocess.run", return_value=no_marker):
             with self.assertRaisesRegex(RuntimeError, "Permission denied"):
@@ -1035,11 +1035,11 @@ class HTTPTest(HelperTestCase):
             })
             result = cls().poll()
             everything = type("All", (kanary.HTTPJSONSource,), {"source_id": "all", "url": base + "/"})().poll()
-        self.assertEqual({m.name: m.value for m in result.measurements}, {"temperature": 21.5, "pump": 1.0, "first": 3.0})
+        self.assertEqual({m.name: m.value for m in result.inputs}, {"temperature": 21.5, "pump": 1.0, "first": 3.0})
         self.assertEqual(result.metadata["missing"], ["gone"])
         self.assertEqual(result.metadata["text"], {"state": "RUN"})
         self.assertEqual(received[0][2]["X-Token"], "t")
-        self.assertIn("data.temperature", {m.name for m in everything.measurements})
+        self.assertIn("data.temperature", {m.name for m in everything.inputs})
 
     def test_webhook_and_chat_outputs_post_their_payloads(self):
         received = []
@@ -1124,16 +1124,16 @@ class ProbeTest(HelperTestCase):
             "open": f"127.0.0.1:{listener.getsockname()[1]}",
             "closed": f"127.0.0.1:{closed_port}",
         }})().poll()
-        values = {m.name: m.value for m in tcp.measurements}
+        values = {m.name: m.value for m in tcp.inputs}
         self.assertGreaterEqual(values["open.connect_ms"], 0)
         self.assertIsNone(values["closed.connect_ms"])
-        self.assertIn("error", {m.name: m.metadata for m in tcp.measurements}["closed.connect_ms"])
+        self.assertIn("error", {m.name: m.metadata for m in tcp.inputs}["closed.connect_ms"])
 
         with http_server(make_handler([])) as base:
             http = type("H", (kanary.HTTPStatusSource,), {"source_id": "h", "timeout": 2.0, "urls": {
                 "web": base + "/health", "broken": base + "/fail", "nothing": f"http://127.0.0.1:{closed_port}/",
             }})().poll()
-        values = {m.name: m.value for m in http.measurements}
+        values = {m.name: m.value for m in http.inputs}
         self.assertEqual((values["web.status"], values["broken.status"], values["nothing.status"]), (200, 500, None))
         self.assertIsNone(values["nothing.response_ms"])
 
@@ -1164,7 +1164,7 @@ class FilesTest(HelperTestCase):
             level.write_text("1.0\n2.5\n\n")
             cls = type("F", (kanary.FileSource,), {"source_id": "f", "read_last_line": True,
                                                     "paths": {"level": str(level), "gone": str(Path(tmp) / "nope")}})
-            values = {m.name: m.value for m in cls().poll().measurements}
+            values = {m.name: m.value for m in cls().poll().inputs}
         self.assertEqual(values["level.exists"], 1)
         self.assertEqual(values["level.value"], 2.5)
         self.assertEqual(values["level.size_bytes"], 9)
@@ -1182,10 +1182,10 @@ class FilesTest(HelperTestCase):
             }})
             result = cls().poll()
             listed = type("L", (kanary.FileSource,), {"source_id": "l", "paths": [str(old), str(Path(tmp) / "*.root")]})
-            listed_names = {m.name for m in listed().poll().measurements}
-        values = {m.name: m.value for m in result.measurements}
+            listed_names = {m.name for m in listed().poll().inputs}
+        values = {m.name: m.value for m in result.inputs}
         self.assertEqual((values["runs.count"], values["runs.total_size_bytes"], values["runs.value"]), (2, 6, 3.5))
-        self.assertEqual({m.name: m.metadata for m in result.measurements}["runs.age_seconds"]["path"], str(new))
+        self.assertEqual({m.name: m.metadata for m in result.inputs}["runs.age_seconds"]["path"], str(new))
         self.assertEqual((values["none.count"], values["none.exists"]), (0, 0))
         self.assertNotIn("none.age_seconds", values)
         self.assertTrue({"run_1.root.exists", "root.count", "root.age_seconds"} <= listed_names)
@@ -1203,7 +1203,7 @@ class FilesTest(HelperTestCase):
             source.init()
 
             def counts():
-                return {m.name: m.value for m in source.poll().measurements}
+                return {m.name: m.value for m in source.poll().inputs}
 
             self.assertEqual(counts(), {"errors": 0, "warn": 0})
             with log.open("a") as handle:
@@ -1257,7 +1257,7 @@ class SQLTest(HelperTestCase):
         wide.init()
         result = wide.poll()
         wide.terminate()
-        self.assertEqual([(m.name, m.value, m.timestamp) for m in result.measurements], [("temperature", 21.5, T0)])
+        self.assertEqual([(m.name, m.value, m.timestamp) for m in result.inputs], [("temperature", 21.5, T0)])
         self.assertEqual(result.metadata["text"], {"state": "RUN"})
 
         long = type("L", (kanary.SQLLongSource,), {
@@ -1266,13 +1266,13 @@ class SQLTest(HelperTestCase):
             "names": {"a.temp_c": "a.temperature", "b.temp_c": "b.temperature"},
         })()
         long.init()
-        values = {m.name: (m.value, m.metadata["name"]) for m in long.poll().measurements}
+        values = {m.name: (m.value, m.metadata["name"]) for m in long.poll().inputs}
         local = type("Z", (kanary.SQLWideSource,), {
             "source_id": "z", "connect": connect, "timestamp_column": "observed_at", "timestamp_timezone": "Asia/Tokyo",
             "query": "SELECT '2026-11-18 21:00:00' AS observed_at, 1.0 AS x",
         })()
         local.init()
-        self.assertEqual(local.poll().measurements[0].timestamp, T0)  # 21:00 JST == 12:00 UTC
+        self.assertEqual(local.poll().inputs[0].timestamp, T0)  # 21:00 JST == 12:00 UTC
         bad_zone = type("BZ", (kanary.SQLWideSource,), {
             "source_id": "bz", "connect": connect, "timestamp_column": "observed_at", "timestamp_timezone": "Mars/Base",
             "query": "SELECT '2026-11-18 21:00:00' AS observed_at, 1.0 AS x",
@@ -1320,13 +1320,13 @@ class SQLTest(HelperTestCase):
                     source.terminate()
 
             wide, result = poll(kanary.SQLWideSource, table="env")
-            self.assertEqual({m.name: m.value for m in result.measurements}, {"temperature": 21.5})
+            self.assertEqual({m.name: m.value for m in result.inputs}, {"temperature": 21.5})
             self.assertEqual(result.metadata["text"], {"state": "RUN"})
             _, result = poll(kanary.SQLWideSource, table="env", columns={"t": "temperature"})
-            self.assertEqual({m.name: m.value for m in result.measurements}, {"t": 21.5})
+            self.assertEqual({m.name: m.value for m in result.inputs}, {"t": 21.5})
             long, result = poll(kanary.SQLLongSource, table="samples", name_column="metric", value_column="val",
                                 lookback=3600)
-            self.assertEqual({m.name: m.value for m in result.measurements}, {"a": 2.0, "b": 5.0})
+            self.assertEqual({m.name: m.value for m in result.inputs}, {"a": 2.0, "b": 5.0})
             self.assertIn('JOIN (SELECT "metric", MAX("observed_at")', long.build_query()[0])
         with self.assertRaisesRegex(ValueError, "not a plain table or column name"):
             type("S", (kanary.SQLWideSource,), {"source_id": "s", **settings, "table": "env; DROP"})().build_query()
@@ -1512,7 +1512,7 @@ class ReviewRegressionTest(HelperTestCase):
 
         source = type("P", (kanary.TCPSource,), {"source_id": "probe", "init": init})()
         source.init()
-        self.assertIsNotNone({m.name: m.value for m in source.poll().measurements}["a.connect_ms"])
+        self.assertIsNotNone({m.name: m.value for m in source.poll().inputs}["a.connect_ms"])
         self.assertEqual(validate_registries(sources={"probe": type(source)}, rules={}, outputs={}).errors, [])
 
     def test_sql_accepts_mapping_rows_and_percent_without_params(self):
@@ -1527,7 +1527,7 @@ class ReviewRegressionTest(HelperTestCase):
             "source_id": "l", "connect": connect, "query": "SELECT * FROM t WHERE name LIKE 'a%'",
         })()
         source.init()
-        self.assertEqual({m.name: m.value for m in source.poll().measurements}, {"a%": 1.0})
+        self.assertEqual({m.name: m.value for m in source.poll().inputs}, {"a%": 1.0})
 
     def test_http_json_metadata_drops_query_string(self):
         with http_server(make_handler([])) as base:

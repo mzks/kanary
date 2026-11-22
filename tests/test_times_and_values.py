@@ -73,7 +73,7 @@ class NaiveTimeTest(EngineCase):
     def test_input_timestamps_are_read_the_same_way(self):
         naive = datetime(2026, 11, 18, 21, 0)
         result = kanary.inputs(("a", 1.0, naive), ("b", 1.0, "2026-11-18T12:00:00+00:00"), ("c", 1.0, T0.timestamp()))
-        stamps = [m.timestamp for m in result.measurements]
+        stamps = [m.timestamp for m in result.inputs]
         self.assertEqual(stamps, [naive.astimezone(), T0, T0])
         self.assertTrue(all(stamp.tzinfo is not None for stamp in stamps))
 

@@ -68,11 +68,11 @@ class RuleContext:
             if state is None:
                 continue
             snapshot = state.previous.payload if previous else state.current.payload
-            channels = snapshot.get("channels", {})
-            if not isinstance(channels, Mapping):
+            values = snapshot.get("inputs", {})
+            if not isinstance(values, Mapping):
                 continue
-            for input_name in select_inputs(source_id, channels, selectors):
-                raw = channels[input_name]
+            for input_name in select_inputs(source_id, values, selectors):
+                raw = values[input_name]
                 full_name = qualify_input_name(source_id, str(input_name))
                 if isinstance(raw, Mapping):
                     matched[full_name] = InputView(
@@ -157,6 +157,15 @@ class RuleContext:
         *,
         previous: bool = False,
     ) -> dict[str, Any]:
+        """The whole snapshot of one source, as its last poll left it::
+
+            {"status": "ok", "reason": ..., "metadata": {...},
+             "inputs": {"temperature": {"value": 21.5, "timestamp": ..., "metadata": {...}}}}
+
+        Input names are the source's own, without "source_id:". reason and metadata
+        are there only when the poll gave them. A rule that reads one source may
+        leave out the id.
+        """
         target_source_id = source_id
         if target_source_id is None:
             if len(self.resolved_sources) != 1:

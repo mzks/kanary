@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from ..models import AlertEvent, SourceResult
+from ..models import AlertEvent, PollResult
 from ..output import Output, event_record
 from ..plugin_files import path_beside_plugin
 from ..source import Source, inputs
@@ -39,7 +39,7 @@ class FileSource(Source):
     read_last_line: bool = False
     encoding: str = "utf-8"
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         named = self.named_paths()
         now = datetime.now(timezone.utc)
         items: list[tuple[str, Any, datetime | None, dict[str, Any]]] = []
@@ -164,7 +164,7 @@ class LogCountSource(Source):
                 handle.seek(max(0, self._offset - _TAIL_BYTES))
                 self._tail = handle.read(_TAIL_BYTES)
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         counts = {name: 0 for name in self._compiled}
         last_match: dict[str, str] = {}
         for line in self._new_lines():
@@ -178,7 +178,7 @@ class LogCountSource(Source):
             metadata={"path": str(self._file)},
         )
 
-    def test_poll(self) -> SourceResult:
+    def test_poll(self) -> PollResult:
         """The counts poll() would report now, keeping the read position for the next poll."""
         saved = (self._identity, self._offset, self._partial, self._tail)
         try:

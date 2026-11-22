@@ -18,7 +18,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from ..models import SourceResult
+from ..models import PollResult
 from ..source import Source, inputs
 
 _PING_TIME = re.compile(r"time[=<]([0-9.]+)\s*ms")
@@ -34,7 +34,7 @@ class PingSource(Source):
     timeout: float = 5.0
     max_workers: int = 8
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         _require(self.hosts, "PingSource.hosts", "input names to host names or addresses")
         return _check_all(self.hosts, self.ping, ["rtt_ms"], self.max_workers)
 
@@ -58,7 +58,7 @@ class TCPSource(Source):
     timeout: float = 5.0
     max_workers: int = 8
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         _require(self.targets, "TCPSource.targets", "input names to 'host:port'")
         for name, target in self.targets.items():
             _host_port(name, target)
@@ -83,7 +83,7 @@ class HTTPStatusSource(Source):
     timeout: float = 5.0
     max_workers: int = 8
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         _require(self.urls, "HTTPStatusSource.urls", "input names to http(s) URLs")
         for name, url in self.urls.items():
             if urlsplit(str(url)).scheme not in {"http", "https"}:
@@ -106,7 +106,7 @@ def _check_all(
     check: Callable[[str], dict[str, Any]],
     suffixes: list[str],
     max_workers: int,
-) -> SourceResult:
+) -> PollResult:
     """Run check(target) for every target in parallel; a failure gives None values and the error."""
 
     def safe(target: str) -> tuple[dict[str, Any], dict[str, Any]]:

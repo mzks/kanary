@@ -16,9 +16,9 @@ from typing import Callable
 from .helpers.buffer import discarding_changes
 from .dispatch import SHUTDOWN_DRAIN_SECONDS, OutputWorker, current_worker
 from .constants import AlertState, DEESCALATED, ESCALATED, Severity, TransitionKind, UNACK, coerce_severity, severity_name
-from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
-from .output import Output
+from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, PollResult, Silence, SourceSnapshot, SourceState
 from .models import normalize_source_output
+from .output import Output
 from .registry import (
     get_output_registry,
     get_rule_registry,
@@ -27,7 +27,7 @@ from .registry import (
     prepare_rule_class,
     prepare_source_class,
 )
-from .selectors import normalize_rule_inputs, resolve_rule_sources
+from .selectors import normalize_rule_inputs, qualify_input_name, resolve_rule_sources
 from .rule import Rule, RuleContext
 from .store import NullStore, RestoredRuleState
 from .source import Source
@@ -221,30 +221,6 @@ def _coerce_test_timestamp(value: object) -> object:
     if isinstance(value, str):
         return to_datetime(value)
     return value
-
-
-def _test_poll_payload(payload: Mapping[str, object]) -> dict[str, object]:
-    """A source payload from the JSON test-poll printed (timestamps back to datetimes)."""
-    raw_channels = payload.get("channels")
-    if not isinstance(raw_channels, Mapping):
-        raise ValueError("payload.channels must be an object")
-    channels: dict[str, dict[str, object]] = {}
-    for name, raw in raw_channels.items():
-        if not isinstance(raw, Mapping):
-            raise ValueError(f"channel '{name}' must be an object")
-        metadata = raw.get("metadata")
-        channels[str(name)] = {
-            "value": raw.get("value"),
-            "timestamp": _coerce_test_timestamp(raw.get("timestamp")),
-            "metadata": dict(metadata) if isinstance(metadata, Mapping) else {},
-        }
-    result: dict[str, object] = {"channels": channels, "status": payload.get("status", "ok")}
-    for key in ("error", "reason"):
-        if payload.get(key) is not None:
-            result[key] = payload[key]
-    if isinstance(payload.get("metadata"), Mapping) and payload["metadata"]:
-        result["metadata"] = dict(payload["metadata"])
-    return result
 
 
 class UnknownTarget(LookupError):
@@ -569,7 +545,7 @@ class Engine:
     def evaluate_source(
         self,
         source_id: str,
-        payload: Mapping[str, object] | SourceResult,
+        payload: Mapping[str, object] | PollResult,
         *,
         now: datetime | None = None,
     ) -> dict[str, Alert]:
@@ -1030,12 +1006,26 @@ class Engine:
             source = self.sources[source_id]
         current_time = self._now_fn()
         result = self._call_source_test_poll(source, now=current_time)
-        return self._normalize_source_result(result, now=current_time)
+        return self._test_poll_output(source_id, result, now=current_time)
+
+    def _test_poll_output(self, source_id: str, result: object, *, now: datetime) -> dict[str, object]:
+        """What kanaryctl test-poll prints: the snapshot, with source:input names.
+
+        It is a test-evaluate payload as it is, and those of several sources can be
+        put together into one for a rule that reads them all.
+        """
+        snapshot = self._normalize_source_result(result, now=now)
+        output: dict[str, object] = {"source_id": source_id}
+        output.update((key, value) for key, value in snapshot.items() if key != "inputs")
+        output["inputs"] = {
+            qualify_input_name(source_id, name): value for name, value in snapshot["inputs"].items()
+        }
+        return output
 
     def test_evaluate(
         self,
         rule_id: str,
-        payload: Mapping[str, object] | SourceResult,
+        payload: Mapping[str, object] | PollResult,
         *,
         now: datetime | None = None,
     ) -> dict[str, object]:
@@ -1252,30 +1242,26 @@ class Engine:
             raise ValueError(
                 "source result status must be one of 'ok', 'empty', 'no_update', or 'skip'"
             )
-        channels: dict[str, dict[str, object]] = {}
-        for measurement in normalized_result.measurements:
-            channels[measurement.name] = {
-                "value": measurement.value,
-                "timestamp": measurement.timestamp,
-                "metadata": measurement.metadata,
+        values: dict[str, dict[str, object]] = {}
+        for item in normalized_result.inputs:
+            values[item.name] = {
+                "value": item.value,
+                "timestamp": item.timestamp,
+                "metadata": item.metadata,
             }
 
-        payload: dict[str, object] = {
-            "channels": channels,
-            "status": normalized_result.status,
-        }
-        if normalized_result.error is not None:
-            payload["error"] = normalized_result.error
+        payload: dict[str, object] = {"status": normalized_result.status}
         if normalized_result.reason is not None:
             payload["reason"] = normalized_result.reason
         if normalized_result.metadata:
             payload["metadata"] = normalized_result.metadata
+        payload["inputs"] = values
         return payload
 
     def _normalize_source_input(
         self,
         source_id: str,
-        payload: Mapping[str, object] | SourceResult,
+        payload: Mapping[str, object] | PollResult,
         now: datetime,
     ) -> dict[str, object]:
         status = self._plugin_status("source", source_id)
@@ -1315,43 +1301,23 @@ class Engine:
     def _build_test_evaluate_source_states(
         self,
         rule: Rule,
-        payload: Mapping[str, object] | SourceResult,
+        payload: Mapping[str, object] | PollResult,
         now: datetime,
     ) -> dict[str, SourceState]:
-        if isinstance(payload, SourceResult):
+        if isinstance(payload, PollResult):
             resolved_sources = list(getattr(rule, "resolved_sources", []))
             if len(resolved_sources) != 1:
-                raise ValueError("SourceResult test payload requires rule with exactly one resolved source")
+                raise ValueError("a poll result as test payload needs a rule that reads exactly one source")
             normalized = self._normalize_source_result(payload, now=now)
-            return self._overlay_test_source_payloads(
-                rule,
-                {
-                    resolved_sources[0]: {
-                        "current": normalized,
-                    }
-                },
-                now,
-            )
+            return self._overlay_test_source_payloads(rule, {resolved_sources[0]: {"current": normalized}}, now)
 
         normalized_payload = dict(payload)
-        if "inputs" in normalized_payload:
+        if "inputs" in normalized_payload or "channels" in normalized_payload:
+            # test-evaluate-template, test-poll, or an alert's payload; "channels" is
+            # how test-poll wrote it before 0.8.0.
             return self._overlay_test_source_payloads(
                 rule,
-                self._normalize_test_input_map_payload(normalized_payload),
-                now,
-            )
-
-        if "channels" in normalized_payload:
-            # The output of test-poll: what the rule's one source returned.
-            resolved_sources = list(getattr(rule, "resolved_sources", []))
-            if len(resolved_sources) != 1:
-                raise ValueError(
-                    "a test-poll payload ('channels') is one source's values; rule "
-                    f"'{rule.rule_id}' reads {', '.join(resolved_sources) or 'no source'}: use the 'inputs' form"
-                )
-            return self._overlay_test_source_payloads(
-                rule,
-                {resolved_sources[0]: {"current": _test_poll_payload(normalized_payload)}},
+                self._normalize_test_input_map_payload(rule, normalized_payload),
                 now,
             )
 
@@ -1361,19 +1327,13 @@ class Engine:
                 raise ValueError("single-input shorthand requires exactly one explicit input selector")
             return self._overlay_test_source_payloads(
                 rule,
-                self._normalize_test_input_map_payload(
-                    {
-                        "inputs": {
-                            normalized_inputs[0]: normalized_payload,
-                        }
-                    }
-                ),
+                self._normalize_test_input_map_payload(rule, {"inputs": {normalized_inputs[0]: normalized_payload}}),
                 now,
             )
 
         raise ValueError(
-            "test payload must be one of: {'inputs': {'<source_id>:<input>': {'value': ...}}}; "
-            "the output of test-poll ({'channels': ...}); or, for a rule with one input, "
+            "test payload must be one of: {'inputs': {'<source_id>:<input>': {'value': ...}}}, "
+            "which is also what test-poll prints; or, for a rule with one input, "
             "{'value': ..., 'timestamp': ..., 'prev_value': ...}"
         )
 
@@ -1401,46 +1361,64 @@ class Engine:
 
     def _normalize_test_input_map_payload(
         self,
+        rule: Rule,
         payload: Mapping[str, object],
     ) -> dict[str, dict[str, dict[str, object]]]:
-        raw_inputs = payload.get("inputs", {})
+        key = "inputs" if "inputs" in payload else "channels"
+        raw_inputs = payload.get(key)
         if not isinstance(raw_inputs, Mapping):
-            raise ValueError("payload.inputs must be an object")
+            raise ValueError(f"payload.{key} must be an object")
         status = payload.get("status", "ok")
-        error = payload.get("error")
+        reason = payload.get("reason")
         top_metadata = payload.get("metadata")
         if top_metadata is not None and not isinstance(top_metadata, Mapping):
             raise ValueError("payload.metadata must be an object when set")
+        # A name without "source:" belongs to the payload's source_id (test-poll
+        # prints it), or else to the rule's one source (an alert's payload).
+        named_source = payload.get("source_id")
+        resolved_sources = list(getattr(rule, "resolved_sources", []))
+        if isinstance(named_source, str) and named_source:
+            default_source: str | None = named_source
+        else:
+            named_source = None
+            default_source = resolved_sources[0] if len(resolved_sources) == 1 else None
         grouped: dict[str, dict[str, dict[str, object]]] = {}
-        for full_name, raw in raw_inputs.items():
-            if not isinstance(full_name, str) or ":" not in full_name:
-                raise ValueError("input names must be '<source_id>:<input_name>'")
+        if named_source is not None and status not in ("no_update", "skip"):
+            grouped[named_source] = {}  # its snapshot, even an empty one
+        for name, raw in raw_inputs.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("input names must be non-empty strings")
             if not isinstance(raw, Mapping):
-                raise ValueError(f"input '{full_name}' must be an object")
-            source_id, input_name = full_name.split(":", 1)
-            current_channels = grouped.setdefault(source_id, {}).setdefault("current", {}).setdefault("channels", {})
-            previous_channels = grouped.setdefault(source_id, {}).setdefault("previous", {}).setdefault("channels", {})
-            current_channels[input_name] = {
+                raise ValueError(f"input '{name}' must be an object")
+            if key == "inputs" and ":" in name:
+                source_id, input_name = name.split(":", 1)
+            elif default_source is not None:
+                source_id, input_name = default_source, name
+            else:
+                read = ", ".join(resolved_sources) or "no source"
+                raise ValueError(f"input '{name}' needs its source: write '<source_id>:{name}' (rule '{rule.rule_id}' reads {read})")
+            current_inputs = grouped.setdefault(source_id, {}).setdefault("current", {}).setdefault("inputs", {})
+            previous_inputs = grouped[source_id].setdefault("previous", {}).setdefault("inputs", {})
+            current_inputs[input_name] = {
                 "value": raw.get("value"),
                 "timestamp": _coerce_test_timestamp(raw.get("timestamp")),
                 "metadata": dict(raw.get("metadata", {})) if isinstance(raw.get("metadata", {}), Mapping) else {},
             }
             if "prev_value" in raw or "prev_timestamp" in raw or "prev_metadata" in raw:
-                previous_channels[input_name] = {
+                previous_inputs[input_name] = {
                     "value": raw.get("prev_value"),
                     "timestamp": _coerce_test_timestamp(raw.get("prev_timestamp")),
                     "metadata": dict(raw.get("prev_metadata", {})) if isinstance(raw.get("prev_metadata", {}), Mapping) else {},
                 }
-        for source_id, payloads in grouped.items():
+        for payloads in grouped.values():
             current_payload = payloads.setdefault("current", {})
-            current_payload.setdefault("channels", {})
             current_payload["status"] = status
-            if error is not None:
-                current_payload["error"] = error
+            if reason is not None:
+                current_payload["reason"] = reason
             if isinstance(top_metadata, Mapping) and top_metadata:
                 current_payload["metadata"] = dict(top_metadata)
-            previous_payload = payloads.setdefault("previous", {})
-            previous_payload.setdefault("channels", {})
+            current_payload["inputs"] = current_payload.pop("inputs", {})
+            payloads.setdefault("previous", {}).setdefault("inputs", {})
         return grouped
 
     def _update_source_state(

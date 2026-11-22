@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import threading
 from typing import Any
 
-from ..models import Measurement, SourceResult, normalize_input_items
+from ..models import InputValue, PollResult, normalize_input_items
 from ..source import skip
 from ..values import coerce_datetime
 from .buffer import in_test_poll
@@ -39,8 +39,8 @@ class Inbox:
         self.size = size
         self.dropped = 0
         self._condition = threading.Condition()
-        self._arrived: deque[Measurement] = deque()
-        self._latest: dict[str, Measurement] = {}
+        self._arrived: deque[InputValue] = deque()
+        self._latest: dict[str, InputValue] = {}
 
     def put(self, *items: Any, timestamp: Any = None) -> None:
         """Add samples, written the same way as for kanary.inputs()::
@@ -56,15 +56,13 @@ class Inbox:
         samples = normalize_input_items(items, default_timestamp=when)
         with self._condition:
             for sample in samples:
-                if sample.timestamp.tzinfo is None:
-                    sample = Measurement(sample.name, sample.value, coerce_datetime(sample.timestamp), sample.metadata)
                 self._arrived.append(sample)
                 if len(self._arrived) > self.size:
                     self._arrived.popleft()
                     self.dropped += 1
             self._condition.notify_all()
 
-    def wait(self, timeout: float = 1.0) -> SourceResult:
+    def wait(self, timeout: float = 1.0) -> PollResult:
         """For poll(): wait up to ``timeout`` seconds until something arrives.
 
         Then return every input with its newest value: inputs that did not
@@ -74,15 +72,15 @@ class Inbox:
         """
         if in_test_poll():
             latest = self._merged(self.take(0))
-            return SourceResult(measurements=list(latest.values()), metadata=self._metadata(0)) if latest else skip(reason="nothing arrived yet")
+            return PollResult(inputs=list(latest.values()), metadata=self._metadata(0)) if latest else skip(reason="nothing arrived yet")
         arrived = self.take(timeout)
         if not arrived:
             return skip(reason="nothing arrived")
         with self._condition:
-            measurements = list(self._latest.values())
-        return SourceResult(measurements=measurements, metadata=self._metadata(len(arrived)))
+            latest_values = list(self._latest.values())
+        return PollResult(inputs=latest_values, metadata=self._metadata(len(arrived)))
 
-    def take(self, timeout: float = 0) -> list[Measurement]:
+    def take(self, timeout: float = 0) -> list[InputValue]:
         """Every sample that arrived since the last take(), oldest first.
 
         Waits up to ``timeout`` seconds for the first one. For a poll() that
@@ -101,7 +99,7 @@ class Inbox:
                 self._latest[sample.name] = sample
             return samples
 
-    def latest(self) -> dict[str, Measurement]:
+    def latest(self) -> dict[str, InputValue]:
         """{name: newest sample} of everything taken so far."""
         with self._condition:
             return dict(self._latest)
@@ -111,7 +109,7 @@ class Inbox:
         with self._condition:
             return len(self._arrived)
 
-    def _merged(self, pending: list[Measurement]) -> dict[str, Measurement]:
+    def _merged(self, pending: list[InputValue]) -> dict[str, InputValue]:
         with self._condition:
             latest = dict(self._latest)
         for sample in pending:

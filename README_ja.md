@@ -136,9 +136,9 @@ class ConsoleOutput:
 あとから短く書きたくなったら、`RangeRule`, `StaleRule`, `ThresholdRule` などの組み込み helper class に置き換えられます。
 また, ユーザーは独自のclass factory関数を実装できます.
 
-source の public API としては `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` を使うのが通常です。  
+source の `poll()` は `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` のどれかを返します。  
 rule の public API としては `kanary.ok(...)`, `kanary.firing(...)`, `kanary.warn(...)`, `kanary.error(...)`, `kanary.critical(...)` を使うのが通常です。  
-`kanary.SourceResult(...)` と `kanary.Evaluation(...)` は advanced な書き方として引き続き使えます。
+`kanary.Evaluation(...)` は advanced な書き方として引き続き使えます。
 
 ## 実行方法
 
@@ -211,7 +211,7 @@ kanaryctl test-fire demo.temperature.high --state FIRING --reason "delivery test
 ```
 
 rule 実装では通常、単一 input なら `ctx.value()`、複数 input なら `ctx.inputs()` を使います。  
-`test-evaluate` だけは例外で、fully-qualified input name を key にした `inputs` map を受け取ります。  
+`test-evaluate` だけは例外で、fully-qualified input name を key にした `inputs` map を受け取ります。`test-poll` が表示するのと同じ形です。  
 `kanaryctl test-evaluate <rule_id> --print-template` を使うと、その rule 向けの canonical payload template を先に出せます。
 
 plugin 単位の reload:

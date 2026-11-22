@@ -237,7 +237,7 @@ kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIR
 kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 ```
 
-`test-evaluate` accepts an `inputs` map keyed by fully-qualified input names. Normal rule code should continue to use `ctx.value()`, `ctx.inputs()`, and related accessors.
+`test-evaluate` accepts an `inputs` map keyed by fully-qualified input names, the form `test-poll` prints: `kanaryctl test-poll local_load > payload.json` gives a payload to edit and pass with `--payload-file payload.json`. Normal rule code should continue to use `ctx.value()`, `ctx.inputs()`, and related accessors.
 
 ## 8. More Features
 

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 import re
 from typing import Any
 
-from ..models import SourceResult
+from ..models import PollResult
 from ..plugin_files import path_beside_plugin
 from ..source import Source, inputs, no_data
 from ..values import to_datetime, to_number, to_timezone
@@ -163,7 +163,7 @@ class SQLWideSource(SQLSource):
         selected = ", ".join(self.quote(column) for column in dict.fromkeys(wanted)) or "*"
         return f"SELECT {selected} FROM {table} ORDER BY {self.quote(self.timestamp_column)} DESC LIMIT 1", ()
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         rows = self.fetch_rows()
         if not rows:
             return no_data(reason="query returned no rows")
@@ -209,7 +209,7 @@ class SQLLongSource(SQLSource):
         )
         return query, params
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         rows = self.fetch_rows()
         if not rows:
             return no_data(reason="query returned no rows")

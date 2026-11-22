@@ -196,7 +196,7 @@ kanaryctl --base-url http://127.0.0.1:8000 test-fire local_load.busy --state FIR
 kanaryctl --base-url http://127.0.0.1:8000 reload --dirty
 ```
 
-`test-evaluate` は fully-qualified input name を key にした `inputs` map を受け取ります。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
+`test-evaluate` は fully-qualified input name を key にした `inputs` map を受け取ります。`test-poll` が表示するのと同じ形なので、`kanaryctl test-poll local_load > payload.json` で作った payload を書き換えて `--payload-file payload.json` で渡せます。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
 
 ## 8. 進んだ機能
 

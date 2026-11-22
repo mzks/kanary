@@ -4,7 +4,7 @@ from .constants import ACKED, CRITICAL, DEESCALATED, ERROR, ESCALATED, FIRING, I
 from .constants import AlertState, Severity, TransitionKind
 from .engine import Engine
 from .loader import RuleDirectoryLoader
-from .models import Acknowledgement, Alert, AlertEvent, Evaluation, Measurement, PluginStatus, Silence, SourceResult, SourceSnapshot, SourceState
+from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, Silence, SourceSnapshot, SourceState
 from .output import Output, event_record
 from .plugin_files import load_json, load_toml, plugin_dir
 from .registry import (
@@ -87,7 +87,6 @@ __all__ = [
     "INFO",
     "info",
     "info_if",
-    "Measurement",
     "MailOutput",
     "OK",
     "ok",
@@ -141,7 +140,6 @@ __all__ = [
     "Silence",
     "Severity",
     "Source",
-    "SourceResult",
     "SourceSnapshot",
     "SourceState",
     "SQLiteStore",

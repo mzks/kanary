@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from ..models import SourceResult
+from ..models import PollResult
 from ..source import Source, inputs, no_data
 
 _USER_AGENT = "kanary"
@@ -78,7 +78,7 @@ class PrometheusSource(Source):
         with urlopen(request, timeout=self.timeout) as response:
             return response.read().decode("utf-8", errors="replace")
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         if not self.metrics:
             raise ValueError(f"{type(self).__name__}.metrics is empty: map input names to series")
         samples = parse_metrics(self.fetch_text())

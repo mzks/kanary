@@ -72,10 +72,14 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
   `{"full":true}` は discovery 成功後に in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、空 body も受け付けます。この場合は `{"all":true}` と同じ意味です。
 - `POST /test-poll/{source_id}`
-  その source の `test_poll()` を、source の thread で poll と poll の間に実行し、normalized source payload を返します。結果は評価に使わず、source の状態と status も変わらず、通常の poll の予定もずれません。source が動いていない（`init()` に失敗した）場合や、30 秒以内に終わらない場合は 409 を返します。
+  その source の `test_poll()` を、source の thread で poll と poll の間に実行し、その結果を fully-qualified input name で返します: `{"source_id": "postgres", "status": "ok", "metadata": {...}, "inputs": {"postgres:temperature": {"value": 21.5, "timestamp": "...", "metadata": {}}}}`（`reason` と `metadata` は poll が与えたときだけ）。これはそのまま `POST /test-evaluate/{rule_id}` の payload になります。結果は評価に使わず、source の状態と status も変わらず、通常の poll の予定もずれません。source が動いていない（`init()` に失敗した）場合や、30 秒以内に終わらない場合は 409 を返します。
 - `POST /test-evaluate/{rule_id}`
   明示した payload に対して 1 つの rule を dry-run し、normalized evaluation result を返します。
-  payload は次のどれかです。`postgres:temperature` のような fully-qualified input name を key にした `inputs` object。`POST /test-poll/{source_id}` が返したもの（`channels`。読む source が 1 つの rule）。input が 1 つの rule なら `{"value": ..., "timestamp": ..., "prev_value": ...}`。通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
+  payload は次のどれかです。
+  - `postgres:temperature` のような fully-qualified input name を key にした `inputs` object。必要なら `status`、`reason`、`metadata` を並べて書きます。`POST /test-poll/{source_id}` が返すのはこの形です。複数の source を読む rule では、それぞれの test poll の `inputs` を合わせます。input には `prev_value`、`prev_timestamp`、`prev_metadata` も書けます。`inputs` と並んだ `source_id` は payload の出どころの source です。`source_id:` の無い名前はその source の input になり、input が空ならその source の空の snapshot になります。`source_id` が無くても、source を 1 つだけ読む rule なら、alert の payload のように `source_id:` を省いた名前を受け付けます。0.8.0 より前の `channels` も `inputs` と同じに読みます。
+  - input が 1 つの rule なら `{"value": ..., "timestamp": ..., "prev_value": ...}`。
+
+  通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
 - `GET /test-evaluate-template/{rule_id}`
   1 つの rule 向けの canonical な `inputs` payload template を返します。単一 input rule の場合は shorthand template も含まれることがあります。
 - `POST /test-fire/{rule_id}`
@@ -139,7 +143,7 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
   legacy compatibility のため、HTTP の `POST /reload` に空 body を送った場合は `--all` 相当で動きます。
   reload した rule は、その source の最後の値ですぐに評価されます。閾値を変えたら次の値を待たずに反映されます。起動後まだ値を出していない source を読む rule は、値が来るまで待ちます。
 - `test-poll`
-  source の `test_poll()` を実行し（その source の thread で poll と poll の間に。評価には使いません）、normalized payload を JSON で表示します。
+  source の `test_poll()` を実行し（その source の thread で poll と poll の間に。評価には使いません）、その結果を `source_id:input` の名前で JSON 表示します。
 - `test-evaluate`
   `--payload-json`, `--payload-file`, `--payload-stdin` のいずれかで与えた payload に対して 1 つの rule を dry-run します。`test-poll` の出力もそのまま payload になります。
   canonical な `inputs` payload を先に見たい時は `--print-template` を使います。

@@ -8,7 +8,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from ..constants import OK, AlertState, Severity, coerce_severity
-from ..models import Evaluation, Measurement, SourceResult
+from ..models import Evaluation, InputValue, PollResult
 from ..registry import get_source_registry, register_rule
 from ..rule import Rule, RuleContext
 from ..source import Source
@@ -25,11 +25,11 @@ class RemoteKanarySource(Source):
     silence_window_path: str = "/silences/window"
     unsilence_path_template: str = "/silences/{silence_id}/cancel"
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         alerts = self.fetch_remote_alerts()
         engine = getattr(self, "_kanary_engine", None)
         local_node_id = getattr(engine, "node_id", None)
-        measurements: list[Measurement] = []
+        values: list[InputValue] = []
         for alert in alerts:
             mirror_path = [str(node_id) for node_id in list(alert.get("mirror_path") or [])]
             if local_node_id is not None and local_node_id in mirror_path:
@@ -40,15 +40,15 @@ class RemoteKanarySource(Source):
                 or datetime.now(timezone.utc)
             )
             state = str(alert.get("state", OK.value))
-            measurements.append(
-                Measurement(
+            values.append(
+                InputValue(
                     name=str(alert["rule_id"]),
                     value=0 if state == OK.value else 1,
                     timestamp=timestamp,
                     metadata=dict(alert),
                 )
             )
-        return SourceResult(measurements=measurements, status="ok")
+        return PollResult(inputs=values)
 
     def fetch_remote_alerts(self) -> list[dict[str, Any]]:
         payload = self._read_json("GET", self.alerts_path)

@@ -41,7 +41,7 @@ class TemplateMultiSource:
         if too_old:
             return kanary.warn(f"inputs too old to compare: {', '.join(too_old)}")
 
-        # Whole snapshot of one source (status, metadata, channels): ctx.source_payload("example.primary")
+        # Whole snapshot of one source (status, metadata, inputs): ctx.source_payload("example.primary")
         difference = abs(primary - secondary)
         return kanary.warn_if(
             difference > self.max_difference,

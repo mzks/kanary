@@ -73,10 +73,14 @@ An operator action that names an unknown rule or silence returns 404; one that d
   For legacy compatibility, an empty body is still accepted and behaves like `{"all":true}`.
   A reloaded rule is evaluated at once with the last values of its sources, so a changed threshold applies without waiting for the next value. A rule whose sources have given no value since the start waits for one.
 - `POST /test-poll/{source_id}`
-  Runs the source's `test_poll()` on the source's own thread, between its polls, and returns the normalized source payload. The result is not evaluated, the source's state and status do not change, and its regular polls keep their schedule. Returns 409 when the source is not running (its `init()` failed) or the test poll does not finish within 30 seconds.
+  Runs the source's `test_poll()` on the source's own thread, between its polls, and returns what it gave, with fully-qualified input names: `{"source_id": "postgres", "status": "ok", "metadata": {...}, "inputs": {"postgres:temperature": {"value": 21.5, "timestamp": "...", "metadata": {}}}}` (`reason` and `metadata` only when the poll gave them). This is a payload for `POST /test-evaluate/{rule_id}` as it is. The result is not evaluated, the source's state and status do not change, and its regular polls keep their schedule. Returns 409 when the source is not running (its `init()` failed) or the test poll does not finish within 30 seconds.
 - `POST /test-evaluate/{rule_id}`
   Dry-runs one rule against an explicit payload and returns the normalized evaluation result.
-  The payload is one of: an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`; what `POST /test-poll/{source_id}` returned (`channels`), for a rule that reads one source; or, for a rule with one input, `{"value": ..., "timestamp": ..., "prev_value": ...}`. Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
+  The payload is one of:
+  - an `inputs` object keyed by fully-qualified input names such as `postgres:temperature`, with `status`, `reason`, and `metadata` beside it if wanted. This is what `POST /test-poll/{source_id}` returns; for a rule that reads several sources, put the `inputs` of their test polls together. An input may also give `prev_value`, `prev_timestamp`, and `prev_metadata`. A `source_id` beside `inputs` is the source the payload is from: a name without `source_id:` is its input, and with no inputs the payload is an empty snapshot of that source. Without it, a rule that reads one source also takes names without `source_id:`, as in an alert's payload. The `channels` of KANARY before 0.8.0 are read like `inputs`.
+  - for a rule with one input, `{"value": ..., "timestamp": ..., "prev_value": ...}`.
+
+  Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
 - `GET /test-evaluate-template/{rule_id}`
   Returns a canonical `inputs` payload template for one rule. Single-input rules may also include a shorthand template.
 - `POST /test-fire/{rule_id}`
@@ -140,7 +144,7 @@ Main subcommands:
   `--full` performs an in-process engine restart and reinitializes all sources, rules, and outputs.
   For legacy compatibility, `POST /reload` with an empty body still behaves like `--all`.
 - `test-poll`
-  Runs the source's `test_poll()` (on its own thread, between polls; not evaluated) and prints the normalized payload as JSON.
+  Runs the source's `test_poll()` (on its own thread, between polls; not evaluated) and prints what it gave as JSON, with `source_id:input` names.
 - `test-evaluate`
   Dry-runs one rule against a payload from `--payload-json`, `--payload-file`, or `--payload-stdin`; the output of `test-poll` works as a payload.
   Use `--print-template` first if you want a canonical inputs-based payload skeleton.

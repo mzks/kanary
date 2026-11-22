@@ -97,7 +97,7 @@ Output の `emit()` はその output 専用の thread で動くので、送信�
 
 Rule の `evaluate()` は事情が違います。rule は 1 つずつ評価されるので、遅い `evaluate()` は他のすべての評価を遅らせます。I/O をしないでください。100 ms を超えると log に出し、`SLOW` と表示します。
 
-`Measurement.timestamp` には、可能なら取得時刻ではなく監視対象が実際に観測した時刻を渡します。Kanary が poll した時刻を入れると、古いデータを取得しても新しい値に見え、StaleRule や rate の判断が不正確になります。観測時刻を取得できない場合だけ、poll 時刻を使います。
+input の timestamp（`kanary.inputs()` の `(name, value, timestamp)`）には、可能なら取得時刻ではなく監視対象が実際に観測した時刻を渡します。Kanary が poll した時刻を入れると、古いデータを取得しても新しい値に見え、StaleRule や rate の判断が不正確になります。観測時刻を取得できない場合だけ、poll 時刻を使います。
 
 `interval` は外部システムへの負荷と検知遅延の両方を決めます。たとえば 1 分 interval の Source では、5 分継続を判定する Rule は最短で 5 分後、通常はその次の poll まで遅れて発火します。監視対象の異常は通常の input と Rule で表し、監視 plugin 自身が取得できない時は例外として Source failure に分けます。
 

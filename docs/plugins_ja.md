@@ -113,7 +113,7 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 
 ### input を返す
 
-通常の public API は `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` です。
+`poll()` は `kanary.inputs(...)`, `kanary.no_data(...)`, `kanary.no_update(...)`, `kanary.skip(...)` のどれかを返します。
 
 tuple/list 形式:
 
@@ -144,13 +144,28 @@ return kanary.inputs(
 - item 側の timestamp が省略または `None` の場合、outer `timestamp=` があればそれを使い、無ければ Kanary server の current time を使います
 - timestamp は `datetime`、ISO 8601 の文字列、unix time のどれかです。[時刻と time zone](#時刻と-time-zone) を見てください
 - `Decimal`（database driver が `NUMERIC` に返す型）や numpy の数は普通の `float` / `int` になるので、rule でも JSON でも数として扱われます
-- outer `metadata=` は `SourceResult.metadata` になります
+- outer `metadata=` は snapshot の `metadata` として input と並んで入ります。`ctx.source_payload()["metadata"]` で読め、`kanaryctl test-poll` の出力にも出ます
 - `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功し、結果として空の snapshot を返すことを表します。source snapshot は更新され、rule も評価されます
 - `kanary.no_update(reason=..., metadata=...)` は poll 自体は成功したが新しい snapshot は無いことを表します。直前の snapshot を保持したまま、その snapshot に対して rule を再評価します
 - `kanary.skip(reason=..., metadata=...)` は今回の poll を完全に無視したい時に使います。source snapshot は更新されず、rule も評価されません
 - 例外を送出した場合は source/plugin failure として扱われ、runtime の retry/reinit policy に入ります
 
-`kanary.SourceResult(...)` も advanced な書き方として引き続き使えます。
+helper source が返すものに input を足すには、その結果を `kanary.inputs()` に渡します:
+
+```python
+class Pumps(kanary.HTTPJSONSource):
+    source_id = "pumps"
+    url = "http://pump-controller.local/status.json"
+
+    def poll(self):
+        result = super().poll()
+        values = {item.name: item.value for item in result.inputs}
+        if values.get("power"):
+            return kanary.inputs(result, ("efficiency", values["flow"] / values["power"]))
+        return result
+```
+
+結果の input と metadata が先に入り、その後に他の item が入ります。同じ名前の input は後の item で置き換わります。`kanary.no_update()` と `kanary.skip()` の結果には足す先の新しい snapshot が無いので、そのまま返ります。`kanary.no_data()` には input がありません。結果は `.status`（`"ok"`、`"empty"`、`"no_update"`、`"skip"`）と `.inputs` を持ち、`.inputs` の各要素は `kanary.Buffer` の sample と同じく `.name`、`.value`、`.timestamp`、`.metadata` を持ちます。
 
 #### 時刻と time zone
 
@@ -297,7 +312,18 @@ input を扱う accessor を使います:
 
 単一 input に解決される rule では `ctx.value()` のように selector を省略できます。複数 input を扱う rule では通常 `ctx.inputs()` を反復します。  
 selector が複数 input に一致しうる場合、`ctx.value()` などの scalar helper は推測せず error にします。  
-`ctx.source_payload("source-id")` は 1 つの source の normalized payload です。source を 1 つだけ読む rule では id を省けます。cross-source の参照は `ctx.inputs()` を使ってください。
+`ctx.source_payload("source-id")` は 1 つの source の snapshot 全体で、input 名は source 自身の名前です。source を 1 つだけ読む rule では id を省けます。cross-source の参照は `ctx.inputs()` を使ってください。
+
+```python
+{
+    "status": "ok",              # kanary.no_data() の後は "empty"
+    "reason": "...",             # poll が与えたときだけ
+    "metadata": {"rows": 12},    # poll が与えたときだけ
+    "inputs": {"temperature": {"value": 21.5, "timestamp": datetime(...), "metadata": {}}},
+}
+```
+
+0.8.0 より前は、input は `"channels"` の下にありました。
 
 ### 評価結果を返す
 
@@ -518,7 +544,7 @@ class Vacuum(kanary.Source):
         )
 ```
 
-buffer は input 名ごとに、追加された sample を古い順に持ちます。各 sample は `kanary.Measurement` で、`.value`、`.timestamp`、`.metadata` を持ちます。
+buffer は input 名ごとに、追加された sample を古い順に持ちます。各 sample は `.name`、`.value`、`.timestamp`、`.metadata` を持ちます。
 
 追加:
 
@@ -696,7 +722,7 @@ input の値が `expected` でなければ発報します。`expected` は 1 つ
 
 #### StaleRule
 
-- measurement の timestamp の古さを判定
+- 各 input の timestamp から古さを判定
 - 複数 input に一致した場合は、どれか 1 つでも stale または timestamp 欠落なら `FIRING`
 - timestamp が `future_tolerance` 秒（default は `30 * kanary.minute`）より先の未来なら、"(time zone?)" 付きの `WARN` で `FIRING`。そういう input は決して stale に見えず、たいていは time zone の無い時刻が原因です。`future_tolerance = None` で切れます
 - payload の `values` は input 名から経過秒数への dict
@@ -755,6 +781,7 @@ class Value1Threshold(kanary.ThresholdRule):
 #### RemoteKanarySource
 
 - 他の Kanary の `/export-alerts` を読む
+- remote alert を 1 つずつ input として返す（OK でない間は 1。metadata に alert そのもの）
 - remote 側の `ack`, `unack`, `silence`, `unsilence` を helper として転送できる
 
 #### RemoteAlarm
@@ -867,8 +894,8 @@ Kanary では、繰り返しパターンごとに本体側へ built-in factory �
 
 たとえば:
 
-- measurement の dict から 1 個の source を生成する
-- measurement の list から複数の `ThresholdRule` を生成する
+- input 名と値の dict から 1 個の source を生成する
+- input の list から複数の `ThresholdRule` を生成する
 
 といった使い方ができます。
 
@@ -877,7 +904,7 @@ Kanary では、繰り返しパターンごとに本体側へ built-in factory �
 この example には次が入っています。
 
 - `make_constant_source(...)`
-  measurement の dict から単純な source class を生成します。
+  input 名と値の dict から単純な source class を生成します。
 - `make_threshold_rule(...)`
   `ThresholdRule` ベースの rule class を 1 つ生成します。
 

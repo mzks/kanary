@@ -20,5 +20,5 @@ class TemplateStale(kanary.StaleRule):
     description = "TODO: describe what stopped when this fires."
     # runbook = "TODO: e.g. check that the DAQ writer is running."
 
-    # Maximum age in seconds of the newest measurement.
+    # Maximum age in seconds of the newest value.
     timeout = 5 * kanary.minute

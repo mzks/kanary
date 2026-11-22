@@ -97,7 +97,7 @@ Output `emit()` runs on the output's own thread, so a slow destination does not 
 
 Rule `evaluate()` is different: rules are evaluated one at a time, so a slow `evaluate()` delays every other evaluation. Keep it free of I/O; one slower than 100 ms is logged and shown as `SLOW`.
 
-When possible, set `Measurement.timestamp` to the time when the monitored system actually observed the value, rather than the retrieval time. Using Kanary's poll time makes old data appear fresh, which makes StaleRule and rate calculations inaccurate. Use the poll time only when no observation time is available.
+When possible, give an input the time when the monitored system actually observed the value (`(name, value, timestamp)` in `kanary.inputs()`), rather than the retrieval time. Using Kanary's poll time makes old data appear fresh, which makes StaleRule and rate calculations inaccurate. Use the poll time only when no observation time is available.
 
 `interval` determines both the load on the external system and detection latency. With a Source that polls every minute, a Rule that requires a condition to persist for five minutes fires no earlier than five minutes later, and usually at the following poll. Represent monitored-system faults with ordinary inputs and Rules; represent an inability of the monitoring plugin itself to collect data as a Source failure by raising an exception.
 

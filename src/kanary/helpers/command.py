@@ -6,7 +6,7 @@ import shlex
 import subprocess
 from typing import Any
 
-from ..models import AlertEvent, SourceResult
+from ..models import AlertEvent, PollResult
 from ..output import Output, event_record
 from ..source import Source, inputs, no_data
 from ..values import parse_values
@@ -62,7 +62,7 @@ class CommandSource(Source):
             return {}, {}
         return parse_values(stdout, self.output_format, default_name=self.value_name)
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         if self.output_format not in _OUTPUT_FORMATS:
             raise ValueError(f"output_format must be one of {', '.join(_OUTPUT_FORMATS)}, not {self.output_format!r}")
         completed = self.run()

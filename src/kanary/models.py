@@ -77,7 +77,9 @@ class SourceState:
 
 
 @dataclass(slots=True)
-class Measurement:
+class InputValue:
+    """One input of a poll result: a name, its value, when it was observed, and metadata."""
+
     name: str
     value: Any
     timestamp: datetime
@@ -92,10 +94,11 @@ class Measurement:
 
 
 @dataclass(slots=True)
-class SourceResult:
-    measurements: list[Measurement] = field(default_factory=list)
+class PollResult:
+    """What a source's poll() returns: kanary.inputs(), no_data(), no_update(), or skip()."""
+
+    inputs: list[InputValue] = field(default_factory=list)
     status: str = "ok"
-    error: str | None = None
     reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -189,25 +192,19 @@ def normalize_source_output(
     result: Any,
     *,
     now: datetime | None = None,
-) -> SourceResult:
-    if isinstance(result, SourceResult):
+) -> PollResult:
+    if isinstance(result, PollResult):
         return result
     default_timestamp = now
     if isinstance(result, Mapping):
-        return SourceResult(
-            measurements=_measurements_from_mapping(result, default_timestamp=default_timestamp),
-        )
+        return PollResult(inputs=_inputs_from_mapping(result, default_timestamp=default_timestamp))
     if isinstance(result, list):
-        return SourceResult(
-            measurements=_measurements_from_iterable(result, default_timestamp=default_timestamp),
-        )
+        return PollResult(inputs=_inputs_from_iterable(result, default_timestamp=default_timestamp))
     if isinstance(result, tuple):
-        return SourceResult(
-            measurements=normalize_input_items(result, default_timestamp=default_timestamp),
-        )
+        return PollResult(inputs=normalize_input_items(result, default_timestamp=default_timestamp))
     raise TypeError(
-        "source poll() must return kanary.SourceResult, kanary.inputs(...), "
-        "a dict[name, value], or a list/tuple of input tuples"
+        "source poll() must return kanary.inputs(...), kanary.no_data(), kanary.no_update(), "
+        "kanary.skip(), a dict[name, value], or a list/tuple of input tuples"
     )
 
 
@@ -215,64 +212,67 @@ def normalize_input_items(
     items: tuple[Any, ...],
     *,
     default_timestamp: datetime | None,
-) -> list[Measurement]:
+) -> list[InputValue]:
     if not items:
         return []
     if len(items) >= 2 and isinstance(items[0], str):
-        return [_measurement_from_named_item(tuple(items), default_timestamp=default_timestamp)]
+        return [_input_from_named_item(tuple(items), default_timestamp=default_timestamp)]
     if len(items) == 1:
         first = items[0]
         if isinstance(first, Mapping):
-            return _measurements_from_mapping(first, default_timestamp=default_timestamp)
+            return _inputs_from_mapping(first, default_timestamp=default_timestamp)
         if isinstance(first, list):
-            return _measurements_from_iterable(first, default_timestamp=default_timestamp)
+            return _inputs_from_iterable(first, default_timestamp=default_timestamp)
         if isinstance(first, tuple):
-            return [_measurement_from_named_item(first, default_timestamp=default_timestamp)]
-    return _measurements_from_iterable(items, default_timestamp=default_timestamp)
+            return [_input_from_named_item(first, default_timestamp=default_timestamp)]
+    return _inputs_from_iterable(items, default_timestamp=default_timestamp)
 
 
-def _measurements_from_mapping(
+def _inputs_from_mapping(
     mapping: Mapping[str, Any],
     *,
     default_timestamp: datetime | None,
-) -> list[Measurement]:
-    measurements: list[Measurement] = []
+) -> list[InputValue]:
+    values: list[InputValue] = []
     for name, raw in mapping.items():
         if not isinstance(name, str) or not name:
             raise ValueError("inputs mapping keys must be non-empty strings")
-        measurements.append(
-            _measurement_from_mapping_value(name, raw, default_timestamp=default_timestamp)
+        values.append(
+            _input_from_mapping_value(name, raw, default_timestamp=default_timestamp)
         )
-    return measurements
+    return values
 
 
-def _measurements_from_iterable(
+def _inputs_from_iterable(
     items: Iterable[Any],
     *,
     default_timestamp: datetime | None,
-) -> list[Measurement]:
-    measurements: list[Measurement] = []
+) -> list[InputValue]:
+    values: list[InputValue] = []
     for item in items:
-        if isinstance(item, Measurement):
-            measurements.append(item)
+        if isinstance(item, InputValue):
+            values.append(item)
             continue
         if not isinstance(item, tuple):
-            raise ValueError("inputs iterable items must be tuples or Measurement objects")
-        measurements.append(_measurement_from_named_item(item, default_timestamp=default_timestamp))
-    return measurements
+            raise ValueError(
+                "an input must be a (name, value, ...) tuple or a sample of a kanary.Buffer or "
+                f"kanary.Inbox, not {type(item).__name__}"
+            )
+        values.append(_input_from_named_item(item, default_timestamp=default_timestamp))
+    return values
 
 
-def _measurement_from_mapping_value(
+def _input_from_mapping_value(
     name: str,
     raw: Any,
     *,
     default_timestamp: datetime | None,
-) -> Measurement:
+) -> InputValue:
     if isinstance(raw, Mapping):
         value = raw.get("value")
         timestamp = _resolve_timestamp(raw.get("timestamp"), default_timestamp)
         metadata = _coerce_item_metadata(raw.get("metadata"))
-        return Measurement(name=name, value=value, timestamp=timestamp, metadata=metadata)
+        return InputValue(name=name, value=value, timestamp=timestamp, metadata=metadata)
     if isinstance(raw, tuple):
         length = len(raw)
         if length == 0 or length > 3:
@@ -280,8 +280,8 @@ def _measurement_from_mapping_value(
         value = raw[0]
         timestamp = _resolve_timestamp(raw[1] if length >= 2 else None, default_timestamp)
         metadata = _coerce_item_metadata(raw[2] if length >= 3 else None)
-        return Measurement(name=name, value=value, timestamp=timestamp, metadata=metadata)
-    return Measurement(
+        return InputValue(name=name, value=value, timestamp=timestamp, metadata=metadata)
+    return InputValue(
         name=name,
         value=raw,
         timestamp=_resolve_timestamp(None, default_timestamp),
@@ -289,11 +289,11 @@ def _measurement_from_mapping_value(
     )
 
 
-def _measurement_from_named_item(
+def _input_from_named_item(
     item: tuple[Any, ...],
     *,
     default_timestamp: datetime | None,
-) -> Measurement:
+) -> InputValue:
     if len(item) < 2 or len(item) > 4:
         raise ValueError("input tuples must be (name, value), (name, value, timestamp), or (name, value, timestamp, metadata)")
     name = item[0]
@@ -302,7 +302,7 @@ def _measurement_from_named_item(
     value = item[1]
     timestamp = _resolve_timestamp(item[2] if len(item) >= 3 else None, default_timestamp)
     metadata = _coerce_item_metadata(item[3] if len(item) >= 4 else None)
-    return Measurement(name=name, value=value, timestamp=timestamp, metadata=metadata)
+    return InputValue(name=name, value=value, timestamp=timestamp, metadata=metadata)
 
 
 def _coerce_item_metadata(value: Any) -> dict[str, Any]:

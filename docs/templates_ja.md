@@ -1057,7 +1057,7 @@ class MyStaleRule(kanary.StaleRule):
     description = "TODO: describe what stopped when this fires."
     # runbook = "TODO: e.g. check that the DAQ writer is running."
 
-    # Maximum age in seconds of the newest measurement.
+    # Maximum age in seconds of the newest value.
     timeout = 5 * kanary.minute
 ```
 
@@ -2069,7 +2069,7 @@ class MyMultiSourceRule:
         if too_old:
             return kanary.warn(f"inputs too old to compare: {', '.join(too_old)}")
 
-        # Whole snapshot of one source (status, metadata, channels): ctx.source_payload("example.primary")
+        # Whole snapshot of one source (status, metadata, inputs): ctx.source_payload("example.primary")
         difference = abs(primary - secondary)
         return kanary.warn_if(
             difference > self.max_difference,

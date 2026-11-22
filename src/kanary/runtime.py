@@ -572,7 +572,7 @@ class EngineRuntime:
         now = datetime.now().astimezone()
         try:
             result = self.engine._call_source_test_poll(source, now=now)
-            payload = self.engine._normalize_source_result(result, now=now)
+            payload = self.engine._test_poll_output(source_id, result, now=now)
         except Exception as exc:
             for future in futures:
                 future.set_exception(exc)

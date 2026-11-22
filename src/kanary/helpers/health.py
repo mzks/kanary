@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from ..models import SourceResult
+from ..models import PollResult
 from ..source import Source, inputs
 
 
@@ -25,7 +25,7 @@ class PluginHealthSource(Source):
     def init(self) -> None:
         self._dropped: dict[str, int] = {}
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         engine = getattr(self, "_kanary_engine", None)
         if engine is None:
             raise RuntimeError("PluginHealthSource reads the engine it runs in; it cannot run on its own")

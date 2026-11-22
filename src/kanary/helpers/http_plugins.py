@@ -6,7 +6,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from ..models import AlertEvent, SourceResult
+from ..models import AlertEvent, PollResult
 from ..output import Output, event_record
 from ..source import Source, inputs, no_data
 from ..values import flatten, get_path, to_number
@@ -47,7 +47,7 @@ class HTTPJSONSource(Source):
             return flatten(document)
         return {name: get_path(document, path) for name, path in self.fields.items()}
 
-    def poll(self) -> SourceResult:
+    def poll(self) -> PollResult:
         selected = self.select(self.fetch_json())
         items, missing, texts = [], [], {}
         for name, value in selected.items():

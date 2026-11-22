@@ -387,10 +387,10 @@ class TestPollTest(unittest.TestCase):
         self.assertTrue(wait_until(lambda: len(polls) == 1))
         time.sleep(0.5)
         result = runtime.test_poll("counting", timeout=2.0)
-        self.assertEqual(result["channels"]["n"]["value"], -1.0)
+        self.assertEqual(result["inputs"]["counting:n"]["value"], -1.0)
         self.assertEqual(polls[1], "test:" + polls[0])  # same thread as poll()
         current = engine.source_states["counting"].current.payload
-        self.assertEqual(current["channels"]["n"]["value"], 1.0)  # not evaluated
+        self.assertEqual(current["inputs"]["n"]["value"], 1.0)  # not evaluated
         # The second poll is still due 1 s after the first, not 1 s after the test poll.
         time.sleep(0.75)
         self.assertEqual(len(polls), 3)
@@ -420,8 +420,8 @@ class TestPollTest(unittest.TestCase):
         runtime._sync_source_threads()
         self.assertEqual(runtime.test_poll("waiting", timeout=2.0)["status"], "no_update")
         arrived.put(("temperature", 21.5))
-        self.assertTrue(wait_until(lambda: engine.source_states["waiting"].current.payload.get("channels")))
-        self.assertEqual(runtime.test_poll("waiting", timeout=2.0)["channels"]["temperature"]["value"], 21.5)
+        self.assertTrue(wait_until(lambda: engine.source_states["waiting"].current.payload.get("inputs")))
+        self.assertEqual(runtime.test_poll("waiting", timeout=2.0)["inputs"]["waiting:temperature"]["value"], 21.5)
 
     def test_log_count_keeps_its_read_position(self):
         with TemporaryDirectory() as tmp:
@@ -438,8 +438,8 @@ class TestPollTest(unittest.TestCase):
             self.addCleanup(engine.shutdown)
             with log.open("a", encoding="utf-8") as handle:
                 handle.write("ERROR one\nok\nERROR two\n")
-            self.assertEqual(engine.test_poll("errors")["channels"]["errors"]["value"], 2)
-            self.assertEqual(engine.sources["errors"].poll().measurements[0].value, 2)  # nothing lost
+            self.assertEqual(engine.test_poll("errors")["inputs"]["errors:errors"]["value"], 2)
+            self.assertEqual(engine.sources["errors"].poll().inputs[0].value, 2)  # nothing lost
 
     def test_what_a_test_poll_adds_to_a_buffer_is_dropped(self):
         class Pressure(kanary.Source):
@@ -459,9 +459,9 @@ class TestPollTest(unittest.TestCase):
         source = engine.sources["pressure"]
         source.poll()
         source.reading = 5.0
-        channels = engine.test_poll("pressure")["channels"]
+        shown = engine.test_poll("pressure")["inputs"]
         # The test poll saw its own reading ...
-        self.assertEqual((channels["p_count"]["value"], channels["p_max"]["value"]), (2, 5.0))
+        self.assertEqual((shown["pressure:p_count"]["value"], shown["pressure:p_max"]["value"]), (2, 5.0))
         # ... which is not kept for the next poll.
         self.assertEqual(source.buffer["p"].values, [1.0])
 

@@ -10,8 +10,8 @@ A Buffer is an ordinary object a source creates in init() and fills in poll()::
         pressure = self.buffer["pressure"].window(10 * kanary.minute)
         return kanary.inputs(("pressure_avg_10m", pressure.mean()))
 
-It holds, per input name, the samples added to it, oldest first; each sample is
-a kanary.Measurement (.value, .timestamp, .metadata). ``buffer["name"]`` is a
+It holds, per input name, the samples added to it, oldest first; each sample has
+.name, .value, .timestamp, and .metadata. ``buffer["name"]`` is a
 Series: a read-only copy of those samples that answers the usual questions
 (last.value, mean(), max(), slope(), ...). A statistic returns None when there
 is no data for it (an empty window, a single sample for a rate). What to publish
@@ -33,7 +33,7 @@ import statistics
 import threading
 from typing import Any
 
-from ..models import Measurement, SourceResult, normalize_input_items
+from ..models import InputValue, PollResult, normalize_input_items
 from ..units import format_time
 from ..values import coerce_datetime, is_number
 
@@ -68,29 +68,29 @@ class Series:
 
     def __init__(self, name: str, samples: Any = ()) -> None:
         self.name = name
-        self._samples: tuple[Measurement, ...] = tuple(samples)
+        self._samples: tuple[InputValue, ...] = tuple(samples)
 
     # -- samples ------------------------------------------------------------
 
     def __len__(self) -> int:
         return len(self._samples)
 
-    def __iter__(self) -> Iterator[Measurement]:
+    def __iter__(self) -> Iterator[InputValue]:
         return iter(self._samples)
 
-    def __getitem__(self, index: int) -> Measurement:
+    def __getitem__(self, index: int) -> InputValue:
         return self._samples[index]
 
     def __repr__(self) -> str:
         return f"Series({self.name!r}, {len(self)} samples)"
 
     @property
-    def first(self) -> Measurement | None:
+    def first(self) -> InputValue | None:
         """The oldest sample (.value, .timestamp, .metadata), or None."""
         return self._samples[0] if self._samples else None
 
     @property
-    def last(self) -> Measurement | None:
+    def last(self) -> InputValue | None:
         """The newest sample, or None."""
         return self._samples[-1] if self._samples else None
 
@@ -252,7 +252,7 @@ class Buffer:
             raise ValueError(f"Buffer max_age must be a positive duration or None, not {max_age!r}")
         self.size = size
         self.max_age = max_age
-        self._samples: dict[str, deque[Measurement]] = {}
+        self._samples: dict[str, deque[InputValue]] = {}
 
     # -- reading ------------------------------------------------------------
 
@@ -324,19 +324,19 @@ class Buffer:
             buffer.add({"pressure": 1.02, "temperature": 21.5})
             buffer.add(result)  # a whole poll result: kanary.inputs(...), super().poll() of a helper
 
-        A timestamp is a datetime or unix time; ``timestamp=`` gives one to the
-        samples without their own (default: now). A result that is not ok
-        (no_update(), skip(), an error) adds nothing. A sample with the same
+        A timestamp is a datetime, ISO 8601 text, or unix time; ``timestamp=``
+        gives one to the samples without their own (default: now). A result that
+        is not ok (no_data(), no_update(), skip()) adds nothing. A sample with the same
         timestamp as the input's newest one replaces it (the same reading again);
         an older one is ignored.
         """
-        if len(items) == 1 and (items[0] is None or isinstance(items[0], SourceResult)):
+        if len(items) == 1 and (items[0] is None or isinstance(items[0], PollResult)):
             if timestamp is not None:
                 raise TypeError("timestamp= is for (name, value) items; a result carries its own")
             result = items[0]
             if result is None or result.status != "ok":
                 return
-            samples = result.measurements
+            samples = result.inputs
         else:
             when = coerce_datetime(timestamp) if timestamp is not None else datetime.now(timezone.utc)
             samples = normalize_input_items(items, default_timestamp=when)
@@ -359,9 +359,7 @@ class Buffer:
 
     # -- internals ----------------------------------------------------------
 
-    def _append(self, store: dict[str, deque[Measurement]], sample: Measurement) -> None:
-        if sample.timestamp.tzinfo is None:
-            sample = Measurement(sample.name, sample.value, coerce_datetime(sample.timestamp), sample.metadata)
+    def _append(self, store: dict[str, deque[InputValue]], sample: InputValue) -> None:
         samples = store.setdefault(sample.name, deque(maxlen=self.size))
         if samples and sample.timestamp <= samples[-1].timestamp:
             if sample.timestamp == samples[-1].timestamp:
@@ -373,7 +371,7 @@ class Buffer:
             while samples and samples[0].timestamp < cutoff:
                 samples.popleft()
 
-    def _view(self) -> dict[str, deque[Measurement]]:
+    def _view(self) -> dict[str, deque[InputValue]]:
         """The samples this thread sees: the test poll's copy while one changed it."""
         copies = getattr(_scratch, "copies", None)
         if copies:
@@ -382,7 +380,7 @@ class Buffer:
                 return entry[1]
         return self._samples
 
-    def _writable(self) -> dict[str, deque[Measurement]]:
+    def _writable(self) -> dict[str, deque[InputValue]]:
         """The samples to change: inside discarding_changes(), a copy kept until it ends."""
         copies = getattr(_scratch, "copies", None)
         if copies is None:
@@ -394,7 +392,7 @@ class Buffer:
         return entry[1]
 
 
-def _copy_samples(samples: dict[str, deque[Measurement]]) -> dict[str, deque[Measurement]]:
+def _copy_samples(samples: dict[str, deque[InputValue]]) -> dict[str, deque[InputValue]]:
     return {name: deque(kept, maxlen=kept.maxlen) for name, kept in samples.items()}
 
 
