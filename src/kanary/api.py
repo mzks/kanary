@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .engine import Engine, NotApplicable, UnknownTarget
 from .constants import DEFAULT_VIEWER_TITLE, AlertState, severity_name
-from .values import coerce_datetime, json_default
+from .values import coerce_datetime, json_default, json_ready
 
 WEB_ROOT = Path(__file__).with_name("web")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -324,6 +324,7 @@ class ControlAPI:
                                 "exclude_transitions": list(getattr(plugin, "exclude_transitions", [])) if status.plugin_type == "output" and plugin is not None else [],
                                 "minimum_severity": _plugin_minimum_severity(plugin, status.plugin_type),
                                 "warning": status.warning,
+                                "reload_error": status.reload_error,
                                 **(engine.output_backlog(status.plugin_id) if status.plugin_type == "output" else {}),
                             }
                         )
@@ -334,6 +335,12 @@ class ControlAPI:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
             def do_POST(self) -> None:
+                try:
+                    self._post()
+                except _BadBody as exc:  # raised before anything was written
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+            def _post(self) -> None:
                 engine = engine_getter()
 
                 if self.path == "/reload":
@@ -529,7 +536,7 @@ class ControlAPI:
                 return None
 
             def _write_json(self, status: HTTPStatus, payload: dict) -> None:
-                body = json.dumps(payload, ensure_ascii=False, indent=2, default=json_default).encode()
+                body = json.dumps(json_ready(payload), ensure_ascii=False, indent=2, default=json_default).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -564,12 +571,26 @@ class ControlAPI:
                 self.wfile.write(body)
 
             def _read_json_body(self, allow_empty: bool = False) -> dict:
-                length = int(self.headers.get("Content-Length", "0"))
+                """The JSON object of the request ({} without a body); _BadBody for anything else."""
+                try:
+                    length = int(self.headers.get("Content-Length") or "0")
+                except ValueError:
+                    raise _BadBody("Content-Length must be a number") from None
                 if length <= 0:
                     return {}
-                return json.loads(self.rfile.read(length).decode())
+                try:
+                    body = json.loads(self.rfile.read(length).decode())
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise _BadBody(f"the request body is not JSON: {exc}") from None
+                if not isinstance(body, dict):
+                    raise _BadBody("the request body must be a JSON object")
+                return body
 
         return Handler
+
+
+class _BadBody(ValueError):
+    """A request body that is not a JSON object: the answer is 400."""
 
 
 def _silence_created(silence, warnings: list[str]) -> dict[str, object]:
@@ -612,7 +633,7 @@ def _parse_query_int(
 
 def _parse_alert_state(value: str) -> AlertState:
     try:
-        return AlertState(str(value))
+        return AlertState(str(value).strip().upper())  # "FIRING", "firing", ...
     except ValueError as exc:
         raise ValueError(f"invalid alert state: {value}") from exc
 

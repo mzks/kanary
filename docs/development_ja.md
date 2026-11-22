@@ -43,16 +43,21 @@ plugin directory は継続監視され、変更は自動検知されます。def
 ```text
 file change detected
   ↓
+すべての plugin file を load して検査
+  ↓
 mark plugins dirty
   ↓
 explicit reload or auto-reload
   ↓
-validation
+置き換える plugin をすべて作る
   ↓
 targeted replace
 ```
 
-reload 失敗時は旧 registry を維持します。
+失敗したときに何が保たれるかは段階によります。
+
+- load と検査: plugin file が load できない、または検査に通らない場合は何も適用せず、動いている plugin はすべてそのまま動きます（`reload_failed`。loader の error が付きます）。
+- 適用: 何かを変える前に、置き換える plugin をすべて作ります。class や `__init__()` が失敗した plugin は適用せず、動いている instance がそのまま続き、`reload_error` が表示されます。他の plugin は適用します（`partial`）。新しい source や output の `init()` が失敗した場合は適用したうえで、起動時と同じくやり直し続けます。
 
 ## Repository Layout
 

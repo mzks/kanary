@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
+import math
 import numbers
 import re
 from typing import Any
@@ -231,7 +232,25 @@ def parse_values(
 
 
 def is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """True for an int or a finite float (not a bool, NaN, or infinity)."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def json_ready(document: Any) -> Any:
+    """document with NaN and infinities as None, so json.dumps writes standard JSON.
+
+    json.dumps writes them as NaN / Infinity, which JSON.parse in a browser and
+    most receivers reject; its default= hook is never called for floats.
+    """
+    if isinstance(document, float):
+        return document if math.isfinite(document) else None
+    if isinstance(document, Mapping):
+        return {key: json_ready(value) for key, value in document.items()}
+    if isinstance(document, (list, tuple)):
+        return [json_ready(value) for value in document]
+    return document
 
 
 def coerce_datetime(value: Any) -> datetime:

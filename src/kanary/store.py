@@ -11,7 +11,7 @@ from typing import Any
 
 from .constants import AlertState, Severity, severity_name
 from .models import Acknowledgement, AlertEvent, Silence
-from .values import coerce_datetime, json_default
+from .values import coerce_datetime, json_default, json_ready
 
 
 @dataclass(slots=True)
@@ -300,42 +300,7 @@ class SQLiteStore:
     def load_runtime_state(self) -> RestoredState:
         conn = self._require_conn()
         with self._lock:
-            acknowledgements: dict[str, Acknowledgement] = {}
-            acked_rule_ids = [
-                row["rule_id"]
-                for row in conn.execute(
-                """
-                SELECT ae.rule_id
-                FROM alert_events AS ae
-                JOIN (
-                    SELECT rule_id, MAX(id) AS max_id
-                    FROM alert_events
-                    GROUP BY rule_id
-                ) latest ON latest.max_id = ae.id
-                WHERE ae.current_state IN (?, ?)
-                """,
-                (AlertState.ACKED.value, AlertState.SILENCED.value),
-                )
-            ]
-            for rule_id in acked_rule_ids:
-                row = conn.execute(
-                    """
-                    SELECT operator, reason, created_at
-                    FROM operator_actions
-                    WHERE action_type = 'ack' AND rule_id = ?
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (rule_id,),
-                ).fetchone()
-                if row is None:
-                    continue
-                acknowledgements[rule_id] = Acknowledgement(
-                    rule_id=rule_id,
-                    operator=row["operator"],
-                    reason=row["reason"],
-                    created_at=_parse_datetime(row["created_at"]),
-                )
+            acknowledgements = self._load_acknowledgements(conn)
 
             silences: dict[str, Silence] = {}
             for row in conn.execute("SELECT * FROM silences ORDER BY created_at, silence_id"):
@@ -361,6 +326,65 @@ class SQLiteStore:
                 silences=silences,
                 latest_rule_states=latest_rule_states,
             )
+
+    def _load_acknowledgements(self, conn: sqlite3.Connection) -> dict[str, Acknowledgement]:
+        """The acks that still hold: each one for the alert the rule is in now.
+
+        An ack holds when it is the rule's last ack / unack / rule_removed action (the
+        engine records an unack by "system" when an alert ends while silenced or
+        suppressed), no OK came after it, and the rule's last state is one an ack goes
+        on through (ACKED, or hidden by a silence or a parent).
+        """
+        latest_states = {
+            row["rule_id"]: row["current_state"]
+            for row in conn.execute(
+                """
+                SELECT ae.rule_id, ae.current_state
+                FROM alert_events AS ae
+                JOIN (SELECT rule_id, MAX(id) AS max_id FROM alert_events GROUP BY rule_id) latest
+                  ON latest.max_id = ae.id
+                """
+            )
+        }
+        last_ok = {
+            row["rule_id"]: _parse_datetime(row["occurred_at"])
+            for row in conn.execute(
+                """
+                SELECT ae.rule_id, ae.occurred_at
+                FROM alert_events AS ae
+                JOIN (SELECT rule_id, MAX(id) AS ok_id FROM alert_events WHERE current_state = ? GROUP BY rule_id) ok
+                  ON ok.ok_id = ae.id
+                """,
+                (AlertState.OK.value,),
+            )
+        }
+        holding = {AlertState.ACKED.value, AlertState.SILENCED.value, AlertState.SUPPRESSED.value}
+        acknowledgements: dict[str, Acknowledgement] = {}
+        for row in conn.execute(
+            """
+            SELECT rule_id, action_type, operator, reason, created_at
+            FROM operator_actions
+            WHERE id IN (
+                SELECT MAX(id) FROM operator_actions
+                WHERE action_type IN ('ack', 'unack', 'rule_removed')
+                GROUP BY rule_id
+            )
+            """
+        ):
+            rule_id = row["rule_id"]
+            if row["action_type"] != "ack" or latest_states.get(rule_id) not in holding:
+                continue
+            created_at = _parse_datetime(row["created_at"])
+            ok_at = last_ok.get(rule_id)
+            if ok_at is not None and not created_at > ok_at:
+                continue  # the alert it acknowledged has ended (a database written before 0.8.0)
+            acknowledgements[rule_id] = Acknowledgement(
+                rule_id=rule_id,
+                operator=row["operator"],
+                reason=row["reason"],
+                created_at=created_at,
+            )
+        return acknowledgements
 
     def _load_latest_rule_states(self, conn: sqlite3.Connection) -> dict[str, RestoredRuleState]:
         active_since = {
@@ -463,7 +487,7 @@ class SQLiteStore:
                     int(event.alert.severity),
                     event.alert.owner,
                     event.alert.message,
-                    json.dumps(event.alert.payload, ensure_ascii=False, default=json_default),
+                    json.dumps(json_ready(event.alert.payload), ensure_ascii=False, default=json_default),
                     json.dumps(list(event.alert.tags), ensure_ascii=False),
                     event.occurred_at.isoformat(),
                     definition_file,
@@ -728,7 +752,11 @@ class SQLiteStore:
                 operator_actions.append(_operator_action_row(row))
                 seen_action_ids.add(row["id"])
 
-            operator_actions.sort(key=lambda row: row["created_at"], reverse=True)
+            # Newest first by time, not by text: times are written with their own offsets
+            # (an evaluation in local time, an operator action in UTC).
+            alert_events.sort(key=lambda row: _parse_datetime(row["occurred_at"]), reverse=True)
+            output_dispatches.sort(key=lambda row: _parse_datetime(row["occurred_at"]), reverse=True)
+            operator_actions.sort(key=lambda row: _parse_datetime(row["created_at"]), reverse=True)
             return {
                 "enabled": True,
                 "alert_events": alert_events,

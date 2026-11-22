@@ -230,7 +230,7 @@ def main() -> int:
             return 0
 
         if args.command == "history":
-            payload = fetch_json(f"{args.base_url}/history/{args.rule_id}")
+            payload = fetch_json(f"{args.base_url}/history/{quote(args.rule_id, safe='')}")
             payload = apply_history_filters(payload, since=args.since, limit=args.limit)
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -292,7 +292,7 @@ def main() -> int:
 
         if args.command == "ack":
             payload = fetch_json(
-                f"{args.base_url}/alerts/{args.rule_id}/ack",
+                f"{args.base_url}/alerts/{quote(args.rule_id, safe='')}/ack",
                 method="POST",
                 body={"operator": args.operator, "reason": args.reason},
             )
@@ -301,7 +301,7 @@ def main() -> int:
 
         if args.command == "unack":
             payload = fetch_json(
-                f"{args.base_url}/alerts/{args.rule_id}/unack",
+                f"{args.base_url}/alerts/{quote(args.rule_id, safe='')}/unack",
                 method="POST",
                 body={"operator": args.operator, "reason": args.reason},
             )
@@ -348,7 +348,7 @@ def main() -> int:
 
         if args.command == "unsilence":
             payload = fetch_json(
-                f"{args.base_url}/silences/{args.silence_id}/cancel",
+                f"{args.base_url}/silences/{quote(args.silence_id, safe='')}/cancel",
                 method="POST",
                 body={"operator": args.operator, "reason": args.reason},
             )
@@ -356,24 +356,30 @@ def main() -> int:
             return 0
 
         if args.command == "reload":
-            payload = fetch_json(
-                f"{args.base_url}/reload",
-                method="POST",
-                body={
-                    "rule": args.rule,
-                    "source": args.source,
-                    "output": args.output,
-                    "dirty": args.dirty,
-                    "all": args.all,
-                    "full": args.full,
-                },
-            )
-            print(payload.get("status", "unknown"))
-            return 0
+            try:
+                payload = fetch_json(
+                    f"{args.base_url}/reload",
+                    method="POST",
+                    body={
+                        "rule": args.rule,
+                        "source": args.source,
+                        "output": args.output,
+                        "dirty": args.dirty,
+                        "all": args.all,
+                        "full": args.full,
+                    },
+                )
+            except HTTPError as exc:
+                payload = _error_body(exc)  # a reload that was not (fully) applied says what and why
+                if "status" not in payload:
+                    print(f"kanaryctl: {exc}{': ' + payload['error'] if payload.get('error') else ''}")
+                    return 1
+            print_reload_result(payload)
+            return 0 if payload.get("status") == "reloaded" else 1
 
         if args.command == "test-poll":
             payload = fetch_json(
-                f"{args.base_url}/test-poll/{args.source_id}",
+                f"{args.base_url}/test-poll/{quote(args.source_id, safe='')}",
                 method="POST",
             )
             print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -382,12 +388,12 @@ def main() -> int:
         if args.command == "test-evaluate":
             if args.print_template:
                 payload = fetch_json(
-                    f"{args.base_url}/test-evaluate-template/{args.rule_id}",
+                    f"{args.base_url}/test-evaluate-template/{quote(args.rule_id, safe='')}",
                 )
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
                 return 0
             payload = fetch_json(
-                f"{args.base_url}/test-evaluate/{args.rule_id}",
+                f"{args.base_url}/test-evaluate/{quote(args.rule_id, safe='')}",
                 method="POST",
                 body={
                     "payload": load_payload_argument(args),
@@ -404,7 +410,7 @@ def main() -> int:
             elif args.evaluation_stdin:
                 evaluation = _parse_json_object(sys.stdin.read(), source="stdin")
             payload = fetch_json(
-                f"{args.base_url}/test-fire/{args.rule_id}",
+                f"{args.base_url}/test-fire/{quote(args.rule_id, safe='')}",
                 method="POST",
                 body={
                     "state": args.state,
@@ -529,12 +535,36 @@ def report_unknown_id(kind: str, pattern: str, known: list[str]) -> int:
 
 def _error_detail(exc: HTTPError) -> str:
     """The API's own reason for an error answer, when it gave one."""
+    error = _error_body(exc).get("error")
+    return f": {error}" if error else ""
+
+
+def _error_body(exc: HTTPError) -> dict:
+    """The JSON body of an error answer ({} when it has none)."""
     try:
         body = json.loads(exc.read().decode() or "{}")
     except (ValueError, OSError):
-        return ""
-    error = body.get("error") if isinstance(body, dict) else None
-    return f": {error}" if error else ""
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def print_reload_result(payload: dict) -> None:
+    """The status, then each plugin that was not applied or whose init() failed."""
+    print(payload.get("status", "unknown"))
+    listed = False
+    for plugin_type in ("source", "rule", "output"):
+        result = payload.get(f"{plugin_type}s")
+        if not isinstance(result, dict):
+            continue
+        init_failed = set(result.get("init_failed") or [])
+        for plugin_id, message in (result.get("errors") or {}).items():
+            listed = True
+            if plugin_id in init_failed:
+                print(f"  {plugin_type} {plugin_id}: applied; {message} (it keeps trying)")
+            else:
+                print(f"  {plugin_type} {plugin_id}: not applied, the running one goes on: {message}")
+    if not listed and payload.get("error"):
+        print(f"  {payload['error']}")
 
 
 # -- tables -------------------------------------------------------------------

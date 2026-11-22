@@ -46,7 +46,7 @@ In JSON, a severity is its name (`"ERROR"`); the requests below accept a name in
 
 ### Write Endpoints
 
-An operator action that names an unknown rule or silence returns 404; one that does not apply to the alert as it is (acknowledging an alert that is not `FIRING`, unacknowledging one that is not acknowledged, cancelling a cancelled silence) returns 409. Each error reply has an `error` text.
+A request body is a JSON object; anything else (not JSON, a list, a string) returns 400. An operator action that names an unknown rule or silence returns 404; one that does not apply to the alert as it is (acknowledging an alert that is not `FIRING`, unacknowledging one that is not acknowledged, cancelling a cancelled silence) returns 409. Each error reply has an `error` text.
 
 - `POST /alerts/{rule_id}/ack`
   Acknowledges one `FIRING` alert (also one restored as `FIRING` after a restart).
@@ -57,6 +57,7 @@ An operator action that names an unknown rule or silence returns 404; one that d
 - `POST /silences/window`
   Creates a silence for an explicit time window.
   `start_at` and `end_at` are ISO 8601 times; without a time zone they are the host's local time. Both silence endpoints return the window as it was read (`start_at`, `end_at`, with the offset).
+  `rule_patterns` and `tags` are lists of names; one name may be a plain string (`"rule_patterns": "sqlite.*"` is one pattern).
 - `POST /silences/{silence_id}/cancel`
   Cancels an existing silence.
 - `POST /reload`
@@ -71,7 +72,8 @@ An operator action that names an unknown rule or silence returns 404; one that d
   `{"all":true}` always reruns full plugin discovery even when no watched Python file changed.
   `{"full":true}` performs an in-process engine restart after successful discovery and validation.
   For legacy compatibility, an empty body is still accepted and behaves like `{"all":true}`.
-  A reloaded rule is evaluated at once with the last values of its sources, so a changed threshold applies without waiting for the next value. A rule whose sources have given no value since the start waits for one.
+  A reloaded rule is evaluated at once with the last values of its sources, so a changed threshold applies without waiting for the next value. A rule whose sources have given no value since the start waits for one. Rules are evaluated after the sources and outputs of the same reload are in place, so the first alert of a new rule reaches a new output.
+  The answer lists, per `sources` / `rules` / `outputs`: `matched`, `reloaded`, `removed`, `failed` (not applied: its class or `__init__()` failed, and the running instance goes on), `init_failed` (applied, but its first `init()` failed; it keeps trying), and `errors` (the reason for each). `status` is `reloaded` when everything was applied, `partial` when some of it was, and `reload_failed` when nothing was (also when the plugin files do not load or validate). Any status but `reloaded` comes with HTTP 500 and an `error` text that names each plugin.
 - `POST /test-poll/{source_id}`
   Runs the source's `test_poll()` on the source's own thread, between its polls, and returns what it gave, with fully-qualified input names: `{"source_id": "postgres", "status": "ok", "metadata": {...}, "inputs": {"postgres:temperature": {"value": 21.5, "timestamp": "...", "metadata": {}}}}` (`reason` and `metadata` only when the poll gave them). This is a payload for `POST /test-evaluate/{rule_id}` as it is. The result is not evaluated, the source's state and status do not change, and its regular polls keep their schedule. Returns 409 when the source is not running (its `init()` failed) or the test poll does not finish within 30 seconds.
 - `POST /test-evaluate/{rule_id}`
@@ -81,12 +83,15 @@ An operator action that names an unknown rule or silence returns 404; one that d
   - for a rule with one input, `{"value": ..., "timestamp": ..., "prev_value": ...}`.
 
   Normal rule implementations should still prefer `ctx.value()`, `ctx.inputs()`, and related accessors.
+
+  The rule is judged by a copy of the live rule, so what its `evaluate()` changes on `self` (a counter, a last value) does not reach the live rule; a rule that cannot be copied (it holds a lock or a connection) is judged by a new instance. What it adds to a `kanary.Buffer` is dropped, as for a test poll.
 - `GET /test-evaluate-template/{rule_id}`
   Returns a canonical `inputs` payload template for one rule. Single-input rules may also include a shorthand template.
 - `POST /test-fire/{rule_id}`
   Sends a synthetic state change through the output pipeline without changing the live alert state.
   The body gives either `"state"` or `"evaluation"`: the result of `POST /test-evaluate/{rule_id}`, whose state, severity, message, and values the event then has. The message starts with `[TEST-FIRE]` either way.
   With `--no-output-emit`, it reports matching outputs in `emit_skipped_outputs` without calling them.
+  The event has `event.synthetic = True`. `OutputFollowups` and `QuietHours` keep a test fire's followups and held events apart from the rule's real ones: a test `OK` does not cancel the followups of the live alert.
 
 ## Design Notes
 
@@ -143,6 +148,7 @@ Main subcommands:
   `--all` reruns full discovery even without local Python file changes.
   `--full` performs an in-process engine restart and reinitializes all sources, rules, and outputs.
   For legacy compatibility, `POST /reload` with an empty body still behaves like `--all`.
+  Prints the status (`reloaded`, `partial`, or `reload_failed`) and a line for each plugin that was not applied or whose `init()` failed; exits with 1 unless the status is `reloaded`.
 - `test-poll`
   Runs the source's `test_poll()` (on its own thread, between polls; not evaluated) and prints what it gave as JSON, with `source_id:input` names.
 - `test-evaluate`

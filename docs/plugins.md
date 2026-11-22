@@ -38,7 +38,7 @@ To pass your own setting through the decorator without a warning, declare it in 
 
 Sources and outputs each run on a thread of their own, so a slow one delays only itself. Rules are the exception.
 
-- **Source:** `poll()` is only ever called from the source's own thread, never twice at once. `kanaryctl test-poll` runs the source's `test_poll()` on that thread too, between polls; its result is shown and never evaluated, and the regular polls keep their schedule.
+- **Source:** `init()`, `poll()`, and `terminate()` of a source are only ever called from the source's own thread, never two at once, so a connection made in `init()` can be one that only works on the thread that made it (`sqlite3`). A reload stops the thread, which terminates the old instance once its `poll()` has returned (never during it), and starts a new thread for the new instance. `kanaryctl test-poll` runs the source's `test_poll()` on that thread too, between polls; its result is shown and never evaluated, and the regular polls keep their schedule.
 - **Output:** `init()`, `emit()`, the callbacks of `OutputFollowups` and `QuietHours`, and `terminate()` all run on the output's own thread, one at a time, so an output needs no locks of its own. Events wait in a queue in the order they happened; a slow or unreachable destination holds only this output's queue. Different outputs run in parallel, so do not share mutable state between them without a lock.
 - **Rule:** rules are evaluated one at a time, in dependency order, because a rule may depend on other rules and on several sources. Every other evaluation waits while one runs, so `evaluate()` must be fast and free of I/O; fetch data in a source. An `evaluate()` slower than 100 ms is logged and shown as `SLOW` on the Rules page. An output's routing filters (`matches()`) are checked during evaluation too.
 
@@ -77,6 +77,25 @@ The `poll(ctx)`, `init(ctx)`, and `terminate(ctx)` of KANARY before 0.8.0 are an
 `schedule` is a Unix cron-compatible 5-field string interpreted in the local time
 of the Kanary server. A small set of macros is also supported, such as
 `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly`.
+It also takes what other cron implementations write:
+
+- months and weekdays as names, abbreviated or not, in any case: `JAN`, `september`, `mon-fri`, `Tues`
+- Sunday as 0 or 7 (`5-7` is Friday to Sunday); `5/15` is `5-59/15`
+- a range that wraps: `22-2` in the hours is 22:00 to 02:00, `FRI-MON` is Friday to Monday
+- `?` in the day fields, the same as `*`
+- `L` (the last day of the month) and `L-2` (two days before it) in the day of the month
+- `5L` or `FRIL` (the last Friday of the month) and `MON#1` (the first Monday) in the weekday
+- a time zone in front: `CRON_TZ=Asia/Tokyo 0 9 * * *` or `TZ=UTC @daily` (any zone `kanary.to_timezone()` reads)
+- `@every 5m` (also `90s`, `1h30m`, `2d`): this is `interval = 300`, not a schedule
+
+As in cron, when both the day of the month and the weekday are given (neither is
+`*` or `?`), a day matches when either does: `0 0 1 * 1` runs on the 1st and on every
+Monday, and `kanary lint` warns about it. For the first Monday of a month write
+`0 9 * * MON#1`. A schedule that never runs (`0 0 31 2 *`, cron's way to turn a job
+off) is accepted with a lint warning: the source runs `init()` and answers
+`kanaryctl test-poll`, but is never polled, and the Sources page shows it as
+`NOT POLLED`. Six or seven fields (seconds, years) are not read: implementations put
+them in different places.
 
 Examples:
 
@@ -107,6 +126,8 @@ Attempt `N` waits `N**2` seconds first. With the defaults, Kanary:
 2. waits 4 seconds, runs `terminate() -> init()`, and retries `poll()`
 
 If all attempts fail, the source stays `FAILED` until the next scheduled poll or an explicit reload.
+
+Only an exception from `poll()` is retried. A `poll()` that returns something that is not a poll result (for example `return object()`) is a bug in the source: it is not retried; the source shows `FAILED` with `poll() returned an invalid result: ...` and polls again at its next interval.
 
 `init()` runs on the source's own thread too. When it fails (at start, a database that is still booting after a power cut), the source is `FAILED` and its thread tries `init()` again, with the same `max_reinit` attempts, every `interval` (at most a minute apart) until it works; then it polls as usual. The other sources start meanwhile, and KANARY starts without waiting for them.
 
@@ -143,6 +164,7 @@ Rules:
 - if the item timestamp is omitted or `None`, Kanary uses the outer `timestamp=` if present, otherwise the server's current time
 - a timestamp is a `datetime`, ISO 8601 text, or unix time; see [Times and time zones](#times-and-time-zones)
 - `Decimal` (what database drivers return for `NUMERIC`) and numpy numbers become plain `float` / `int`, so rules and JSON treat them as numbers
+- NaN and infinity are no measurement: the input has no value (`None`; the API and history show `null`), and its `metadata["error"]` says why (`value is nan`). Rules treat it as missing: `RangeRule(missing_fires=True)` fires with `no value: x (value is nan)`
 - outer `metadata=` is the snapshot's `metadata`, next to its inputs: `ctx.source_payload()["metadata"]`, and in what `kanaryctl test-poll` prints
 - `kanary.no_data(reason=..., metadata=...)` means the poll succeeded and produced an empty snapshot; Kanary updates the source snapshot and still evaluates rules
 - `kanary.no_update(reason=..., metadata=...)` means the poll succeeded but there is no new snapshot; Kanary keeps the last snapshot and still evaluates rules against it
@@ -356,7 +378,7 @@ Accepted shorthand forms:
 - a severity is written the same way everywhere (a rule's `severity`, `thresholds`, `kanary.firing(severity=...)`, an output's `minimum_severity`): `kanary.ERROR`, its name in any case (`"ERROR"`, `"Error"`, `"error"`), or its number (`30`). A rule that sets none is `ERROR`
 
 If you do not specify a payload explicitly, Kanary automatically inherits the current source payload. Use `extra={...}` to merge additional fields into that payload.
-`kanary.Evaluation(...)` remains available as an advanced form.
+`kanary.Evaluation(...)` remains available as an advanced form. Its `state` is `kanary.FIRING` / `kanary.OK` or the name in any case (`"firing"`), and its `severity` is written as anywhere else; another value makes the rule fail with the reason.
 
 ## 3. Output
 
@@ -394,9 +416,11 @@ For example, `include_tags=["expert_*"]` matches tags such as `expert_db` and `e
 
 `exclude_states` drops events whose current state matches a listed value. It defaults to `["SUPPRESSED", "SILENCED"]`.
 
-To add `OK` to the defaults and drop recovery events too, use `exclude_states=kanary.Output.exclude_states + ["OK"]`. An explicitly configured list replaces rather than merges with the defaults, so debugging and audit outputs that need every state event should set `exclude_states=[]`.
+One tag pattern, state, or transition may be written as a string instead of a list (`include_tags="infra"`), and states and transitions in any case (`"ok"`); an unknown state or transition name is an error when the file loads. To add `OK` to the defaults and drop recovery events too, use `exclude_states=kanary.Output.exclude_states + ["OK"]`. An explicitly configured list replaces rather than merges with the defaults, so debugging and audit outputs that need every state event should set `exclude_states=[]`.
 
 An `OK` goes only to an output that was sent a non-OK event for the rule since its last `OK` (a `FIRING`, an `ACKED`, or a state its `exclude_states` lets through): an `OK` closes what the output was told. So a rule that was `OK` before a silence or a suppression sends no `OK` when that ends, while a rule that fired, was silenced, and recovered during the silence sends its `OK` as the silence ends. After a restart, alerts restored as not `OK` count as sent. An `OK` held back this way is recorded as filtered in the output dispatch history.
+
+The `OK` has the severity this output was last sent for the alert (`event.effective_severity`, which `minimum_severity` checks): an output with `minimum_severity=kanary.ERROR` that was sent a `CRITICAL` alert gets its `OK` also when the alert went down to `WARN` before it recovered.
 
 To drop a transition that passes the filters, inspect `previous_state` and `current_state` in `emit()`:
 
@@ -782,7 +806,7 @@ class Value1Threshold(kanary.ThresholdRule):
 - reads `/export-alerts` from another Kanary node
 - returns each remote alert as an input: 1 while it is not OK, the alert in its metadata
 - can forward `ack`, `unack`, `silence`, and `unsilence` to the remote API
-- typically configured with `base_url` and `interval`
+- typically configured with `base_url` and `interval`: `base_url = "http://remote-kanary.example:8000"`, the node's address (`url` is another name for it; a URL that ends with `/export-alerts` is taken without it)
 - uses the hostname as the default node ID
 - skips imported alerts when the local node ID is already present in `mirror_path`
 
@@ -798,6 +822,7 @@ class Value1Threshold(kanary.ThresholdRule):
 - factory that generates one `RemoteAlarm` rule per id in `remote_alarm_ids` (required)
 - the ids are written out on purpose: reading them from the remote node would make loading the file depend on that node being up, and after a power cut both nodes start at once
 - supports `prefix`, `suffix`, `add_tags`, `owner`, `severity`, and `include_rule_ids` / `exclude_rule_ids` (glob patterns over the listed ids)
+- the local rule id is `prefix.remote_id.suffix`: `prefix="remote"` makes `remote.daq.link` (`prefix="remote."` gives the same)
 - each generated rule is treated as an independent local rule; while the remote alert fires, its own severity and message are shown
 
 ### Output Helpers
@@ -936,7 +961,7 @@ Use `suppressed_by` for a rule that judges each value on its own (`RangeRule`, `
 - "Fires" is the parent's own judgment: silencing or acknowledging the parent does not hold its children back.
 - A parent is evaluated before the rules it holds back, so on one source the parent's alert comes alone, whatever order the rules are written in.
 - When the parent fires, a rule on another source becomes `SUPPRESSED` at once.
-- When the parent recovers, the rule comes back with the first value its sources give after the recovery: in the same poll on the same source, otherwise at its source's next poll (it shows `recovered; waiting for a new value` until then). The values read during the failure are not judged again.
+- When the parent recovers, the rule comes back once every source it reads has given a value after the recovery: in the same poll on the same source, otherwise at its sources' next polls (it shows `recovered; waiting for a new value` until then). A rule that reads sources A and B stays held while only A has a new value. The values read during the failure are not judged again; a source that has given no value at all has none from the failure.
 - If the rule's own source sees the problem before the parent's source does, the rule's alert is sent first: suppression works best when the parent is read at least as often as the rules behind it.
 - An `evaluate()` that raises while its parent fires leaves the rule `SUPPRESSED` (its status shows the error).
 - A rule that lists itself, or rules that list each other in a cycle, are an error; a name that is not a rule is a lint warning.
@@ -948,7 +973,7 @@ Alert states:
 - `FIRING`
   The rule currently evaluates as abnormal.
 - `ACKED`
-  The alert is still abnormal, but an operator acknowledged it.
+  The alert is still abnormal, but an operator acknowledged it. An acknowledgement belongs to one alert: it ends when the rule itself judges the alert over, also while a silence or a parent hides that (the history then shows an unack by `system`), so the rule's next alert is not shown as acknowledged.
 - `SILENCED`
   An active silence covers the alert and temporarily mutes its normal alert state.
 - `SUPPRESSED`

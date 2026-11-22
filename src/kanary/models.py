@@ -1,9 +1,10 @@
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import math
 from typing import Any
 
-from .constants import AlertState, Severity, TransitionKind
+from .constants import AlertState, Severity, TransitionKind, coerce_severity
 from .values import plain_value, to_datetime
 
 
@@ -14,6 +15,18 @@ class Evaluation:
     extra: dict[str, Any] | None = None
     message: str | None = None
     severity: Severity | None = None
+
+    def __post_init__(self) -> None:
+        # Written as kanary.FIRING or as text in any case ("FIRING", "firing"); the
+        # severity as kanary.WARN, "warn", or 20. Anything else is an error here, in evaluate().
+        if not isinstance(self.state, AlertState):
+            try:
+                self.state = AlertState(str(self.state).strip().upper())
+            except ValueError:
+                names = ", ".join(state.value for state in AlertState)
+                raise ValueError(f"evaluation state must be one of {names}, not {self.state!r}") from None
+        if self.severity is not None:
+            self.severity = coerce_severity(self.severity)
 
 
 @dataclass(slots=True)
@@ -89,6 +102,12 @@ class InputValue:
         # Every input value and time enters here: Decimal and numpy numbers become
         # Python numbers, a time without a time zone is this host's local time.
         self.value = plain_value(self.value)
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            # NaN or infinity is no measurement: the input has no value (rules see it
+            # as missing, JSON shows null), and metadata["error"] says why.
+            metadata = dict(self.metadata or {})
+            self.metadata = {**metadata, "error": metadata.get("error") or f"value is {self.value}"}
+            self.value = None
         if self.timestamp is not None:
             self.timestamp = to_datetime(self.timestamp)
 
@@ -113,6 +132,9 @@ class AlertEvent:
     transition: TransitionKind | None
     alert: Alert
     occurred_at: datetime
+    # A made-up event of kanaryctl test-fire: not part of the rule's alert. Helpers that
+    # keep per-rule state (OutputFollowups, QuietHours) keep its state apart.
+    synthetic: bool = False
 
     @property
     def effective_severity(self) -> Severity:
@@ -186,6 +208,8 @@ class PluginStatus:
     last_failure_at: datetime | None = None
     last_updated_at: datetime | None = None
     warning: str | None = None  # e.g. a rule whose evaluate() is slow
+    # Why the last reload of this plugin was not applied (its running instance goes on).
+    reload_error: str | None = None
 
 
 def normalize_source_output(

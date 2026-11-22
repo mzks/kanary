@@ -87,7 +87,7 @@ def poll(self):
 
 For temporary external API communication failures, normally raise an exception. Kanary handles Source retry / reinitialization and plugin status. Turning failures into `no_data()` loses the distinction between a communication failure and a valid empty result.
 
-A Source whose `init()` fails during startup does not get a runtime thread and is not currently recovered automatically; reload or restart it after its dependency recovers. An exception from Rule `evaluate()` marks the Rule plugin `FAILED`; it does not automatically turn the monitored Alert into `FIRING`.
+A Source whose `init()` fails at startup is `FAILED`, and its own thread keeps trying `init()` until it works (every `interval`, at most a minute apart); no reload or restart is needed once its dependency is back. A `poll()` that returns something other than a poll result is a bug in the source, not a lost connection: it is not retried; the source shows `FAILED` with the reason and polls again at its next interval. An exception from Rule `evaluate()` marks the Rule plugin `FAILED`; it does not automatically turn the monitored Alert into `FIRING`.
 
 ### External I/O, Timestamps, and Poll Intervals
 

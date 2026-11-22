@@ -9,7 +9,7 @@ from typing import Any
 from ..models import AlertEvent, PollResult
 from ..output import Output, event_record
 from ..source import Source, inputs, no_data
-from ..values import parse_values
+from ..values import json_ready, parse_values
 
 
 _OUTPUT_FORMATS = ("auto", "number", "keyvalue", "json")
@@ -190,7 +190,7 @@ class CommandOutput(Output):
         # A finite timeout is essential: this output's queue waits while it hangs.
         completed = subprocess.run(
             self.args(event),
-            input=json.dumps(record, ensure_ascii=False, default=str),
+            input=json.dumps(json_ready(record), ensure_ascii=False, default=str),
             capture_output=True,
             text=True,
             timeout=self.timeout,

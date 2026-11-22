@@ -38,7 +38,7 @@ class WideEnvironmentSource:
 
 source と output はそれぞれ専用の thread で動くので、遅いものがあっても遅れるのはそれ自身だけです。rule だけは例外です。
 
-- **Source:** `poll()` はその source の thread からしか呼ばれず、同時に 2 回呼ばれることはありません。`kanaryctl test-poll` も、その source の `test_poll()` を同じ thread で poll と poll の間に実行します。結果は表示するだけで評価には使わず、通常の poll の予定もずらしません。
+- **Source:** source の `init()`、`poll()`、`terminate()` はその source の thread からしか呼ばれず、2 つが同時に動くことはありません。このため `init()` で作る接続は、作った thread でしか使えないもの（`sqlite3`）でも構いません。reload はその thread を止め、thread は古い instance を `poll()` が戻ってから（途中では決して）terminate します。新しい instance には新しい thread が始まります。`kanaryctl test-poll` も、その source の `test_poll()` を同じ thread で poll と poll の間に実行します。結果は表示するだけで評価には使わず、通常の poll の予定もずらしません。
 - **Output:** `init()`、`emit()`、`OutputFollowups` と `QuietHours` の callback、`terminate()` は、すべてその output の thread で 1 つずつ実行されます。output 自身に lock は要りません。event は発生順に queue で待ち、遅い送信先や応答しない送信先が止めるのはその output の queue だけです。別の output 同士は並行に動くので、output 間で変更する状態を共有するなら lock が必要です。
 - **Rule:** rule は依存関係の順に 1 つずつ評価します。rule は他の rule や複数の source に依存しうるためです。1 つの評価中は他の評価がすべて待つので、`evaluate()` は速く、I/O をしないでください。データの取得は source で行います。100 ms を超えた `evaluate()` は log に出し、Rules 画面に `SLOW` と表示します。output の routing filter（`matches()`）も評価の中で判定されます。
 
@@ -78,6 +78,23 @@ source と output はそれぞれ専用の thread で動くので、遅いもの
 `schedule` は Unix cron 互換の 5-field 文字列で、Kanary server の local time
 で解釈されます。`@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` のような
 少数の macro も使えます。
+他の cron 実装の書き方も受け付けます。
+
+- 月と曜日の名前。略しても略さなくても、大文字小文字も問いません: `JAN`、`september`、`mon-fri`、`Tues`
+- 日曜は 0 でも 7 でもよい（`5-7` は金曜から日曜）。`5/15` は `5-59/15`
+- 端をまたぐ範囲: 時の `22-2` は 22 時から 2 時、`FRI-MON` は金曜から月曜
+- 日と曜日の欄の `?`。`*` と同じです
+- 日の欄の `L`（月末日）と `L-2`（その 2 日前）
+- 曜日の欄の `5L` / `FRIL`（その月の最後の金曜）と `MON#1`（第 1 月曜）
+- 先頭の time zone: `CRON_TZ=Asia/Tokyo 0 9 * * *` や `TZ=UTC @daily`（`kanary.to_timezone()` が読める zone なら何でも）
+- `@every 5m`（`90s`、`1h30m`、`2d` も）: schedule ではなく `interval = 300` として読みます
+
+cron と同じく、日と曜日を両方指定した場合（どちらも `*` でも `?` でもない）は、どちらかに
+合う日に動きます。`0 0 1 * 1` は毎月 1 日と毎週月曜に動き、`kanary lint` が警告します。
+第 1 月曜なら `0 9 * * MON#1` と書きます。一度も動かない schedule（`0 0 31 2 *`。cron で
+job を止めるときの書き方）は lint の警告付きで受け付けます。その source は `init()` を行い
+`kanaryctl test-poll` にも答えますが、poll はされず、Sources 画面には `NOT POLLED` と出ます。
+6 個や 7 個の欄（秒、年）は読みません。実装ごとに置く位置が違うためです。
 
 例:
 
@@ -108,6 +125,8 @@ N 回目の復帰試行の前には `N**2` 秒待ちます。default では次�
 2. 4 秒待って `terminate() -> init()` を行い、その後 `poll()` を再試行
 
 それでも失敗した場合は source は `FAILED` のままになり、次の定期 poll または明示 reload まで復帰しません。
+
+再試行するのは `poll()` の例外だけです。`poll()` が poll 結果でないもの（たとえば `return object()`）を返した場合は source の bug なので再試行せず、`poll() returned an invalid result: ...` とともに `FAILED` と表示し、次の interval で再び poll します。
 
 `init()` も source 自身の thread で動きます。失敗すると（起動時、停電の後でまだ起動中の database など）、source は `FAILED` になり、その thread が `init()` を同じ `max_reinit` 回の試行で、`interval` ごと（最長でも 1 分おき）に成功するまでやり直し、その後は通常どおり poll します。その間も他の source は動き、KANARY はそれを待たずに起動します。
 
@@ -144,6 +163,7 @@ return kanary.inputs(
 - item 側の timestamp が省略または `None` の場合、outer `timestamp=` があればそれを使い、無ければ Kanary server の current time を使います
 - timestamp は `datetime`、ISO 8601 の文字列、unix time のどれかです。[時刻と time zone](#時刻と-time-zone) を見てください
 - `Decimal`（database driver が `NUMERIC` に返す型）や numpy の数は普通の `float` / `int` になるので、rule でも JSON でも数として扱われます
+- NaN と無限大は測定値ではないので、その input は値なし（`None`。API と履歴では `null`）になり、`metadata["error"]` に理由（`value is nan`）が入ります。rule は欠測として扱います: `RangeRule(missing_fires=True)` は `no value: x (value is nan)` で発報します
 - outer `metadata=` は snapshot の `metadata` として input と並んで入ります。`ctx.source_payload()["metadata"]` で読め、`kanaryctl test-poll` の出力にも出ます
 - `kanary.no_data(reason=..., metadata=...)` は poll 自体は成功し、結果として空の snapshot を返すことを表します。source snapshot は更新され、rule も評価されます
 - `kanary.no_update(reason=..., metadata=...)` は poll 自体は成功したが新しい snapshot は無いことを表します。直前の snapshot を保持したまま、その snapshot に対して rule を再評価します
@@ -359,7 +379,7 @@ def evaluate(self, ctx):
 - severity はどこでも同じ書き方ができます（rule の `severity`、`thresholds`、`kanary.firing(severity=...)`、output の `minimum_severity`）: `kanary.ERROR`、大文字小文字を問わない名前（`"ERROR"`、`"Error"`、`"error"`）、数値（`30`）。指定しない rule は `ERROR` です
 
 payload を明示しない場合、Kanary は current source payload を自動で引き継ぎます。追加情報を入れたい時は `extra={...}` を使って merge します。  
-`kanary.Evaluation(...)` も advanced な書き方として引き続き使えます。
+`kanary.Evaluation(...)` も advanced な書き方として引き続き使えます。`state` は `kanary.FIRING` / `kanary.OK` か、大文字小文字を問わない名前（`"firing"`）で、`severity` は他と同じ書き方です。それ以外の値ではその rule が理由とともに失敗します。
 
 ## 3. Output
 
@@ -397,9 +417,11 @@ payload を明示しない場合、Kanary は current source payload を自動�
 
 `exclude_states` は current state が指定値に一致する event を除外します。default は `["SUPPRESSED", "SILENCED"]` です。
 
-default に `OK` を追加して recovery event も除外する場合は、`exclude_states=kanary.Output.exclude_states + ["OK"]` と書けます。指定したリストは default との merge ではなく置き換えになるため、すべての state event を受け取るデバッグ・監査用 output では `exclude_states=[]` を明示します。
+tag の pattern、state、transition が 1 つだけなら list でなく文字列でも書けます（`include_tags="infra"`）。state と transition の大文字小文字は問いません（`"ok"`）。不明な state や transition の名前は file の読み込み時にエラーになります。default に `OK` を追加して recovery event も除外する場合は、`exclude_states=kanary.Output.exclude_states + ["OK"]` と書けます。指定したリストは default との merge ではなく置き換えになるため、すべての state event を受け取るデバッグ・監査用 output では `exclude_states=[]` を明示します。
 
 `OK` は、その rule について前回の `OK` 以降に `OK` 以外の event（`FIRING`、`ACKED`、または `exclude_states` が通す state）を送った output にだけ届きます。`OK` は、その output に伝えたことを閉じるためのものだからです。このため、silence や suppression の前から `OK` だった rule は、それが終わっても `OK` を送りません。一方、発報してから silence され、silence 中に治った rule は、silence が終わったときに `OK` を送ります。再起動の後は、`OK` 以外で復元された alert を「送った」とみなします。こうして送らなかった `OK` は、output dispatch の履歴に filtered として記録されます。
+
+`OK` は、その output にその alert について最後に送った severity を持ちます（`minimum_severity` が見る `event.effective_severity`）。`minimum_severity=kanary.ERROR` の output に `CRITICAL` の alert を送っていれば、alert が `WARN` に下がってから治った場合も、その output に `OK` が届きます。
 
 filter を通る遷移を落としたい場合は、`emit()` 内で `previous_state` と `current_state` を確認します。
 
@@ -783,6 +805,7 @@ class Value1Threshold(kanary.ThresholdRule):
 - 他の Kanary の `/export-alerts` を読む
 - remote alert を 1 つずつ input として返す（OK でない間は 1。metadata に alert そのもの）
 - remote 側の `ack`, `unack`, `silence`, `unsilence` を helper として転送できる
+- 通常は `base_url` と `interval` を設定します: `base_url = "http://remote-kanary.example:8000"`（node の address。`url` は同じものの別名で、`/export-alerts` で終わる URL はそれを除いて使います）
 
 #### RemoteAlarm
 
@@ -794,6 +817,7 @@ class Value1Threshold(kanary.ThresholdRule):
 - `remote_alarm_ids`（必須）の id ごとに `RemoteAlarm` rule を 1 つ生成する factory
 - id は意図して明示する形にしています。相手の node から読むと、file の読み込みが相手の稼働に左右されます。停電の後は両方の node が同時に起動します
 - `prefix`、`suffix`、`add_tags`、`owner`、`severity`、`include_rule_ids` / `exclude_rule_ids`（列挙した id に対する glob pattern）を使える
+- local の rule id は `prefix.remote_id.suffix` です: `prefix="remote"` なら `remote.daq.link`（`prefix="remote."` でも同じ）
 - 生成された rule はそれぞれ独立した local rule として扱われる。remote の alert が発報している間は、その severity と message が表示される
 
 ### Output 側
@@ -933,7 +957,7 @@ rule 間の関係: `suppressed_by` と `depends_on` には、この rule の異�
 - 「発報している」は親自身の判定です。親を silence や ACK しても、子は抑えられません。
 - 親は、それが抑える rule より先に評価されます。同じ source なら、rule を書いた順によらず、届くのは親の alert だけです。
 - 親が発報すると、別の source の rule もすぐに `SUPPRESSED` になります。
-- 親が復旧すると、rule は、復旧後にその source から来た最初の値で戻ります。同じ source なら同じ poll で、別の source ならその source の次の poll で戻ります（それまでは `recovered; waiting for a new value` と表示）。障害中に読んだ値で判定し直すことはしません。
+- 親が復旧すると、rule は、読んでいるすべての source から復旧後の値が来た時点で戻ります。同じ source なら同じ poll で、別の source ならそれらの次の poll で戻ります（それまでは `recovered; waiting for a new value` と表示）。source A と B を読む rule は、A だけが新しい値を返した時点ではまだ抑制されたままです。障害中に読んだ値で判定し直すことはしません。まだ一度も値を返していない source には、障害中の値もありません。
 - rule 自身の source が、親の source より先に異常を拾った場合は、rule の alert が先に届きます。親は、それが抑える rule と同じかそれ以上の頻度で読まれるようにすると確実です。
 - 親が発報中に `evaluate()` が例外を出しても、rule は `SUPPRESSED` のままです（status に error が出ます）。
 - 自分自身を指定した rule や、互いに指定し合う循環はエラーです。存在しない rule 名は lint の警告になります。
@@ -945,7 +969,7 @@ alert state:
 - `FIRING`
   現在の評価結果が異常。
 - `ACKED`
-  異常は継続しているが、operator が確認済み。
+  異常は継続しているが、operator が確認済み。ack は 1 つの alert に属します。rule 自身がその alert の終わりを判定した時点で、silence や親に隠れていても終わり（履歴には `system` による unack が残ります）、次の alert が前回の ack のまま表示されることはありません。
 - `SILENCED`
   active な silence の対象になり、期間中は通常の alert state が一時的に mute されている。
 - `SUPPRESSED`

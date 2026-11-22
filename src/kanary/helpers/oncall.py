@@ -83,6 +83,11 @@ def check_quiet_hours(quiet_hours: Any) -> list[str]:
     return problems
 
 
+def _same_story(held: Any, event: Any) -> bool:
+    """Events of the same rule; a test fire's are kept apart from the rule's real events."""
+    return held.rule_id == event.rule_id and getattr(held, "synthetic", False) == getattr(event, "synthetic", False)
+
+
 class QuietHours:
     """Hold alert events during quiet hours and send them when the quiet period ends.
 
@@ -173,13 +178,13 @@ class QuietHours:
             if self.applies(event):
                 if self.defer:
                     if self.release == "latest":
-                        self._held = [item for item in self._held if item[1].rule_id != event.rule_id]
+                        self._held = [item for item in self._held if not _same_story(item[1], event)]
                     release_at = quiet_hours_end(event.occurred_at, self.windows, self.timezone)
                     self._held.append((release_at or self._now(), event, callback))
                     self._schedule()
                 return False
-            earlier = [item for item in self._held if item[1].rule_id == event.rule_id]
-            self._held = [item for item in self._held if item[1].rule_id != event.rule_id]
+            earlier = [item for item in self._held if _same_story(item[1], event)]
+            self._held = [item for item in self._held if not _same_story(item[1], event)]
             self._schedule()
         if self.release == "all":
             self._run_held(earlier)  # the newer event sent now replaces them otherwise

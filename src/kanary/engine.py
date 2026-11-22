@@ -1,5 +1,6 @@
 from collections.abc import Iterable, Mapping
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+import copy
 import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from typing import Callable
 from .helpers.buffer import discarding_changes
 from .dispatch import SHUTDOWN_DRAIN_SECONDS, OutputWorker, current_worker
 from .constants import AlertState, DEESCALATED, ESCALATED, Severity, TransitionKind, UNACK, coerce_severity, severity_name
-from .models import Acknowledgement, Alert, AlertEvent, Evaluation, PluginStatus, PollResult, Silence, SourceSnapshot, SourceState
+from .models import Acknowledgement, Alert, AlertEvent, Evaluation, InputValue, PluginStatus, PollResult, Silence, SourceSnapshot, SourceState
 from .models import normalize_source_output
 from .output import Output
 from .registry import (
@@ -223,6 +224,33 @@ def _coerce_test_timestamp(value: object) -> object:
     return value
 
 
+def _test_input(value: object, timestamp: object, metadata: object) -> dict[str, object]:
+    """One input of a test-evaluate payload, read as a poll result's input is (NaN is no value)."""
+    item = InputValue(
+        name="test",
+        value=value,
+        timestamp=_coerce_test_timestamp(timestamp),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+    )
+    return {"value": item.value, "timestamp": item.timestamp, "metadata": item.metadata}
+
+
+def _silence_targets(value: object, name: str) -> list[str]:
+    """Rule patterns or tags of a silence: a list of names, or one name as a string."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, (list, tuple, set, frozenset)) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"silence {name} must be a name or a list of names, not {value!r}")
+    return [item for item in value if item.strip()]
+
+
+def source_initialized(source: Source) -> bool:
+    """This source instance's init() succeeded and its terminate() has not run since."""
+    return bool(getattr(source, "_kanary_initialized", False))
+
+
 class UnknownTarget(LookupError):
     """An operator action names a rule or silence that does not exist (HTTP 404)."""
 
@@ -277,8 +305,9 @@ class Engine:
         # When each rule's own judgment last left FIRING: the rules it suppresses come back
         # once their sources give a value read after that (not with values read during it).
         self._recovered_at: dict[str, datetime] = {}
-        # Per output, the rules it was sent a non-OK event for: an OK goes only where it closes one.
-        self._open_by_output: dict[str, set[str]] = {}
+        # Per output, the rules it was sent a non-OK event for, with the severity it was sent
+        # last: an OK goes only where it closes one, and is matched with that severity.
+        self._open_by_output: dict[str, dict[str, Severity]] = {}
         self._output_init_retries: dict[str, "_InitRetry"] = {}
         self.acknowledgements: dict[str, Acknowledgement] = {}
         self.silences: dict[str, Silence] = {}
@@ -427,8 +456,8 @@ class Engine:
             self.silences = restored.silences
             self._restore_alerts(restored.latest_rule_states)
             # An alert that was not OK when KANARY stopped was most likely sent: its OK is still due.
-            still_open = {rule_id for rule_id, alert in self.alerts.items() if alert.state != AlertState.OK}
-            self._open_by_output = {output_id: set(still_open) for output_id in self.outputs}
+            still_open = {rule_id: alert.severity for rule_id, alert in self.alerts.items() if alert.state != AlertState.OK}
+            self._open_by_output = {output_id: dict(still_open) for output_id in self.outputs}
             for source in self.sources.values() if init_sources else ():
                 try:
                     self._initialize_source(source)
@@ -479,10 +508,17 @@ class Engine:
                     restored=True,
                 )
 
-    def shutdown(self) -> None:
-        """Terminate sources, send what the outputs still have queued (briefly), then close the store."""
+    def shutdown(self, *, terminate_sources: bool = True) -> None:
+        """Terminate sources, send what the outputs still have queued (briefly), then close the store.
+
+        terminate() is called for the sources whose init() succeeded. The runtime passes
+        terminate_sources=False: each source's thread terminates its own source, after
+        its poll() has returned.
+        """
         with self._lock:
-            for source in self.sources.values():
+            for source in self.sources.values() if terminate_sources else ():
+                if not source_initialized(source):
+                    continue
                 try:
                     self._terminate_source(source)
                 except Exception:
@@ -551,7 +587,18 @@ class Engine:
     ) -> dict[str, Alert]:
         with self._lock:
             current_time = now or self._now_fn()
-            normalized_payload = self._normalize_source_input(source_id, payload, current_time)
+            try:
+                normalized_payload = self._normalize_source_input(source_id, payload, current_time)
+            except (TypeError, ValueError) as exc:
+                # A code bug in the source, not a lost connection: it is not retried; the
+                # source shows FAILED with the reason until a poll returns a valid result.
+                self.record_source_failure(
+                    source_id,
+                    f"poll() returned an invalid result: {exc}",
+                    now=current_time,
+                    detail=traceback.format_exc(),
+                )
+                raise
             source_payload, source_state = self._apply_source_result(
                 source_id,
                 normalized_payload,
@@ -600,12 +647,38 @@ class Engine:
                 self._update_dependents({rule_id}, {rule_id}, current_time)
             return dict(self.alerts)
 
+    def prepare_plugins(self, plugin_type: str, classes: Mapping[str, type]) -> tuple[dict[str, object], dict[str, str]]:
+        """New instances of these classes, and the error of each one that cannot be created.
+
+        Nothing in the engine changes: a reload creates every replacement first, then
+        applies the ones that could be created (the others keep their running instance).
+        """
+        prepare = {"source": prepare_source_class, "rule": prepare_rule_class, "output": prepare_output_class}[plugin_type]
+        instances: dict[str, object] = {}
+        errors: dict[str, str] = {}
+        for plugin_id, cls in classes.items():
+            try:
+                instances[plugin_id] = prepare(cls)()
+            except Exception as exc:
+                errors[plugin_id] = f"{type(exc).__name__}: {exc}"
+                logger.exception("%s '%s' could not be created; the running one is kept", plugin_type, plugin_id)
+        return instances, errors
+
     def reload_rule_plugins(
         self,
         *,
         replacements: dict[str, type[Rule]],
         removed_rule_ids: set[str] | None = None,
-    ) -> None:
+        prepared: Mapping[str, Rule] | None = None,
+        evaluate: bool = True,
+    ) -> dict[str, str]:
+        """Replace and remove rules; returns the error of each rule that could not be created.
+
+        A rule that cannot be created keeps its running instance. With evaluate=False
+        the reloaded rules are not judged here: the runtime calls evaluate_reloaded_rules()
+        once the sources and outputs of the same reload are in place.
+        """
+        instances, errors = self._prepared_instances("rule", replacements, prepared)
         with self._lock:
             old_rules = dict(self.rules)
             removed_rule_ids = set(removed_rule_ids or ())
@@ -631,20 +704,43 @@ class Engine:
                 self.alerts.pop(rule_id, None)
                 self.acknowledgements.pop(rule_id, None)
                 self._rule_evaluations.pop(rule_id, None)
+                self._recovered_at.pop(rule_id, None)
+                for open_rules in self._open_by_output.values():
+                    open_rules.pop(rule_id, None)
                 self.rules.pop(rule_id, None)
                 self._rule_registry.pop(rule_id, None)
 
-            for rule_id, rule_cls in replacements.items():
-                self._rule_registry[rule_id] = rule_cls
+            for rule_id, rule in instances.items():
+                self._rule_registry[rule_id] = replacements[rule_id]
                 self._rule_evaluations.pop(rule_id, None)
-                rule = rule_cls()
                 self._configure_rule(rule)
                 self.rules[rule_id] = rule
+                status = self._plugin_status("rule", rule_id)
+                # What the old code's evaluate() did is not the new code's: its next evaluation tells.
+                status.last_error = status.last_error_detail = status.warning = None
 
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
             self._refresh_rule_plugin_resolution_status()
-            self._evaluate_reloaded_rules(replacements)
+            if evaluate:
+                self._evaluate_reloaded_rules(instances)
+        return errors
+
+    def evaluate_reloaded_rules(self, rule_ids: Iterable[str]) -> None:
+        """Judge these rules now with the last values of their sources (see _evaluate_reloaded_rules)."""
+        with self._lock:
+            self._evaluate_reloaded_rules(rule_ids)
+
+    def _prepared_instances(
+        self,
+        plugin_type: str,
+        replacements: Mapping[str, type],
+        prepared: Mapping[str, object] | None,
+    ) -> tuple[dict[str, object], dict[str, str]]:
+        """The new instances of a reload: those given, else created here."""
+        if prepared is not None:
+            return {plugin_id: prepared[plugin_id] for plugin_id in replacements if plugin_id in prepared}, {}
+        return self.prepare_plugins(plugin_type, replacements)
 
     def _evaluate_reloaded_rules(self, rule_ids: Iterable[str]) -> None:
         """Judge reloaded rules at once with the values their sources gave last.
@@ -672,7 +768,10 @@ class Engine:
         *,
         replacements: dict[str, type[Output]],
         removed_output_ids: set[str] | None = None,
-    ) -> None:
+        prepared: Mapping[str, Output] | None = None,
+    ) -> dict[str, str]:
+        """Replace and remove outputs; returns the error of each output that could not be created."""
+        instances, errors = self._prepared_instances("output", replacements, prepared)
         closing: dict[str, OutputWorker] = {}
         inits: list[Future] = []
         with self._lock:
@@ -686,26 +785,35 @@ class Engine:
                 if worker is not None:
                     closing[output_id] = worker
 
-            for output_id, output_cls in replacements.items():
-                self._output_registry[output_id] = output_cls
+            for output_id, output in instances.items():
+                self._output_registry[output_id] = replacements[output_id]
                 # On the output's thread: terminate the old instance, init the new one;
                 # events still queued are then sent by the new one.
-                inits.append(self._install_output(output_id, output_cls()))
+                inits.append(self._install_output(output_id, output))
 
             self._refresh_rule_resolutions()  # which outputs each rule reaches
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
         self._close_output_workers(closing)
         _wait_for(inits, OUTPUT_INIT_WAIT_SECONDS)
+        return errors
 
     def reload_source_plugins(
         self,
         *,
         replacements: dict[str, type[Source]],
         removed_source_ids: set[str] | None = None,
-    ) -> None:
+        prepared: Mapping[str, Source] | None = None,
+        start_sources: bool = True,
+    ) -> dict[str, str]:
+        """Replace and remove sources; returns the error of each source that could not be created.
+
+        With start_sources (an engine without a runtime) the old instances are terminated
+        and the new ones initialized here. The runtime passes start_sources=False: each
+        source's thread calls init(), poll(), and terminate() of its own instance.
+        """
+        instances, errors = self._prepared_instances("source", replacements, prepared)
         stopping: list[Source] = []
-        starting: list[Source] = []
         with self._lock:
             removed_source_ids = set(removed_source_ids or ())
             for source_id in removed_source_ids:
@@ -715,26 +823,35 @@ class Engine:
                 if source is not None:
                     stopping.append(source)
 
-            for source_id, source_cls in replacements.items():
+            for source_id, source in instances.items():
                 existing = self.sources.get(source_id)
                 if existing is not None:
                     stopping.append(existing)
-                self._source_registry[source_id] = source_cls
-                source = source_cls()
+                self._source_registry[source_id] = replacements[source_id]
                 self.sources[source_id] = source
                 self.source_states.setdefault(source_id, SourceState(source_id=source_id))
-                starting.append(source)
+                # The new instance has not run init() yet (the old one's status said it had).
+                self._plugin_status("source", source_id).init_ok = False
 
             self._refresh_rule_resolutions()
             self._rebuild_plugin_states()
             self._sync_plugin_definition_files()
             self._refresh_rule_plugin_resolution_status()
-        # The runtime has stopped these sources' threads. terminate() and init() may
-        # connect somewhere, so they run without the lock.
+        if not start_sources:
+            return errors
+        # terminate() and init() may connect somewhere, so they run without the lock.
         for source in stopping:
-            self._terminate_source(source)
-        for source in starting:
-            self._initialize_source(source)
+            if source_initialized(source):
+                try:
+                    self._terminate_source(source, record=False)
+                except Exception:
+                    logger.exception("source '%s' terminate failed during reload", source.source_id)
+        for source in instances.values():
+            try:
+                self._initialize_source(source)
+            except Exception:
+                logger.exception("source '%s' init failed during reload", source.source_id)
+        return errors
 
     def acknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
         with self._lock:
@@ -852,6 +969,7 @@ class Engine:
         start_at, end_at = coerce_datetime(start_at), coerce_datetime(end_at)  # local time without a zone
         if end_at <= start_at:
             raise ValueError("silence end_at must be later than start_at")
+        rule_patterns, tags = _silence_targets(rule_patterns, "rule_patterns"), _silence_targets(tags, "tags")
         if not (rule_patterns or tags):
             raise ValueError("silence requires at least one rule pattern or tag")
         # Imported (remote) alarms are silenced at their peers first, over the network.
@@ -952,8 +1070,8 @@ class Engine:
         rule_patterns: list[str] | None = None,
         tags: list[str] | None = None,
     ) -> list[str]:
-        patterns = list(rule_patterns or [])
-        silence_tags = set(tags or [])
+        patterns = _silence_targets(rule_patterns, "rule_patterns")
+        silence_tags = set(_silence_targets(tags, "tags"))
         if not patterns and not silence_tags:
             return []
 
@@ -1033,12 +1151,14 @@ class Engine:
             rule = self.rules[rule_id]
             current_time = now or self._now_fn()
             preview_states = self._build_test_evaluate_source_states(rule, payload, current_time)
+            judge = self._preview_rule(rule)
             trigger_source_id = next(iter(getattr(rule, "resolved_sources", []) or [getattr(rule, "source", "")]), "")
             source_state = preview_states.get(trigger_source_id, SourceState(source_id=trigger_source_id))
             original_source_states = self.source_states
             self.source_states = preview_states
             try:
-                alert = self._evaluate_rule_preview(rule, source_state.current.payload, source_state, current_time)
+                with discarding_changes():  # what it adds to a kanary.Buffer is dropped
+                    alert = self._evaluate_rule_preview(judge, source_state.current.payload, source_state, current_time)
             finally:
                 self.source_states = original_source_states
             event = AlertEvent(
@@ -1067,6 +1187,21 @@ class Engine:
                 "matched_outputs": matched_outputs,
                 "would_emit_outputs": would_emit_outputs,
             }
+
+    def _preview_rule(self, rule: Rule) -> Rule:
+        """A copy of the rule for test-evaluate: what it changes on self stays out of the live rule.
+
+        A deep copy judges with the state the live rule has now (counters, last values);
+        a rule that cannot be copied (it holds a lock or a connection) is judged by a
+        new instance of its class, as just after a reload.
+        """
+        try:
+            return copy.deepcopy(rule)
+        except Exception as exc:
+            logger.info("test-evaluate of rule '%s' uses a new instance (it cannot be copied: %s)", rule.rule_id, exc)
+            fresh = prepare_rule_class(type(rule))()
+            self._configure_rule(fresh)
+            return fresh
 
     def test_evaluate_template(self, rule_id: str) -> dict[str, object]:
         with self._lock:
@@ -1180,6 +1315,7 @@ class Engine:
                 transition=None,
                 alert=alert,
                 occurred_at=current_time,
+                synthetic=True,
             )
             logger.info("test fire requested: rule=%s state=%s reason=%s", rule.rule_id, state.value, reason or "-")
             dispatch = self._emit_alert_event(event, first=True)
@@ -1399,17 +1535,9 @@ class Engine:
                 raise ValueError(f"input '{name}' needs its source: write '<source_id>:{name}' (rule '{rule.rule_id}' reads {read})")
             current_inputs = grouped.setdefault(source_id, {}).setdefault("current", {}).setdefault("inputs", {})
             previous_inputs = grouped[source_id].setdefault("previous", {}).setdefault("inputs", {})
-            current_inputs[input_name] = {
-                "value": raw.get("value"),
-                "timestamp": _coerce_test_timestamp(raw.get("timestamp")),
-                "metadata": dict(raw.get("metadata", {})) if isinstance(raw.get("metadata", {}), Mapping) else {},
-            }
+            current_inputs[input_name] = _test_input(raw.get("value"), raw.get("timestamp"), raw.get("metadata", {}))
             if "prev_value" in raw or "prev_timestamp" in raw or "prev_metadata" in raw:
-                previous_inputs[input_name] = {
-                    "value": raw.get("prev_value"),
-                    "timestamp": _coerce_test_timestamp(raw.get("prev_timestamp")),
-                    "metadata": dict(raw.get("prev_metadata", {})) if isinstance(raw.get("prev_metadata", {}), Mapping) else {},
-                }
+                previous_inputs[input_name] = _test_input(raw.get("prev_value"), raw.get("prev_timestamp"), raw.get("prev_metadata", {}))
         for payloads in grouped.values():
             current_payload = payloads.setdefault("current", {})
             current_payload["status"] = status
@@ -1505,7 +1633,7 @@ class Engine:
         evaluation: Evaluation,
         now: datetime,
     ) -> _RuleEvaluation:
-        if self._judged_firing(rule.rule_id) and evaluation.state != AlertState.FIRING:
+        if self._judged_firing(rule.rule_id) and evaluation.state == AlertState.OK:
             self._recovered_at[rule.rule_id] = now
         previous = self._rule_evaluations.get(rule.rule_id)
         if previous is None:
@@ -1520,13 +1648,11 @@ class Engine:
                     evaluated_at=now,
                     active_since=existing.active_since,
                 )
-        active_since = (
-            previous.active_since
-            if evaluation.state == AlertState.FIRING
-            and previous is not None
-            and previous.state == AlertState.FIRING
-            else now if evaluation.state == AlertState.FIRING else None
-        )
+        # Any judgment but OK goes on with the alert: a RemoteAlarm judges the remote
+        # state, which may be ACKED, SILENCED, or SUPPRESSED there.
+        active = evaluation.state != AlertState.OK
+        continuing = active and previous is not None and previous.state != AlertState.OK and previous.active_since is not None
+        active_since = previous.active_since if continuing else now if active else None
         stored = _RuleEvaluation(
             state=evaluation.state,
             payload=dict(evaluation.payload or {}),
@@ -1537,6 +1663,29 @@ class Engine:
         )
         self._rule_evaluations[rule.rule_id] = stored
         return stored
+
+    def _close_acknowledgement(self, rule: Rule, evaluation: _RuleEvaluation) -> Acknowledgement | None:
+        """An ack belongs to one alert: it ends when the rule itself judges that alert over.
+
+        Also while a silence or a parent hides the recovery, so the next alert of the
+        rule is not shown as acknowledged by whoever acknowledged the last one. Only OK
+        ends it: a RemoteAlarm judges the remote state, which may be ACKED or SILENCED.
+        """
+        if evaluation.state != AlertState.OK:
+            return None
+        return self.acknowledgements.pop(rule.rule_id, None)
+
+    def _record_closed_acknowledgement(self, rule: Rule, closed: Acknowledgement | None, now: datetime) -> None:
+        """Keep an ack that ended without an OK event in the history (and for a restart)."""
+        alert = self.alerts.get(rule.rule_id)
+        if closed is None or alert is None or alert.state == AlertState.OK:
+            return  # the OK event shows the end of the alert, and of its ack
+        self.store.record_unacknowledgement(
+            rule_id=rule.rule_id,
+            operator="system",
+            reason=f"the rule recovered while {alert.state.value}; the ack by {closed.operator} ended with its alert",
+            created_at=now,
+        )
 
     def _apply_effective_evaluation(
         self,
@@ -1619,22 +1768,27 @@ class Engine:
         return ordered
 
     def _judged_firing(self, rule_id: str) -> bool:
-        """The rule's own last judgment is FIRING, whatever silence, an ack, or a parent show of it."""
+        """The rule's own last judgment is an alert, whatever silence, an ack, or a parent show of it.
+
+        That is FIRING for a rule; a RemoteAlarm also judges ACKED, SILENCED, or SUPPRESSED
+        when the remote alert is: it is still an alert.
+        """
         evaluation = self._rule_evaluations.get(rule_id)
-        return evaluation is not None and evaluation.state == AlertState.FIRING
+        return evaluation is not None and evaluation.state != AlertState.OK
 
     def _holding_parents(self, rule: Rule, parent_ids: Iterable[str]) -> list[str]:
         """The parents (suppressed_by or depends_on) that hold the rule back now.
 
-        A parent holds it while its own judgment is FIRING, and after that until the
-        rule's sources give a value read after the parent recovered: the values read
-        during the trouble (a link down, a power cut) would judge the rule wrongly.
+        A parent holds it while its own judgment is FIRING, and after that until each
+        of the rule's sources gives a value read after the parent recovered: the values
+        read during the trouble (a link down, a power cut) would judge the rule wrongly.
+        A source that has given no value at all has none from the trouble either.
         """
         parent_ids = list(parent_ids)
         if not parent_ids:
             return []
         holding = [parent_id for parent_id in parent_ids if self._judged_firing(parent_id)]
-        newest = max(
+        oldest = min(
             (
                 state.current.observed_at
                 for source_id in getattr(rule, "resolved_sources", [])
@@ -1642,10 +1796,10 @@ class Engine:
             ),
             default=None,
         )
-        if newest is not None:
+        if oldest is not None:
             for parent_id in parent_ids:
                 recovered_at = self._recovered_at.get(parent_id)
-                if parent_id not in holding and recovered_at is not None and newest < recovered_at:
+                if parent_id not in holding and recovered_at is not None and oldest < recovered_at:
                     holding.append(f"{parent_id} (recovered; waiting for a new value)")
         return holding
 
@@ -1780,9 +1934,24 @@ class Engine:
         filtered_output_ids: list[str] = []
         uninitialized_output_ids: list[str] = []
         emit_skipped_output_ids: list[str] = []
-        targets: list[tuple[str, OutputWorker]] = []
+        targets: list[tuple[str, OutputWorker, AlertEvent]] = []
         for output_id, output in self.outputs.items():
-            if not output.matches(event):
+            open_rules = self._open_by_output.setdefault(output_id, {})
+            sent = event
+            if not first and event.current_state == AlertState.OK:
+                if event.rule_id not in open_rules:
+                    # This output was sent nothing but OK for the rule: there is nothing to close.
+                    filtered_output_ids.append(output_id)
+                    logger.debug(
+                        "output '%s' skipped for rule '%s': OK, and it was sent no alert to close",
+                        output_id,
+                        event.rule_id,
+                    )
+                    continue
+                # The OK closes the alert this output was sent: it has that alert's severity,
+                # also when the alert went down to a severity the output does not take.
+                sent = dataclasses.replace(event, previous_severity=open_rules[event.rule_id])
+            if not output.matches(sent):
                 filtered_output_ids.append(output_id)
                 logger.debug(
                     "output '%s' skipped for rule '%s': event does not match output filters",
@@ -1791,20 +1960,10 @@ class Engine:
                 )
                 continue
             if not first:  # a test fire is not part of the rule's story
-                open_rules = self._open_by_output.setdefault(output_id, set())
                 if event.current_state == AlertState.OK:
-                    if event.rule_id not in open_rules:
-                        # This output was sent nothing but OK for the rule: there is nothing to close.
-                        filtered_output_ids.append(output_id)
-                        logger.debug(
-                            "output '%s' skipped for rule '%s': OK, and it was sent no alert to close",
-                            output_id,
-                            event.rule_id,
-                        )
-                        continue
-                    open_rules.discard(event.rule_id)
+                    del open_rules[event.rule_id]
                 else:
-                    open_rules.add(event.rule_id)
+                    open_rules[event.rule_id] = event.current_severity
             matched_output_ids.append(output_id)
             worker = self._output_workers.get(output_id)
             if worker is None:  # being removed
@@ -1814,7 +1973,7 @@ class Engine:
             if not self.output_emit_enabled:
                 emit_skipped_output_ids.append(output_id)
                 continue
-            targets.append((output_id, worker))
+            targets.append((output_id, worker, sent))
 
         dispatch = _Dispatch(
             self,
@@ -1823,10 +1982,10 @@ class Engine:
             filtered=filtered_output_ids,
             uninitialized=uninitialized_output_ids,
             emit_skipped=emit_skipped_output_ids,
-            pending=[output_id for output_id, _worker in targets],
+            pending=[output_id for output_id, _worker, _sent in targets],
         )
-        for output_id, worker in targets:
-            deliver = partial(self._deliver_event, output_id, event, dispatch)
+        for output_id, worker, sent in targets:
+            deliver = partial(self._deliver_event, output_id, sent, dispatch)
             if first:
                 worker.post(deliver)
             else:
@@ -2158,12 +2317,19 @@ class Engine:
         logger.error("output '%s' failed: %s", output_id, last_exc)
         return False
 
-    def record_source_failure(self, source_id: str, error: str, *, now: datetime | None = None) -> None:
+    def record_source_failure(
+        self,
+        source_id: str,
+        error: str,
+        *,
+        now: datetime | None = None,
+        detail: str | None = None,
+    ) -> None:
         when = now or self._now_fn()
         status = self._plugin_status("source", source_id)
         self._set_plugin_failed(status)
         status.last_error = error
-        status.last_error_detail = None
+        status.last_error_detail = detail
         status.run_count += 1
         status.last_run_at = when
         status.last_failure_at = when
@@ -2173,6 +2339,7 @@ class Engine:
         status = self._plugin_status("source", source.source_id)
         try:
             self._call_source_init(source)
+            source._kanary_initialized = True  # this instance: terminate() is due
             self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
@@ -2180,6 +2347,7 @@ class Engine:
             status.last_success_at = self._now_fn()
             status.last_updated_at = status.last_success_at
         except Exception as exc:
+            source._kanary_initialized = False
             self._set_plugin_failed(status)
             status.init_ok = False
             status.last_error = str(exc)
@@ -2188,12 +2356,15 @@ class Engine:
             status.last_updated_at = status.last_failure_at
             raise
 
-    def _terminate_source(self, source: Source) -> None:
+    def _terminate_source(self, source: Source, *, record: bool = True) -> None:
+        """terminate(); a failure is shown on the source's status unless record is False
+        (an instance that a reload replaced: the status is its successor's now)."""
+        source._kanary_initialized = False
         try:
             self._call_source_terminate(source)
         except Exception as exc:
             # A removed source has no status any more: do not bring one back for it.
-            status = self.plugin_states.get(self._plugin_key("source", source.source_id))
+            status = self.plugin_states.get(self._plugin_key("source", source.source_id)) if record else None
             if status is not None:
                 self._set_plugin_failed(status)
                 status.last_error = str(exc)
@@ -2250,7 +2421,9 @@ class Engine:
                     source_payload,
                 )
                 stored_evaluation = self._store_rule_evaluation(rule, evaluation, now)
+                closed = self._close_acknowledgement(rule, stored_evaluation)
                 self._apply_effective_evaluation(rule, stored_evaluation, now)
+                self._record_closed_acknowledgement(rule, closed, now)
             self._set_plugin_ready(status)
             status.init_ok = True
             status.last_error = None
@@ -2289,10 +2462,7 @@ class Engine:
                 payload=dict(source_payload),
                 message=f"blocked by {', '.join(blocking)} (not evaluated)",
             )
-        evaluation = rule.normalize_evaluation(
-            self._call_rule_evaluate(rule, self._rule_context(rule, now)),
-            source_payload,
-        )
+        evaluation = rule.normalize_evaluation(rule.evaluate(self._rule_context(rule, now)), source_payload)
         severity = evaluation.severity or rule.severity
         suppressing = self._holding_parents(rule, rule.suppressed_by)
         if suppressing:

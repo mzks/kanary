@@ -87,7 +87,7 @@ def poll(self):
 
 外部 API の一時的な通信失敗は、通常は例外として送出します。Kanary が Source の retry / reinit と plugin status を扱います。失敗を `no_data()` に変換すると、通信失敗と正常な空結果を区別できなくなります。
 
-起動時の`init()`に失敗したSourceは実行threadを開始せず、現在は自動復旧しません。依存先の復旧後に明示reloadまたはprocess restartが必要です。Ruleの`evaluate()`例外は監視対象のAlertを自動的に`FIRING`にはせず、そのRule pluginを`FAILED`にします。
+起動時の`init()`に失敗したSourceは`FAILED`になり、そのSource自身のthreadが成功するまで`init()`をやり直します（`interval`ごと、最長でも1分おき）。依存先が戻れば、reloadやprocess restartをしなくても使い始めます。`poll()`がpoll結果以外を返した場合は通信失敗ではなくSourceのbugなので再試行せず、理由とともに`FAILED`と表示して、次のintervalで再びpollします。Ruleの`evaluate()`例外は監視対象のAlertを自動的に`FIRING`にはせず、そのRule pluginを`FAILED`にします。
 
 ### 外部 I/O、timestamp、poll 間隔
 

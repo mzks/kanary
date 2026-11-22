@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 from ..models import AlertEvent, PollResult
 from ..output import Output, event_record
 from ..source import Source, inputs, no_data
-from ..values import flatten, get_path, to_number
+from ..values import flatten, get_path, json_ready, to_number
 from .notice import cut, describe, digest, summary
 
 _USER_AGENT = "kanary"
@@ -107,7 +107,7 @@ class WebhookOutput(Output):
         """POST body as JSON to url; raises on an HTTP error."""
         request = Request(
             str(self.url),
-            data=json.dumps(body, ensure_ascii=False, default=str).encode(),
+            data=json.dumps(json_ready(body), ensure_ascii=False, default=str).encode(),
             headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT, **self.headers},
             method="POST",
         )

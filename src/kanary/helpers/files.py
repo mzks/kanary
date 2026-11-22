@@ -13,7 +13,7 @@ from ..models import AlertEvent, PollResult
 from ..output import Output, event_record
 from ..plugin_files import path_beside_plugin
 from ..source import Source, inputs
-from ..values import to_number
+from ..values import json_ready, to_number
 
 
 class FileSource(Source):
@@ -242,6 +242,6 @@ class FileOutput(Output):
         return record
 
     def emit(self, event: AlertEvent) -> None:
-        line = json.dumps(self.record(event), ensure_ascii=False, default=str)
+        line = json.dumps(json_ready(self.record(event)), ensure_ascii=False, default=str)
         with self._file.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")

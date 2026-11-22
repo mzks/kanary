@@ -1,5 +1,5 @@
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -267,8 +267,8 @@ class Rule:
             normalized_payload = dict(payload) if result.payload is None else dict(result.payload)
             if result.extra:
                 normalized_payload.update(result.extra)
-            result.payload = normalized_payload
-            return result
+            # A new object: a rule may return the same Evaluation every time (a constant).
+            return replace(result, payload=normalized_payload)
         if result is None:
             return Evaluation(state=OK, payload=dict(payload))
         if isinstance(result, bool):

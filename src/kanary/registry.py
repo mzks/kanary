@@ -4,10 +4,10 @@ import difflib
 import inspect
 from typing import Any
 
-from .constants import ERROR, Severity, coerce_severity
+from .constants import ERROR, AlertState, Severity, TransitionKind, coerce_severity
 from .output import Output, _DEFAULT_EXCLUDED_STATES
 from .rule import Rule
-from .schedule import parse_schedule
+from .schedule import every_seconds, parse_schedule
 from .selectors import normalize_rule_inputs
 from .source import Source
 
@@ -278,6 +278,16 @@ def prepare_source_class(cls: type[Any]) -> type[Any]:
     for name in ("init", "poll", "terminate"):
         _check_method("source", source_id, getattr(cls, name), f"{name}(self)", arity=0, removed="the ctx argument")
 
+    schedule = getattr(cls, "schedule", None)
+    try:
+        every = every_seconds(schedule)
+    except ValueError as exc:
+        raise ValueError(f"source '{source_id}' schedule is invalid: {exc}") from None
+    if every is not None:
+        # schedule="@every 5m" (as in robfig/cron) is another way to write interval = 300.
+        if cls.__dict__.get("interval") is not None and cls.__dict__.get("schedule") is not None:
+            raise ValueError(f"source '{source_id}' must not define both interval and schedule")
+        cls.interval, cls.schedule = every, None
     interval = getattr(cls, "interval", None)
     schedule = getattr(cls, "schedule", None)
     if interval is not None and schedule is not None:
@@ -335,6 +345,11 @@ def prepare_output_class(cls: type[Any]) -> type[Any]:
         _minimum_severity(getattr(cls, "minimum_severity", None))
     except Exception as exc:
         raise ValueError(f"output '{output_id}' has invalid minimum_severity: {exc}") from exc
+    # One name may be written as a string; state and transition names in any case.
+    for attr_name in ("include_tags", "exclude_tags"):
+        setattr(cls, attr_name, _name_list(output_id, attr_name, getattr(cls, attr_name)))
+    cls.exclude_states = _choice_list(output_id, "exclude_states", cls.exclude_states, AlertState)
+    cls.exclude_transitions = _choice_list(output_id, "exclude_transitions", cls.exclude_transitions, TransitionKind)
     for attr_name in ("max_retry", "max_reinit"):
         value = getattr(cls, attr_name, None)
         if not isinstance(value, int) or value < 0:
@@ -365,6 +380,27 @@ def _setdefault(cls: type[Any], attr_name: str, value: Any) -> None:
     if hasattr(cls, attr_name):
         return
     setattr(cls, attr_name, value)
+
+
+def _name_list(plugin_id: str, attr_name: str, value: Any) -> list[str]:
+    """A list of names: one name may be written as a string ("infra" is ["infra"])."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set, frozenset)) and all(isinstance(item, str) for item in value):
+        return list(value)
+    raise ValueError(f"output '{plugin_id}' {attr_name} must be a name or a list of names, not {value!r}")
+
+
+def _choice_list(plugin_id: str, attr_name: str, value: Any, choices: type[Any]) -> list[str]:
+    """State or transition names, upper case; an unknown name is an error (it would never match)."""
+    names = [name.strip().upper() for name in _name_list(plugin_id, attr_name, value)]
+    known = [choice.value for choice in choices]
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise ValueError(f"output '{plugin_id}' {attr_name} has unknown names {unknown}: use {', '.join(known)}")
+    return names
 
 
 def _minimum_severity(value: Severity | str | None) -> Severity | None:

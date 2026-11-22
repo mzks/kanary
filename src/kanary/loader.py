@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import sys
@@ -112,7 +113,7 @@ class RuleDirectoryLoader:
         return sorted(files)
 
     def _load_file(self, module_name: str, path: Path) -> ModuleType:
-        spec = spec_from_file_location(module_name, path)
+        spec = spec_from_file_location(module_name, path, loader=_FreshSourceLoader(module_name, str(path)))
         if spec is None or spec.loader is None:
             raise ImportError(f"failed to load rule file: {path}")
 
@@ -125,6 +126,17 @@ class RuleDirectoryLoader:
                 f"failed to load plugin file '{path}': {type(exc).__name__}: {exc}"
             ) from exc
         return module
+
+
+class _FreshSourceLoader(SourceFileLoader):
+    """Compile a plugin file from its text on disk every time, without __pycache__.
+
+    The bytecode cache is checked by the file's mtime in whole seconds and its size,
+    so an edit within the same second that keeps the size would run the old code.
+    """
+
+    def get_code(self, fullname: str):
+        return self.source_to_code(self.get_data(self.path), self.path)
 
 
 def _format_validation_errors(report: ValidationReport) -> str:

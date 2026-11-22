@@ -110,9 +110,14 @@ class RemoteKanarySource(Source):
             return json.loads(response.read().decode())
 
     def _base_url(self) -> str:
+        """base_url (url is another name for it); a URL that ends with alerts_path is taken without it."""
         base_url = self.base_url or self.url
         if not isinstance(base_url, str) or not base_url:
             raise RuntimeError(f"{type(self).__name__} must define non-empty base_url")
+        base_url = base_url.rstrip("/")
+        alerts_path = "/" + self.alerts_path.strip("/")
+        if base_url.endswith(alerts_path):
+            base_url = base_url[: -len(alerts_path)]
         return base_url
 
 
@@ -269,8 +274,9 @@ def _coerce_severity(value: Any) -> Severity | None:
 
 
 def _compose_local_rule_id(remote_alarm_id: str, *, prefix: str | None, suffix: str | None) -> str:
-    parts = [part for part in [prefix, remote_alarm_id, suffix] if part]
-    return ".".join(parts)
+    """prefix.remote_id.suffix; prefix="remote." and prefix="remote" give the same id."""
+    parts = [(prefix or "").rstrip("."), remote_alarm_id, (suffix or "").lstrip(".")]
+    return ".".join(part for part in parts if part)
 
 
 def _generated_class_name(local_rule_id: str) -> str:

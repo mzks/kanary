@@ -56,7 +56,7 @@ class _EventFollowups:
         callback: Callable[[AlertEvent], None] | None = None,
     ) -> None:
         """Cancel all followups for this event, or only one callback."""
-        self._owner._cancel(self._event.rule_id, callback)
+        self._owner._cancel(_episode_key(self._event), callback)
 
 
 class OutputFollowups:
@@ -76,7 +76,7 @@ class OutputFollowups:
         self._bind()
         with self._condition:
             self._ensure_open()
-            episode = self._episodes.get(event.rule_id)
+            episode = self._episodes.get(_episode_key(event))
             if episode is not None:
                 episode.event = event
         return _EventFollowups(self, event)
@@ -145,12 +145,13 @@ class OutputFollowups:
             raise TypeError("followup callback must be callable")
 
         self._bind()
+        key = _episode_key(event)
         with self._condition:
             self._ensure_open()
-            episode = self._episodes.get(event.rule_id)
+            episode = self._episodes.get(key)
             if episode is None:
                 episode = _FollowupEpisode(started_at=time.monotonic(), event=event)
-                self._episodes[event.rule_id] = episode
+                self._episodes[key] = episode
             else:
                 episode.event = event
 
@@ -162,7 +163,7 @@ class OutputFollowups:
             )
             heapq.heappush(
                 self._heap,
-                (episode.started_at + delay_seconds, sequence, event.rule_id),
+                (episode.started_at + delay_seconds, sequence, key),
             )
             if self._output_worker is None:
                 self._start_worker()
@@ -269,6 +270,11 @@ class OutputFollowups:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("OutputFollowups is closed")
+
+
+def _episode_key(event: AlertEvent) -> str:
+    """Followups of a rule; a test fire's are kept apart, so it never cancels the real ones."""
+    return f"{event.rule_id}\0test-fire" if getattr(event, "synthetic", False) else event.rule_id
 
 
 def _callback_key(callback: Callable[[AlertEvent], None]) -> tuple[int, int]:

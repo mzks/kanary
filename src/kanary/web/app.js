@@ -1542,15 +1542,23 @@ async function submitAdminWindowSilence() {
 
 async function reloadDirtyPlugins() {
   await runPendingAction("reload-dirty", ["admin-reload-dirty-button"], async () => {
-    await postJson("/reload", { dirty: true });
-    await refreshAll();
+    // A partial reload answers with an error: show it, and what did change.
+    try {
+      await postJson("/reload", { dirty: true });
+    } finally {
+      await refreshAll();
+    }
   });
 }
 
 async function reloadAllPlugins() {
   await runPendingAction("reload-all", ["admin-reload-all-button"], async () => {
-    await postJson("/reload", { all: true });
-    await refreshAll();
+    // A partial reload answers with an error: show it, and what did change.
+    try {
+      await postJson("/reload", { all: true });
+    } finally {
+      await refreshAll();
+    }
   });
 }
 
@@ -1562,15 +1570,23 @@ async function restartEngine() {
     return;
   }
   await runPendingAction("reload-full", ["admin-restart-engine-button"], async () => {
-    await postJson("/reload", { full: true });
-    await refreshAll();
+    // A partial reload answers with an error: show it, and what did change.
+    try {
+      await postJson("/reload", { full: true });
+    } finally {
+      await refreshAll();
+    }
   });
 }
 
 async function applyPlugin(pluginType, pluginId) {
   await runPendingAction(`apply-${pluginType}-${pluginId}`, [], async () => {
-    await postJson("/reload", { [pluginType]: pluginId });
-    await refreshAll();
+    // A partial reload answers with an error: show it, and what did change.
+    try {
+      await postJson("/reload", { [pluginType]: pluginId });
+    } finally {
+      await refreshAll();
+    }
   });
 }
 
@@ -1714,7 +1730,12 @@ function formatPluginRuntime(plugin) {
   // Outputs send on their own thread: show what is still waiting, and what was dropped.
   const extras = [];
   if (plugin.warning) {
-    extras.push(`<span class="state-pill plugin-state-SLOW" title="${escapeAttribute(plugin.warning)}">SLOW</span>`);
+    // A rule's warning is a slow evaluate(); a source's, a schedule that never runs.
+    const label = plugin.type === "rule" ? "SLOW" : "NOT POLLED";
+    extras.push(`<span class="state-pill plugin-state-SLOW" title="${escapeAttribute(plugin.warning)}">${label}</span>`);
+  }
+  if (plugin.reload_error) {
+    extras.push(`<span class="state-pill plugin-state-FAILED" title="${escapeAttribute(`Not applied, the running one goes on: ${plugin.reload_error}`)}">reload failed</span>`);
   }
   if (plugin.queued > 0) {
     extras.push(`<span class="state-pill plugin-state-QUEUED" title="Events waiting to be sent">${escapeHtml(String(plugin.queued))} queued</span>`);
@@ -2299,6 +2320,9 @@ function pluginInfoRows(plugin) {
   }
   if (plugin.warning) {
     rows.push(["Warning", plugin.warning, false]);
+  }
+  if (plugin.reload_error) {
+    rows.push(["Reload Error", `Not applied, the running one goes on: ${plugin.reload_error}`, false]);
   }
   if (plugin.last_error) {
     rows.push(["Last Error", plugin.last_error, false]);

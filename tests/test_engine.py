@@ -3039,6 +3039,7 @@ class RuntimeRecoveryTest(unittest.TestCase):
             source.init_calls = 1
             source.poll_calls = 0
             result = runtime._poll_source_with_recovery(
+                engine,
                 "recover.source",
                 source,
                 datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc),

@@ -40,21 +40,26 @@ Typical checks:
 
 ## Reload
 
-Plugin directories are watched continuously and reloaded automatically on change.
+Plugin directories are watched continuously and changes are detected automatically. With the default `--auto-reload off`, they are applied explicitly with `kanaryctl reload ...` (`--auto-reload dirty` or `all` applies them on detection).
 
 ```text
-file change
+file change detected
   ↓
-load rules
+load and validate every plugin file
   ↓
-validation
+mark plugins dirty
   ↓
-build registry
+explicit reload or auto-reload
   ↓
-atomic swap
+create every replacement
+  ↓
+targeted replace
 ```
 
-If reload fails, the previous registry stays active.
+What a failure keeps depends on the stage:
+
+- Loading and validation: if a plugin file does not load or validate, nothing is applied and every running plugin goes on (`reload_failed`, with the loader error).
+- Applying: every replacement is created before anything changes. A plugin whose class or `__init__()` fails is not applied, and its running instance goes on with its `reload_error` shown; the others are applied (`partial`). A new source or output whose `init()` fails is applied and keeps trying, as at startup.
 
 ## Repository Layout
 

@@ -1,7 +1,28 @@
+"""Cron schedules for sources: Unix cron, with the common extensions of other implementations.
+
+Accepted, besides the five fields of Unix cron (minute hour day-of-month month day-of-week):
+
+- names of months and weekdays, abbreviated or not, in any case: JAN, january, mon, Tues
+- 0 and 7 are both Sunday; "5/15" is "5-59/15"; a range may wrap ("22-2", "FRI-MON")
+- "?" in the day fields is "*"
+- "L" (last day of the month) and "L-3" (three days before it) in the day of the month
+- "5L" / "FRIL" (the last Friday of the month) and "MON#1" (the first Monday) in the weekday
+- a time zone in front: "CRON_TZ=Asia/Tokyo 0 9 * * *" or "TZ=UTC ..." (anything kanary.to_timezone() reads)
+- the macros @yearly, @annually, @monthly, @weekly, @daily, @midnight, @hourly
+
+As in cron, when both day fields are restricted (neither starts with "*" or "?"), a day
+matches when either does: "0 0 1 * 1" runs on the 1st and on every Monday. "@every 5m"
+is not a schedule but an interval; the source decorator reads it as interval = 300.
+"""
+
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
+import re
+
+from .values import to_timezone
 
 
 _MACROS = {
@@ -13,6 +34,19 @@ _MACROS = {
     "@midnight": "0 0 * * *",
     "@hourly": "0 * * * *",
 }
+_MONTHS = ("JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER")
+_WEEKDAYS = ("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")
+# A schedule should run within this long from now; one that does not never runs.
+_HORIZON = timedelta(days=366 * 5)
+_EVERY = re.compile(r"^@every(?:\s+(.*))?$", re.IGNORECASE)
+_DURATION_PART = re.compile(r"(\d+(?:\.\d*)?|\.\d+)\s*([a-zµ]*)", re.IGNORECASE)
+_DURATION_UNITS = {
+    "": 1.0, "s": 1.0, "sec": 1.0, "secs": 1.0, "second": 1.0, "seconds": 1.0,
+    "ms": 0.001, "us": 1e-6, "µs": 1e-6, "ns": 1e-9,
+    "m": 60.0, "min": 60.0, "mins": 60.0, "minute": 60.0, "minutes": 60.0,
+    "h": 3600.0, "hr": 3600.0, "hrs": 3600.0, "hour": 3600.0, "hours": 3600.0,
+    "d": 86400.0, "day": 86400.0, "days": 86400.0,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,82 +56,219 @@ class CronSchedule:
     hours: frozenset[int]
     days_of_month: frozenset[int]
     months: frozenset[int]
-    weekdays: frozenset[int]
+    weekdays: frozenset[int]  # Sunday = 0
+    any_day_of_month: bool = True
+    any_weekday: bool = True
+    days_before_last: frozenset[int] = frozenset()  # "L" is 0, "L-3" is 3
+    last_weekdays: frozenset[int] = frozenset()  # "5L": the last Friday of the month
+    nth_weekdays: frozenset[tuple[int, int]] = frozenset()  # "MON#1": (1, 1)
+    timezone: tzinfo | None = None  # from CRON_TZ= / TZ=; None: the host's local time
+    never: bool = False  # no such day (Feb 30): the source is not polled
 
     @classmethod
     def parse(cls, expression: str) -> "CronSchedule":
         if not isinstance(expression, str) or not expression.strip():
             raise ValueError("schedule must be a non-empty cron-like string")
-
-        normalized = _MACROS.get(expression.strip().lower(), expression.strip())
+        text = expression.strip()
+        zone = None
+        first, _, rest = text.partition(" ")
+        key, equals, value = first.partition("=")
+        if equals and key.strip().upper() in {"CRON_TZ", "TZ"}:
+            try:
+                zone = to_timezone(value)
+            except ValueError as exc:
+                raise ValueError(f"schedule time zone: {exc}") from None
+            text = rest.strip()
+        if _EVERY.match(text):
+            raise ValueError(f"{text!r} is an interval: write it as the source's interval (the decorator reads schedule='@every ...' as one)")
+        normalized = _MACROS.get(text.lower(), text)
         fields = normalized.split()
         if len(fields) != 5:
             raise ValueError("schedule must use 5 cron fields: minute hour day month weekday")
 
         minute, hour, day_of_month, month, weekday = fields
-        return cls(
+        days, days_before_last = _parse_days_of_month(day_of_month)
+        weekdays, last_weekdays, nth_weekdays = _parse_weekdays(weekday)
+        schedule = cls(
             expression=expression.strip(),
             minutes=frozenset(_parse_field(minute, 0, 59)),
             hours=frozenset(_parse_field(hour, 0, 23)),
-            days_of_month=frozenset(_parse_field(day_of_month, 1, 31)),
-            months=frozenset(_parse_field(month, 1, 12)),
-            weekdays=frozenset(_parse_field(weekday, 0, 7, normalize_weekday=True)),
+            days_of_month=frozenset(days),
+            months=frozenset(_parse_field(month, 1, 12, names=_MONTHS, first=1)),
+            weekdays=frozenset(weekdays),
+            any_day_of_month=day_of_month[0] in "*?",
+            any_weekday=weekday[0] in "*?",
+            days_before_last=frozenset(days_before_last),
+            last_weekdays=frozenset(last_weekdays),
+            nth_weekdays=frozenset(nth_weekdays),
+            timezone=zone,
         )
+        try:
+            schedule.next_after(datetime.now().astimezone())
+        except ValueError:
+            object.__setattr__(schedule, "never", True)
+        return schedule
+
+    @property
+    def both_day_fields(self) -> bool:
+        """Both the day of the month and the weekday are given: either one matching is enough."""
+        return not self.any_day_of_month and not self.any_weekday
 
     def matches(self, dt: datetime) -> bool:
-        weekday = (dt.weekday() + 1) % 7
-        return (
-            dt.minute in self.minutes
-            and dt.hour in self.hours
-            and dt.day in self.days_of_month
-            and dt.month in self.months
-            and weekday in self.weekdays
+        if self.timezone is not None and dt.tzinfo is not None:
+            dt = dt.astimezone(self.timezone)
+        return dt.minute in self.minutes and dt.hour in self.hours and self._day_matches(dt)
+
+    def _day_matches(self, dt: datetime) -> bool:
+        if dt.month not in self.months:
+            return False
+        last_day = calendar.monthrange(dt.year, dt.month)[1]
+        day_of_month = dt.day in self.days_of_month or (last_day - dt.day) in self.days_before_last
+        weekday_number = (dt.weekday() + 1) % 7  # cron counts from Sunday = 0
+        weekday = (
+            weekday_number in self.weekdays
+            or (weekday_number in self.last_weekdays and dt.day + 7 > last_day)
+            or (weekday_number, (dt.day - 1) // 7 + 1) in self.nth_weekdays
         )
+        if self.any_day_of_month or self.any_weekday:
+            return day_of_month and weekday
+        return day_of_month or weekday
 
     def next_after(self, dt: datetime) -> datetime:
+        """The first run after dt (whole minutes), skipping days and hours that cannot match.
+
+        With a time zone of its own the schedule is read in that zone (a naive dt is
+        this host's local time) and the result is in that zone.
+        """
+        if self.timezone is not None:
+            dt = dt.astimezone(self.timezone)
         candidate = dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        deadline = candidate + timedelta(days=366 * 5)
+        deadline = candidate + _HORIZON
         while candidate <= deadline:
-            if self.matches(candidate):
+            if not self._day_matches(candidate):
+                candidate = candidate.replace(hour=0, minute=0) + timedelta(days=1)
+            elif candidate.hour not in self.hours:
+                candidate = candidate.replace(minute=0) + timedelta(hours=1)
+            elif candidate.minute not in self.minutes:
+                candidate += timedelta(minutes=1)
+            else:
                 return candidate
-            candidate += timedelta(minutes=1)
-        raise ValueError(f"schedule {self.expression!r} does not produce a future run within 5 years")
+        raise ValueError(f"schedule {self.expression!r} never runs (no such day)")
 
 
 def parse_schedule(expression: str) -> CronSchedule:
     return CronSchedule.parse(expression)
 
 
-def _parse_field(spec: str, minimum: int, maximum: int, *, normalize_weekday: bool = False) -> set[int]:
+def every_seconds(schedule: object) -> float | None:
+    """The seconds of "@every 5m" (also "@every 1h30m", "@every 90s"); None for anything else."""
+    if not isinstance(schedule, str):
+        return None
+    match = _EVERY.match(schedule.strip())
+    if match is None:
+        return None
+    text = (match.group(1) or "").replace(" ", "")
+    total, position = 0.0, 0
+    for part in _DURATION_PART.finditer(text):
+        if part.start() != position or part.group(2).lower() not in _DURATION_UNITS:
+            break
+        total += float(part.group(1)) * _DURATION_UNITS[part.group(2).lower()]
+        position = part.end()
+    else:
+        if position == len(text) and total > 0:
+            return total
+    raise ValueError(f"{schedule!r}: write the interval as @every 30s, 5m, 1h30m, or 2d")
+
+
+def _parse_days_of_month(spec: str) -> tuple[set[int], set[int]]:
+    """Days of the month, and "L" / "L-n" as days before the last one."""
+    if spec == "?":
+        spec = "*"
+    days: set[int] = set()
+    before_last: set[int] = set()
+    for part in _parts(spec):
+        last = re.fullmatch(r"L(?:-(\d+))?", part, re.IGNORECASE)
+        if last:
+            offset = int(last.group(1) or 0)
+            if offset > 30:
+                raise ValueError(f"cron value {part!r}: L-n counts at most 30 days back")
+            before_last.add(offset)
+            continue
+        days.update(_parse_part(part, 1, 31))
+    return days, before_last
+
+
+def _parse_weekdays(spec: str) -> tuple[set[int], set[int], set[tuple[int, int]]]:
+    """Weekdays (Sunday = 0), "5L" / "FRIL" (the last one of the month), "MON#2" (the second one)."""
+    if spec == "?":
+        spec = "*"
+    weekdays: set[int] = set()
+    last: set[int] = set()
+    nth: set[tuple[int, int]] = set()
+    for part in _parts(spec):
+        if "#" in part:
+            day_text, _, count = part.partition("#")
+            if not count.isdigit() or not 1 <= int(count) <= 5:
+                raise ValueError(f"cron value {part!r}: write the n-th weekday as MON#1 to MON#5")
+            nth.add((_parse_number(day_text, 0, 7, names=_WEEKDAYS, first=0) % 7, int(count)))
+            continue
+        if len(part) > 1 and part[-1] in "Ll" and "/" not in part and "-" not in part:
+            last.add(_parse_number(part[:-1], 0, 7, names=_WEEKDAYS, first=0) % 7)
+            continue
+        if part.upper() == "L":
+            raise ValueError("cron weekday 'L' alone is ambiguous: write the last Friday of the month as 5L or FRIL")
+        weekdays.update(value % 7 for value in _parse_part(part, 0, 7, names=_WEEKDAYS, first=0, cycle=7))
+    return weekdays, last, nth
+
+
+def _parse_field(spec: str, minimum: int, maximum: int, *, names: tuple[str, ...] | None = None, first: int = 0) -> set[int]:
     values: set[int] = set()
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            raise ValueError("empty cron field element is not allowed")
-        values.update(_parse_part(part, minimum, maximum, normalize_weekday=normalize_weekday))
-    if not values:
-        raise ValueError("cron field did not produce any values")
+    for part in _parts(spec):
+        values.update(_parse_part(part, minimum, maximum, names=names, first=first))
     return values
 
 
-def _parse_part(part: str, minimum: int, maximum: int, *, normalize_weekday: bool) -> set[int]:
+def _parts(spec: str) -> list[str]:
+    parts = [part.strip() for part in spec.split(",")]
+    if not all(parts):
+        raise ValueError("empty cron field element is not allowed")
+    return parts
+
+
+def _parse_part(
+    part: str,
+    minimum: int,
+    maximum: int,
+    *,
+    names: tuple[str, ...] | None = None,
+    first: int = 0,
+    cycle: int | None = None,
+) -> set[int]:
+    """One element: "*", "5", "1-5", "22-2" (wraps), each with an optional "/step".
+
+    cycle is the weekdays' 7, where 7 is Sunday again: a range that wraps goes round 0-6.
+    """
     base, step = _split_step(part)
     if step <= 0:
         raise ValueError("cron step must be a positive integer")
-
+    top = maximum if cycle is None else cycle - 1
     if base == "*":
-        numbers = list(range(minimum, maximum + 1))
+        sequence = list(range(minimum, top + 1))
     elif "-" in base:
         start_text, end_text = base.split("-", 1)
-        start = _parse_number(start_text, minimum, maximum, normalize_weekday=normalize_weekday)
-        end = _parse_number(end_text, minimum, maximum, normalize_weekday=normalize_weekday)
-        if start > end:
-            raise ValueError(f"invalid cron range {base!r}")
-        numbers = list(range(start, end + 1))
+        start = _parse_number(start_text, minimum, maximum, names=names, first=first)
+        end = _parse_number(end_text, minimum, maximum, names=names, first=first)
+        if cycle is not None and start > end:
+            start, end = start % cycle, end % cycle  # "7-1" is Sunday to Monday
+        if start <= end:
+            sequence = list(range(start, end + 1))
+        else:  # wraps round the end of the field: 22-2 is 22, 23, 0, 1, 2
+            sequence = list(range(start, top + 1)) + list(range(minimum, end + 1))
     else:
-        numbers = [_parse_number(base, minimum, maximum, normalize_weekday=normalize_weekday)]
-
-    return set(numbers[::step])
+        start = _parse_number(base, minimum, maximum, names=names, first=first)
+        # "5/15" is "5-59/15", from the value to the end of the field; "5" alone is 5.
+        sequence = list(range(start, top + 1)) if "/" in part else [start]
+    return set(sequence[::step])
 
 
 def _split_step(part: str) -> tuple[str, int]:
@@ -112,13 +283,18 @@ def _split_step(part: str) -> tuple[str, int]:
         raise ValueError(f"invalid cron step {step_text!r}") from exc
 
 
-def _parse_number(text: str, minimum: int, maximum: int, *, normalize_weekday: bool) -> int:
+def _parse_number(text: str, minimum: int, maximum: int, *, names: tuple[str, ...] | None = None, first: int = 0) -> int:
+    """A field value, or a month / weekday name: abbreviated or not, any case ("jan", "Tues")."""
+    word = text.strip().upper()
+    if names and len(word) >= 3 and word.isalpha():
+        for index, name in enumerate(names):
+            if name.startswith(word):
+                return index + first
     try:
         value = int(text)
     except ValueError as exc:
-        raise ValueError(f"invalid cron value {text!r}") from exc
-    if normalize_weekday and value == 7:
-        value = 0
+        hint = f" (or a name: {', '.join(name[:3] for name in names)})" if names else ""
+        raise ValueError(f"invalid cron value {text!r}{hint}") from exc
     if value < minimum or value > maximum:
         raise ValueError(f"cron value {value} is outside {minimum}-{maximum}")
     return value

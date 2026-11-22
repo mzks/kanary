@@ -46,7 +46,7 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
 
 ### Write endpoints
 
-存在しない rule や silence を指定した operator の操作は 404 を返します。その alert の今の状態には当てはまらない操作（`FIRING` でない alert の acknowledge、acknowledge されていない alert の unack、cancel 済みの silence の cancel）は 409 を返します。error の応答には `error` の文があります。
+request body は JSON object です。それ以外（JSON でないもの、list、文字列）は 400 を返します。存在しない rule や silence を指定した operator の操作は 404 を返します。その alert の今の状態には当てはまらない操作（`FIRING` でない alert の acknowledge、acknowledge されていない alert の unack、cancel 済みの silence の cancel）は 409 を返します。error の応答には `error` の文があります。
 
 - `POST /alerts/{rule_id}/ack`
   `FIRING` の alert を 1 つ acknowledge します（再起動の後に `FIRING` として復元された alert も含む）。
@@ -57,6 +57,7 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
 - `POST /silences/window`
   start/end を明示した time window で silence を作ります。
   `start_at` と `end_at` は ISO 8601 の時刻で、time zone が無ければ host の local time です。どちらの silence endpoint も、読んだ期間を offset 付きで返します（`start_at`、`end_at`）。
+  `rule_patterns` と `tags` は名前の list です。1 つだけなら文字列でも書けます（`"rule_patterns": "sqlite.*"` は 1 つの pattern）。
 - `POST /silences/{silence_id}/cancel`
   既存の silence を cancel します。
 - `POST /reload`
@@ -71,6 +72,8 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
   `{"all":true}` は watched な Python file に変更が無くても、毎回 full discovery をやり直します。
   `{"full":true}` は discovery 成功後に in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、空 body も受け付けます。この場合は `{"all":true}` と同じ意味です。
+  reload した rule は、同じ reload の source と output が揃ってから評価するので、新しい rule の最初の alert は新しい output にも届きます。
+  応答は `sources` / `rules` / `outputs` ごとに、`matched`、`reloaded`、`removed`、`failed`（class か `__init__()` が失敗したので適用せず、動いている instance がそのまま続く）、`init_failed`（適用したが最初の `init()` が失敗した。やり直し続ける）、`errors`（それぞれの理由）を返します。`status` は、すべて適用できたら `reloaded`、一部だけなら `partial`、何も適用できなかったら `reload_failed` です（plugin file が load や検査に通らない場合も `reload_failed`）。`reloaded` 以外は HTTP 500 で、各 plugin を挙げた `error` 文字列が付きます。
 - `POST /test-poll/{source_id}`
   その source の `test_poll()` を、source の thread で poll と poll の間に実行し、その結果を fully-qualified input name で返します: `{"source_id": "postgres", "status": "ok", "metadata": {...}, "inputs": {"postgres:temperature": {"value": 21.5, "timestamp": "...", "metadata": {}}}}`（`reason` と `metadata` は poll が与えたときだけ）。これはそのまま `POST /test-evaluate/{rule_id}` の payload になります。結果は評価に使わず、source の状態と status も変わらず、通常の poll の予定もずれません。source が動いていない（`init()` に失敗した）場合や、30 秒以内に終わらない場合は 409 を返します。
 - `POST /test-evaluate/{rule_id}`
@@ -80,12 +83,15 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
   - input が 1 つの rule なら `{"value": ..., "timestamp": ..., "prev_value": ...}`。
 
   通常の rule 実装では、`ctx.value()` や `ctx.inputs()` などの accessor を使ってください。
+
+  判定には live rule の copy を使うので、`evaluate()` が `self` に加えた変更（counter や前回値）は live rule に届きません。copy できない rule（lock や接続を持つもの）は新しい instance で判定します。`kanary.Buffer` に加えたものは、test poll と同じく捨てます。
 - `GET /test-evaluate-template/{rule_id}`
   1 つの rule 向けの canonical な `inputs` payload template を返します。単一 input rule の場合は shorthand template も含まれることがあります。
 - `POST /test-fire/{rule_id}`
   live alert state を変更せず、synthetic な state change を output pipeline に流します。
   body には `"state"` か `"evaluation"` のどちらかを書きます。`"evaluation"` は `POST /test-evaluate/{rule_id}` の結果で、event はその state、severity、message、値を持ちます。どちらでも message は `[TEST-FIRE]` で始まります。
   `--no-output-emit`の場合はOutputを呼ばず、matching結果を`emit_skipped_outputs`に返します。
+  event は `event.synthetic = True` を持ちます。`OutputFollowups` と `QuietHours` は、test fire の followup や保留中の event を rule の本物とは分けて持つので、試験の `OK` が live alert の followup を取り消すことはありません。
 
 ## API の考え方
 
@@ -141,6 +147,7 @@ JSON の severity は名前（`"ERROR"`）です。下の request は、大文�
   `--all` は local の Python file に変更が無くても full discovery をやり直します。
   `--full` は in-process で Engine restart を行い、全 source/rule/output を再初期化します。
   legacy compatibility のため、HTTP の `POST /reload` に空 body を送った場合は `--all` 相当で動きます。
+  status（`reloaded`、`partial`、`reload_failed`）と、適用できなかった plugin や `init()` が失敗した plugin ごとの行を表示します。status が `reloaded` でなければ終了コードは 1 です。
   reload した rule は、その source の最後の値ですぐに評価されます。閾値を変えたら次の値を待たずに反映されます。起動後まだ値を出していない source を読む rule は、値が来るまで待ちます。
 - `test-poll`
   source の `test_poll()` を実行し（その source の thread で poll と poll の間に。評価には使いません）、その結果を `source_id:input` の名前で JSON 表示します。

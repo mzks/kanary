@@ -36,15 +36,20 @@ class Output:
         if self.exclude_tags and matches_excluded_tag(alert_tags, self.exclude_tags):
             return False
         state = event.current_state.value
-        if self.exclude_states and state in self.exclude_states:
+        if self.exclude_states and state in _upper_names(self.exclude_states):
             return False
         transition = event.transition.value if event.transition is not None else None
-        if transition is not None and self.exclude_transitions and transition in self.exclude_transitions:
+        if transition is not None and self.exclude_transitions and transition in _upper_names(self.exclude_transitions):
             return False
         minimum_severity = None if self.minimum_severity is None else coerce_severity(self.minimum_severity)
         if minimum_severity is not None and event.effective_severity < minimum_severity:
             return False
         return True
+
+
+def _upper_names(names: Any) -> set[str]:
+    """State or transition names as written: a list, or one name as a string, in any case."""
+    return {str(name).strip().upper() for name in ([names] if isinstance(names, str) else names)}
 
 
 def event_record(event: AlertEvent) -> dict[str, Any]:

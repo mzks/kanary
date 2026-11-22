@@ -56,6 +56,16 @@ def validate_source_class(source_id: str, source_cls: type[Any]) -> ValidationRe
         report.errors.append(str(exc))
         return report
     report.warnings.extend(_decorator_warnings("source", source_id, source_cls))
+    schedule = getattr(source_cls, "_kanary_compiled_schedule", None)
+    if schedule is not None and schedule.never:
+        report.warnings.append(
+            f"source '{source_id}' schedule {schedule.expression!r} never runs (no such day): it is not polled"
+        )
+    elif schedule is not None and schedule.both_day_fields:
+        report.warnings.append(
+            f"source '{source_id}' schedule {schedule.expression!r} gives both a day of the month and a weekday: "
+            "as in cron, a day matches when either does (for the first Monday of a month, write '0 9 * * MON#1')"
+        )
     return report
 
 
@@ -207,7 +217,8 @@ def matching_outputs(rule_cls: type[Any] | Any, outputs: dict[str, type[Output] 
     for output_id, output_cls in outputs.items():
         include_tags = list(getattr(output_cls, "include_tags", []))
         exclude_tags = list(getattr(output_cls, "exclude_tags", []))
-        exclude_states = set(getattr(output_cls, "exclude_states", []))
+        excluded = getattr(output_cls, "exclude_states", [])
+        exclude_states = {str(name).strip().upper() for name in ([excluded] if isinstance(excluded, str) else excluded)}
         minimum_severity = _minimum_severity(getattr(output_cls, "minimum_severity", None))
 
         if include_tags and not matches_any_tag(rule_tags, include_tags):
