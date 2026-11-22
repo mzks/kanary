@@ -1,0 +1,1022 @@
+openapi: 3.1.0
+info:
+  title: KANARY HTTP API
+  version: 0.8.0
+  summary: The API of one KANARY node, used by kanaryctl, the Web viewer, and peer nodes.
+  description: |
+    The prose reference is docs/api.md; this file describes the same endpoints for tools.
+
+    KANARY runs on a closed network: there is no login and there are no roles (see
+    "Network And Access" in docs/deployment.md). For a wider network, put a reverse proxy
+    with TLS and authentication in front.
+
+    - Every JSON answer is an object. An error answer has an `error` text.
+    - While KANARY is starting, most endpoints answer 503 with `{"status": "starting"}`.
+    - Times in answers are ISO 8601 with their offset. A time sent without a time zone is
+      read in the KANARY host's local time (`GET /health` gives `timezone` and `utc_offset`).
+    - A severity is its name in answers (`"ERROR"`); requests take a name in any case, or its
+      number (10, 20, 30, 40). An alert state in a request may be in any case (`"firing"`).
+    - A request body is a JSON object; anything else answers 400.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:8000
+    description: The default port; set with --api-host and --api-port.
+tags:
+  - name: Status
+  - name: Alerts
+  - name: Silences
+  - name: History
+  - name: Plugins
+  - name: Testing
+    description: Dry runs that do not change the live state.
+  - name: Peers
+  - name: Viewer
+paths:
+  /health:
+    get:
+      tags: [Status]
+      summary: A small runtime health summary.
+      operationId: getHealth
+      responses:
+        "200":
+          description: KANARY is running.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /meta:
+    get:
+      tags: [Status]
+      summary: The installation, the state database, and the last plugin load error.
+      operationId: getMeta
+      responses:
+        "200":
+          description: Installation metadata.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Meta"}
+  /peer-status:
+    get:
+      tags: [Peers]
+      summary: A compact status for peer monitoring.
+      operationId: getPeerStatus
+      responses:
+        "200":
+          description: The node's status.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PeerStatus"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /alerts:
+    get:
+      tags: [Alerts]
+      summary: The current alerts of this node.
+      description: |
+        A rule without an alert yet (never evaluated, or no --state-db) is not listed. After a
+        restart, alerts are restored as KANARY stopped with them, with `restored: true`, until
+        their rule is evaluated again.
+      operationId: listAlerts
+      responses:
+        "200":
+          description: The alerts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [alerts]
+                properties:
+                  alerts:
+                    type: array
+                    items: {$ref: "#/components/schemas/Alert"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /export-alerts:
+    get:
+      tags: [Peers]
+      summary: The alerts in the stable form another node imports (RemoteAlarm).
+      operationId: exportAlerts
+      responses:
+        "200":
+          description: The alerts of this node.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [node_id, alerts]
+                properties:
+                  node_id: {type: string}
+                  alerts:
+                    type: array
+                    items: {$ref: "#/components/schemas/ExportedAlert"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /alerts/{rule_id}/ack:
+    post:
+      tags: [Alerts]
+      summary: Acknowledge a FIRING alert (also one restored as FIRING after a restart).
+      operationId: acknowledgeAlert
+      parameters:
+        - $ref: "#/components/parameters/RuleId"
+      requestBody:
+        $ref: "#/components/requestBodies/OperatorAction"
+      responses:
+        "200":
+          description: Acknowledged.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AckResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NotApplicable"}
+        "503": {$ref: "#/components/responses/Restarting"}
+  /alerts/{rule_id}/unack:
+    post:
+      tags: [Alerts]
+      summary: Remove the acknowledgement of an alert.
+      operationId: unacknowledgeAlert
+      parameters:
+        - $ref: "#/components/parameters/RuleId"
+      requestBody:
+        $ref: "#/components/requestBodies/OperatorAction"
+      responses:
+        "200":
+          description: Unacknowledged.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AckResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NotApplicable"}
+        "503": {$ref: "#/components/responses/Restarting"}
+  /silences:
+    get:
+      tags: [Silences]
+      summary: Active, scheduled, and cancelled silences.
+      description: There is no EXPIRED state here; the viewer and kanaryctl derive it from `end_at`.
+      operationId: listSilences
+      responses:
+        "200":
+          description: The silences, by start.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [silences]
+                properties:
+                  silences:
+                    type: array
+                    items: {$ref: "#/components/schemas/Silence"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /silences/duration:
+    post:
+      tags: [Silences]
+      summary: Silence matching rules for a number of minutes.
+      operationId: createSilenceForDuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SilenceForDuration"}
+      responses:
+        "200":
+          description: The silence, with its window as KANARY read it.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SilenceCreated"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "503": {$ref: "#/components/responses/Restarting"}
+  /silences/window:
+    post:
+      tags: [Silences]
+      summary: Silence matching rules from one time to another.
+      operationId: createSilenceForWindow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SilenceForWindow"}
+      responses:
+        "200":
+          description: The silence, with its window as KANARY read it.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SilenceCreated"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "503": {$ref: "#/components/responses/Restarting"}
+  /silences/{silence_id}/cancel:
+    post:
+      tags: [Silences]
+      summary: Cancel a silence.
+      operationId: cancelSilence
+      parameters:
+        - name: silence_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        $ref: "#/components/requestBodies/OperatorAction"
+      responses:
+        "200":
+          description: Cancelled.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SilenceCancelled"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/NotApplicable"}
+        "503": {$ref: "#/components/responses/Restarting"}
+  /history/{rule_id}:
+    get:
+      tags: [History]
+      summary: One rule's alert events, output dispatches, and operator actions, newest first.
+      description: |
+        Newest by when they happened, not by when they were written (a dispatch is written
+        once every output is done). Operator actions include the silences that cover the rule.
+        Without --state-db, `enabled` is false and the lists are empty.
+      operationId: getRuleHistory
+      parameters:
+        - $ref: "#/components/parameters/RuleId"
+        - name: limit
+          in: query
+          description: The newest this many of each list; without it, all of them.
+          schema: {type: integer, minimum: 1}
+      responses:
+        "200":
+          description: The rule's history.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/RuleHistory"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /alert-history:
+    get:
+      tags: [History]
+      summary: Alert events and operator actions of all rules as one newest-first timeline.
+      description: |
+        The first request returns up to `limit` recent rows of each stream. Later requests pass
+        `after_alert_id` and `after_action_id` (the `latest_*_id` of the last answer) to get only
+        the rows added since. Initial evaluations that are already OK are left out.
+      operationId: getAlertHistory
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 500, default: 500}
+        - name: after_alert_id
+          in: query
+          schema: {type: integer, minimum: 0}
+        - name: after_action_id
+          in: query
+          schema: {type: integer, minimum: 0}
+      responses:
+        "200":
+          description: The timeline.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AlertHistory"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /plugins:
+    get:
+      tags: [Plugins]
+      summary: The status of every source, rule, and output, loaded or discovered.
+      operationId: listPlugins
+      responses:
+        "200":
+          description: Sources first, then rules, then outputs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plugins]
+                properties:
+                  plugins:
+                    type: array
+                    items: {$ref: "#/components/schemas/PluginStatus"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /plugins/{type}/{plugin_id}/source:
+    get:
+      tags: [Plugins]
+      summary: The source code of one loaded or discovered plugin (read-only).
+      operationId: getPluginSource
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: {$ref: "#/components/schemas/PluginType"}
+        - name: plugin_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: The plugin's class, or its whole file when the class is not found in it.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PluginSource"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /reload:
+    post:
+      tags: [Plugins]
+      summary: Apply plugin changes.
+      description: |
+        The body names exactly one target. An empty body is taken as `{"all": true}` (kept for
+        older clients). `full` restarts the engine in the process; during the switch, ack,
+        unack, and the silence endpoints answer 503.
+      operationId: reloadPlugins
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ReloadRequest"}
+      responses:
+        "200":
+          description: Everything was applied (`status` is `reloaded`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ReloadResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "500":
+          description: Not everything was applied (`partial`), or nothing was (`reload_failed`); `error` names each plugin.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ReloadResult"}
+  /test-poll/{source_id}:
+    post:
+      tags: [Testing]
+      summary: Run a source's test_poll() on its own thread, between its polls; not evaluated.
+      description: The answer is a payload for POST /test-evaluate/{rule_id} as it is.
+      operationId: testPoll
+      parameters:
+        - name: source_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: What the poll gave, with fully qualified input names.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PollPayload"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: The source is not running (its init() failed), or the poll did not finish within 30 seconds.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /test-evaluate/{rule_id}:
+    post:
+      tags: [Testing]
+      summary: Judge a rule against a payload, without changing the live state.
+      operationId: testEvaluate
+      parameters:
+        - $ref: "#/components/parameters/RuleId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TestEvaluateRequest"}
+      responses:
+        "200":
+          description: The judgment, and the outputs it would go to.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TestEvaluation"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /test-evaluate-template/{rule_id}:
+    get:
+      tags: [Testing]
+      summary: A payload template for POST /test-evaluate/{rule_id}.
+      operationId: getTestEvaluateTemplate
+      parameters:
+        - $ref: "#/components/parameters/RuleId"
+      responses:
+        "200":
+          description: The template.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TestEvaluateTemplate"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /test-fire/{rule_id}:
+    post:
+      tags: [Testing]
+      summary: Send a made-up alert event through the outputs; the live alert does not change.
+      description: |
+        The event goes ahead of queued events, has `synthetic` set, and its message starts with
+        `[TEST-FIRE]`. The answer waits up to 30 seconds; outputs that have not sent by then are
+        in `pending_outputs`.
+      operationId: testFire
+      parameters:
+        - $ref: "#/components/parameters/RuleId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TestFireRequest"}
+      responses:
+        "200":
+          description: Where the event went.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TestFireResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "503": {$ref: "#/components/responses/Starting"}
+  /viewer:
+    get:
+      tags: [Viewer]
+      summary: The built-in Web viewer (404 with --disable-default-viewer).
+      operationId: getViewer
+      responses:
+        "200":
+          description: The viewer page.
+          content:
+            text/html: {}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /viewer/app.js:
+    get:
+      tags: [Viewer]
+      summary: The viewer's script.
+      operationId: getViewerScript
+      responses:
+        "200":
+          description: The script.
+          content:
+            application/javascript: {}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /viewer/styles.css:
+    get:
+      tags: [Viewer]
+      summary: The viewer's style sheet.
+      operationId: getViewerStyles
+      responses:
+        "200":
+          description: The style sheet.
+          content:
+            text/css: {}
+        "404": {$ref: "#/components/responses/NotFound"}
+components:
+  parameters:
+    RuleId:
+      name: rule_id
+      in: path
+      required: true
+      description: A rule id such as `postgres.temperature.range`, percent-encoded where needed.
+      schema: {type: string}
+  requestBodies:
+    OperatorAction:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/OperatorAction"}
+  responses:
+    Starting:
+      description: KANARY is starting.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status: {const: starting}
+    BadRequest:
+      description: The request is not one KANARY can take (not a JSON object, a missing field, a bad value).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: No such rule, silence, source, plugin, or path.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotApplicable:
+      description: The action does not apply to the target as it is (acknowledging an alert that is not FIRING, cancelling a cancelled silence).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Restarting:
+      description: KANARY is starting, or (reload --full) handing over to a new engine; try again in a moment.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/Error"
+              - type: object
+                required: [status]
+                properties:
+                  status: {const: starting}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+    Time:
+      type: string
+      format: date-time
+      description: ISO 8601 with an offset.
+    OptionalTime:
+      type: [string, "null"]
+      format: date-time
+    RequestTime:
+      type: string
+      description: ISO 8601; without a time zone, the KANARY host's local time.
+      examples: ["2026-11-21T22:00", "2026-11-21T22:00+09:00"]
+    Severity:
+      type: string
+      enum: [INFO, WARN, ERROR, CRITICAL]
+    AlertState:
+      type: string
+      enum: [OK, FIRING, ACKED, SILENCED, SUPPRESSED]
+    Transition:
+      type: [string, "null"]
+      enum: [UNACK, ESCALATED, DEESCALATED, null]
+    PluginType:
+      type: string
+      enum: [source, rule, output]
+    Names:
+      description: A list of names; one name may be a plain string.
+      oneOf:
+        - type: string
+        - type: array
+          items: {type: string}
+    Warnings:
+      type: array
+      description: Done, with something to know (a silence target that matches nothing, a peer that did not get the action).
+      items: {type: string}
+    Health:
+      type: object
+      required: [status, time, timezone, utc_offset, sources, rules, alert_count, output_emit_enabled, state_db_error, state_db_error_at]
+      properties:
+        status: {const: ok}
+        time: {$ref: "#/components/schemas/Time"}
+        timezone: {type: string, description: "The host's time zone name, such as JST."}
+        utc_offset: {type: string, examples: ["+09:00"]}
+        sources: {type: array, items: {type: string}}
+        rules: {type: array, items: {type: string}}
+        alert_count: {type: integer}
+        output_emit_enabled: {type: boolean}
+        state_db_error: {type: [string, "null"], description: "The last failed write to the state database, until one works again."}
+        state_db_error_at: {$ref: "#/components/schemas/OptionalTime"}
+    Meta:
+      type: object
+      required: [package_name, version, state_db_enabled, output_emit_enabled]
+      properties:
+        package_name: {type: string}
+        version: {type: [string, "null"]}
+        git_commit: {type: [string, "null"]}
+        homepage_url: {type: [string, "null"]}
+        repository_url: {type: [string, "null"]}
+        documentation_url: {type: [string, "null"]}
+        issues_url: {type: [string, "null"]}
+        state_db_enabled: {type: boolean}
+        state_db_schema_version: {type: integer}
+        state_db_target_schema_version: {type: integer}
+        output_emit_enabled: {type: boolean}
+        state_db_error: {type: [string, "null"]}
+        state_db_error_at: {$ref: "#/components/schemas/OptionalTime"}
+        state_db_failed_writes: {type: integer}
+        plugin_load_error: {type: [string, "null"], description: "Why the plugin files did not load at the last scan."}
+        plugin_load_error_at: {$ref: "#/components/schemas/OptionalTime"}
+    PeerStatus:
+      type: object
+      required: [status, node_id, generated_at, started_at, uptime_seconds, counts, alert_states]
+      properties:
+        status: {const: ok}
+        node_id: {type: string}
+        generated_at: {$ref: "#/components/schemas/Time"}
+        started_at: {$ref: "#/components/schemas/Time"}
+        uptime_seconds: {type: number}
+        last_reload_at: {$ref: "#/components/schemas/OptionalTime"}
+        latest_activity_at: {$ref: "#/components/schemas/OptionalTime"}
+        counts:
+          type: object
+          properties:
+            sources: {type: integer}
+            rules: {type: integer}
+            outputs: {type: integer}
+            alerts: {type: integer}
+            failed_plugins: {type: integer}
+            dirty_plugins: {type: integer}
+            untracked_files: {type: integer}
+        alert_states:
+          type: object
+          description: The number of alerts in each state.
+          additionalProperties: {type: integer}
+        reload:
+          type: object
+          properties:
+            untracked_files: {type: array, items: {type: string}}
+    AlertPayload:
+      type: object
+      description: What the rule judged. The built-in rules give these keys; a rule of your own may give others.
+      properties:
+        status: {type: string}
+        inputs: {type: object, additionalProperties: true}
+        values: {type: object, additionalProperties: true, description: "The judged values by input name."}
+        matched_inputs: {type: array, items: {type: object}}
+        missing_inputs: {type: array, items: {type: string}}
+      additionalProperties: true
+    ExportedAlert:
+      type: object
+      required: [node_id, rule_id, state, severity, tags, payload, restored, origin_node_id, origin_rule_id, mirror_path, is_mirrored]
+      properties:
+        node_id: {type: string}
+        rule_id: {type: string}
+        state: {$ref: "#/components/schemas/AlertState"}
+        severity: {$ref: "#/components/schemas/Severity"}
+        owner: {type: [string, "null"]}
+        tags: {type: array, items: {type: string}}
+        message: {type: [string, "null"]}
+        description: {type: [string, "null"]}
+        runbook: {type: [string, "null"]}
+        payload: {$ref: "#/components/schemas/AlertPayload"}
+        last_evaluated_at: {$ref: "#/components/schemas/OptionalTime"}
+        restored: {type: boolean, description: "Restored at start from the state database, not evaluated since."}
+        definition_file: {type: [string, "null"]}
+        origin_node_id: {type: string, description: "The node where the alert began (for a mirrored alert, not this one)."}
+        origin_rule_id: {type: string}
+        mirror_path: {type: array, items: {type: string}, description: "The nodes the alert went through, ending with this one."}
+        is_mirrored: {type: boolean}
+    Alert:
+      allOf:
+        - $ref: "#/components/schemas/ExportedAlert"
+        - type: object
+          required: [active_silence_ids, active_silences, matched_outputs]
+          properties:
+            active_since: {$ref: "#/components/schemas/OptionalTime"}
+            acked_by: {type: [string, "null"]}
+            acked_at: {$ref: "#/components/schemas/OptionalTime"}
+            ack_reason: {type: [string, "null"]}
+            active_silence_ids: {type: array, items: {type: string}}
+            active_silences:
+              type: array
+              items:
+                type: object
+                properties:
+                  silence_id: {type: string}
+                  created_by: {type: string}
+                  reason: {type: [string, "null"]}
+                  created_at: {$ref: "#/components/schemas/Time"}
+                  start_at: {$ref: "#/components/schemas/Time"}
+                  end_at: {$ref: "#/components/schemas/Time"}
+            matched_outputs: {type: array, items: {type: string}}
+    OperatorAction:
+      type: object
+      required: [operator]
+      properties:
+        operator: {type: string, description: "Who acts; recorded with the action."}
+        reason: {type: [string, "null"]}
+    AckResult:
+      type: object
+      required: [status, rule_id, warnings]
+      properties:
+        status: {type: string, enum: [acked, unacked]}
+        rule_id: {type: string}
+        warnings: {$ref: "#/components/schemas/Warnings"}
+    Silence:
+      type: object
+      required: [silence_id, created_by, created_at, start_at, end_at, rule_patterns, tags, active]
+      properties:
+        silence_id: {type: string}
+        created_by: {type: string}
+        reason: {type: [string, "null"]}
+        created_at: {$ref: "#/components/schemas/Time"}
+        start_at: {$ref: "#/components/schemas/Time"}
+        end_at: {$ref: "#/components/schemas/Time"}
+        rule_patterns: {type: array, items: {type: string}, description: "Rule id patterns (fnmatch)."}
+        tags: {type: array, items: {type: string}}
+        remote_silence_refs: {type: array, items: {type: string}, description: "The same silence at peers, for imported alarms."}
+        cancelled_at: {$ref: "#/components/schemas/OptionalTime"}
+        cancelled_by: {type: [string, "null"]}
+        cancel_reason: {type: [string, "null"]}
+        active: {type: boolean, description: "Not cancelled, and now is within its window."}
+    SilenceTarget:
+      type: object
+      properties:
+        rule_patterns: {$ref: "#/components/schemas/Names"}
+        tags: {$ref: "#/components/schemas/Names"}
+    SilenceForDuration:
+      allOf:
+        - $ref: "#/components/schemas/OperatorAction"
+        - $ref: "#/components/schemas/SilenceTarget"
+        - type: object
+          required: [duration_minutes]
+          properties:
+            duration_minutes: {type: number, exclusiveMinimum: 0}
+            start_at: {$ref: "#/components/schemas/RequestTime", description: "Default: now."}
+    SilenceForWindow:
+      allOf:
+        - $ref: "#/components/schemas/OperatorAction"
+        - $ref: "#/components/schemas/SilenceTarget"
+        - type: object
+          required: [start_at, end_at]
+          properties:
+            start_at: {$ref: "#/components/schemas/RequestTime"}
+            end_at: {$ref: "#/components/schemas/RequestTime"}
+    SilenceCreated:
+      type: object
+      required: [status, silence_id, start_at, end_at, warnings]
+      properties:
+        status: {const: silenced}
+        silence_id: {type: string}
+        start_at: {$ref: "#/components/schemas/Time"}
+        end_at: {$ref: "#/components/schemas/Time"}
+        warnings: {$ref: "#/components/schemas/Warnings"}
+    SilenceCancelled:
+      type: object
+      required: [status, silence_id, warnings]
+      properties:
+        status: {const: unsilenced}
+        silence_id: {type: string}
+        warnings: {$ref: "#/components/schemas/Warnings"}
+    AlertEventRow:
+      type: object
+      required: [rule_id, current_state, occurred_at]
+      properties:
+        rule_id: {type: string}
+        previous_state: {type: [string, "null"]}
+        current_state: {$ref: "#/components/schemas/AlertState"}
+        previous_severity: {type: [string, "null"]}
+        current_severity: {type: [string, "null"]}
+        transition: {$ref: "#/components/schemas/Transition"}
+        severity: {type: [string, "null"]}
+        owner: {type: [string, "null"]}
+        message: {type: [string, "null"]}
+        payload: {$ref: "#/components/schemas/AlertPayload"}
+        tags: {type: array, items: {type: string}}
+        occurred_at: {$ref: "#/components/schemas/Time"}
+        definition_file: {type: [string, "null"]}
+        matched_outputs: {type: array, items: {type: string}}
+    DispatchOutputs:
+      type: object
+      properties:
+        matched_outputs: {type: array, items: {type: string}, description: "The outputs whose filters took the event."}
+        delivered_outputs: {type: array, items: {type: string}}
+        emit_skipped_outputs: {type: array, items: {type: string}, description: "Matched, but not called (--no-output-emit)."}
+        filtered_outputs: {type: array, items: {type: string}, description: "Not for them: their filters, or an OK of an alert they were never sent."}
+        uninitialized_outputs: {type: array, items: {type: string}}
+        failed_outputs: {type: array, items: {type: string}}
+    OutputDispatchRow:
+      allOf:
+        - $ref: "#/components/schemas/DispatchOutputs"
+        - type: object
+          required: [rule_id, current_state, occurred_at]
+          properties:
+            rule_id: {type: string}
+            previous_state: {type: [string, "null"]}
+            current_state: {$ref: "#/components/schemas/AlertState"}
+            occurred_at: {$ref: "#/components/schemas/Time"}
+    OperatorActionRow:
+      type: object
+      required: [action_type, operator, created_at]
+      properties:
+        action_type: {type: string, description: "ack, unack, silence, unsilence, rule_removed, ..."}
+        rule_id: {type: [string, "null"]}
+        silence_id: {type: [string, "null"]}
+        operator: {type: string}
+        reason: {type: [string, "null"]}
+        details: {type: object, additionalProperties: true}
+        created_at: {$ref: "#/components/schemas/Time"}
+    RuleHistory:
+      type: object
+      required: [enabled, alert_events, output_dispatches, operator_actions]
+      properties:
+        enabled: {type: boolean, description: "False without --state-db: nothing is kept."}
+        alert_events: {type: array, items: {$ref: "#/components/schemas/AlertEventRow"}}
+        output_dispatches: {type: array, items: {$ref: "#/components/schemas/OutputDispatchRow"}}
+        operator_actions: {type: array, items: {$ref: "#/components/schemas/OperatorActionRow"}}
+    AlertHistoryEntry:
+      oneOf:
+        - type: object
+          required: [kind, id, occurred_at, rule_id, current_state]
+          properties:
+            kind: {const: alert_event}
+            id: {type: integer}
+            occurred_at: {$ref: "#/components/schemas/Time"}
+            rule_id: {type: string}
+            previous_state: {type: [string, "null"]}
+            current_state: {$ref: "#/components/schemas/AlertState"}
+            transition: {$ref: "#/components/schemas/Transition"}
+            severity: {type: [string, "null"]}
+            previous_severity: {type: [string, "null"]}
+            current_severity: {type: [string, "null"]}
+            owner: {type: [string, "null"]}
+            message: {type: [string, "null"]}
+            tags: {type: array, items: {type: string}}
+            matched_outputs: {type: array, items: {type: string}}
+            definition_file: {type: [string, "null"]}
+        - type: object
+          required: [kind, id, occurred_at, action_type, operator]
+          properties:
+            kind: {const: operator_action}
+            id: {type: integer}
+            occurred_at: {$ref: "#/components/schemas/Time"}
+            action_type: {type: string}
+            rule_id: {type: [string, "null"]}
+            silence_id: {type: [string, "null"]}
+            operator: {type: string}
+            reason: {type: [string, "null"]}
+            details: {type: object, additionalProperties: true}
+      discriminator:
+        propertyName: kind
+    AlertHistory:
+      type: object
+      required: [enabled, entries, latest_alert_id, latest_action_id, alert_has_more, action_has_more, initial_truncated]
+      properties:
+        enabled: {type: boolean}
+        entries: {type: array, items: {$ref: "#/components/schemas/AlertHistoryEntry"}}
+        latest_alert_id: {type: integer, description: "Pass as after_alert_id next time."}
+        latest_action_id: {type: integer, description: "Pass as after_action_id next time."}
+        alert_has_more: {type: boolean}
+        action_has_more: {type: boolean}
+        initial_truncated: {type: boolean, description: "The first answer did not have everything: older rows exist."}
+    PluginStatus:
+      type: object
+      required: [type, plugin_id, state, loaded, init_ok, run_count]
+      properties:
+        type: {$ref: "#/components/schemas/PluginType"}
+        plugin_id: {type: string}
+        state: {type: string, enum: [DISCOVERED, DIRTY, PENDING_REMOVE, READY, RELOADING, FAILED]}
+        loaded: {type: boolean}
+        init_ok: {type: boolean}
+        dirty_reason: {type: [string, "null"], enum: [added, removed, definition_changed, dependency_changed, null]}
+        last_error: {type: [string, "null"]}
+        last_error_detail: {type: [string, "null"]}
+        run_count: {type: integer}
+        last_run_at: {$ref: "#/components/schemas/OptionalTime"}
+        last_success_at: {$ref: "#/components/schemas/OptionalTime"}
+        last_failure_at: {$ref: "#/components/schemas/OptionalTime"}
+        last_updated_at: {$ref: "#/components/schemas/OptionalTime"}
+        definition_file: {type: [string, "null"]}
+        definition_file_name: {type: [string, "null"]}
+        description: {type: [string, "null"]}
+        tags: {type: array, items: {type: string}}
+        severity: {type: [string, "null"], description: "Rules: the declared severity."}
+        owner: {type: [string, "null"]}
+        runbook: {type: [string, "null"]}
+        inputs: {type: array, items: {type: string}}
+        resolved_sources: {type: array, items: {type: string}}
+        matched_outputs: {type: array, items: {type: string}}
+        include_tags: {type: array, items: {type: string}}
+        exclude_tags: {type: array, items: {type: string}}
+        exclude_states: {type: array, items: {type: string}}
+        exclude_transitions: {type: array, items: {type: string}}
+        minimum_severity: {type: [string, "null"], description: "Outputs."}
+        warning: {type: [string, "null"], description: "A slow evaluate(), a schedule that never runs."}
+        reload_error: {type: [string, "null"], description: "Why the last reload of it was not applied; the running instance goes on."}
+        queued: {type: integer, description: "Outputs: events waiting or being sent."}
+        dropped: {type: integer, description: "Outputs: events dropped from a full queue or at shutdown."}
+    PluginSource:
+      type: object
+      required: [plugin_id, type, definition_file, symbol_name, mode, start_line, end_line, source_text]
+      properties:
+        plugin_id: {type: string}
+        type: {$ref: "#/components/schemas/PluginType"}
+        definition_file: {type: string}
+        symbol_name: {type: string}
+        mode: {type: string, enum: [class, file]}
+        start_line: {type: integer}
+        end_line: {type: integer}
+        source_text: {type: string}
+    ReloadRequest:
+      description: 'Exactly one target. An empty body is `{"all": true}`.'
+      oneOf:
+        - type: object
+          required: [rule]
+          properties:
+            rule: {type: string, description: "Rule ids matching this pattern."}
+          additionalProperties: false
+        - type: object
+          required: [source]
+          properties:
+            source: {type: string}
+          additionalProperties: false
+        - type: object
+          required: [output]
+          properties:
+            output: {type: string}
+          additionalProperties: false
+        - type: object
+          required: [dirty]
+          properties:
+            dirty: {const: true, description: "The plugins whose code changed, and the added and removed ones."}
+          additionalProperties: false
+        - type: object
+          required: [all]
+          properties:
+            all: {const: true, description: "Discover the plugin files again and apply everything."}
+          additionalProperties: false
+        - type: object
+          required: [full]
+          properties:
+            full: {const: true, description: "Restart the engine in the process."}
+          additionalProperties: false
+        - type: object
+          maxProperties: 0
+    ReloadPlugins:
+      type: object
+      properties:
+        matched: {type: array, items: {type: string}}
+        reloaded: {type: array, items: {type: string}}
+        removed: {type: array, items: {type: string}}
+        failed: {type: array, items: {type: string}, description: "Not applied (its class or __init__() failed); the running instance goes on."}
+        init_failed: {type: array, items: {type: string}, description: "Applied, but its first init() failed; it keeps trying."}
+        errors: {type: object, additionalProperties: {type: string}}
+    ReloadResult:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [reloaded, partial, reload_failed]}
+        target: {type: string, enum: [rule, source, output, dirty, all, full]}
+        pattern: {type: [string, "null"]}
+        error: {type: string}
+        sources: {$ref: "#/components/schemas/ReloadPlugins"}
+        rules: {$ref: "#/components/schemas/ReloadPlugins"}
+        outputs: {$ref: "#/components/schemas/ReloadPlugins"}
+    InputValue:
+      type: object
+      properties:
+        value: {description: "A number, text, a boolean, or null (no value)."}
+        timestamp: {type: string}
+        metadata: {type: object, additionalProperties: true}
+        prev_value: {description: "The value before (for rate and difference rules)."}
+        prev_timestamp: {type: string}
+        prev_metadata: {type: object, additionalProperties: true}
+    PollPayload:
+      type: object
+      required: [inputs]
+      properties:
+        source_id: {type: string}
+        status: {type: string, examples: [ok, no_data]}
+        reason: {type: string}
+        metadata: {type: object, additionalProperties: true}
+        inputs:
+          type: object
+          description: By input name (`source_id:name`; a name without `source_id:` is of `source_id`).
+          additionalProperties: {$ref: "#/components/schemas/InputValue"}
+    TestEvaluateRequest:
+      type: object
+      required: [payload]
+      properties:
+        payload:
+          description: |
+            The output of POST /test-poll/{source_id} (the `inputs` of several put together for a
+            rule of several sources), or for a rule with one input `{"value": ..., "timestamp": ..., "prev_value": ...}`.
+            The `channels` of KANARY before 0.8.0 are read like `inputs`.
+          anyOf:
+            - $ref: "#/components/schemas/PollPayload"
+            - $ref: "#/components/schemas/InputValue"
+        now: {$ref: "#/components/schemas/RequestTime", description: "The time of the evaluation; default: now."}
+    TestEvaluation:
+      type: object
+      required: [rule_id, state, severity, payload, occurred_at, matched_outputs, would_emit_outputs]
+      properties:
+        rule_id: {type: string}
+        state: {$ref: "#/components/schemas/AlertState"}
+        severity: {$ref: "#/components/schemas/Severity"}
+        owner: {type: [string, "null"]}
+        tags: {type: array, items: {type: string}}
+        message: {type: [string, "null"]}
+        payload: {$ref: "#/components/schemas/AlertPayload"}
+        occurred_at: {$ref: "#/components/schemas/Time"}
+        inputs: {type: array, items: {type: string}}
+        resolved_sources: {type: array, items: {type: string}}
+        matched_outputs: {type: array, items: {type: string}}
+        would_emit_outputs: {type: array, items: {type: string}, description: "The outputs an event of this judgment would go to."}
+    TestEvaluateTemplate:
+      type: object
+      required: [rule_id, inputs, payload]
+      properties:
+        rule_id: {type: string}
+        inputs: {type: array, items: {type: string}}
+        resolved_sources: {type: array, items: {type: string}}
+        payload: {$ref: "#/components/schemas/PollPayload"}
+        single_input_shorthand: {$ref: "#/components/schemas/InputValue"}
+    TestFireRequest:
+      type: object
+      description: Either `state`, or `evaluation` (the answer of POST /test-evaluate/{rule_id}, whose state, severity, message, and values the event has).
+      properties:
+        state: {type: string, description: "An alert state, in any case."}
+        evaluation: {$ref: "#/components/schemas/TestEvaluation"}
+        message: {type: string}
+        reason: {type: string}
+        now: {$ref: "#/components/schemas/RequestTime"}
+    TestFireResult:
+      allOf:
+        - $ref: "#/components/schemas/DispatchOutputs"
+        - type: object
+          required: [rule_id, current_state, occurred_at, pending_outputs, synthetic]
+          properties:
+            rule_id: {type: string}
+            previous_state: {type: [string, "null"]}
+            current_state: {$ref: "#/components/schemas/AlertState"}
+            occurred_at: {$ref: "#/components/schemas/Time"}
+            pending_outputs: {type: array, items: {type: string}, description: "Not sent within 30 seconds."}
+            synthetic: {const: true}
+            message: {type: [string, "null"]}
+            reason: {type: [string, "null"]}
