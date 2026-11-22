@@ -8,24 +8,79 @@ import threading
 from time import monotonic
 from typing import Any
 
-from ..constants import CRITICAL, Severity
+from ..constants import CRITICAL, Severity, coerce_severity
 from ..dispatch import OutputWorker, current_worker
-from ..values import to_timezone
+from ..values import address_list, to_timezone
 
 logger = logging.getLogger("kanary.output")
 
 # What QuietHours sends when a quiet period ends (see its docstring).
 RELEASE_MODES = ("all", "latest", "summary")
 
-_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def parse_weekdays(value: Any) -> tuple[int, ...]:
+    """Weekdays (Monday = 0) from names, abbreviated or not: ["mon", "Tuesday"], "mon-fri",
+    "mon,wed,fri", or "fri-mon" (round the weekend). An unknown name is an error."""
+    items = [value] if isinstance(value, str) else list(value or [])
+    days: list[int] = []
+    for item in items:
+        for part in (piece.strip() for piece in str(item).split(",")):
+            if not part:
+                continue
+            start, dash, end = part.partition("-")
+            first = _weekday(start)
+            if not dash:
+                days.append(first)
+                continue
+            last = _weekday(end)
+            span = (last - first) % 7
+            days.extend((first + offset) % 7 for offset in range(span + 1))
+    return tuple(dict.fromkeys(days))
+
+
+def _weekday(text: str) -> int:
+    word = text.strip().lower()
+    if len(word) >= 3:
+        for index, name in enumerate(_WEEKDAYS):
+            if name.startswith(word):
+                return index
+    raise ValueError(f"weekdays must be names such as 'mon', 'Tuesday', or 'mon-fri', not {text.strip()!r}")
 
 
 def parse_clock(value: str | time) -> time:
-    """Parse "HH:MM" (or a datetime.time)."""
+    """Parse "HH:MM" or "H" (or a datetime.time); "24:00" is the midnight that ends the day."""
     if isinstance(value, time):
         return value
     hours, _, minutes = str(value).strip().partition(":")
+    if int(hours) == 24 and int(minutes or 0) == 0:
+        return time(0, 0)  # as an end, ("22:00", "24:00") runs to midnight
     return time(int(hours), int(minutes or 0))
+
+
+def quiet_windows(quiet_hours: Any) -> list[tuple[time, time]]:
+    """(start, end) clock times from [("22:00", "07:00"), ...], or one pair written alone."""
+    if _is_pair(quiet_hours):
+        quiet_hours = [quiet_hours]
+    windows = []
+    for start, end in quiet_hours:
+        start_time, end_time = parse_clock(start), parse_clock(end)
+        if start_time == end_time:
+            raise ValueError(
+                f"quiet hours ({start!r}, {end!r}) cover the whole day; "
+                "to hold low-severity events always, use the output's minimum_severity instead"
+            )
+        windows.append((start_time, end_time))
+    return windows
+
+
+def _is_pair(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(item, (str, time)) for item in value)
+    )
 
 
 def in_daily_window(moment: time, start: time, end: time) -> bool:
@@ -42,7 +97,7 @@ def local_time(moment: datetime, timezone: Any) -> datetime:
 
 def in_quiet_hours(moment: datetime, quiet_hours: Iterable[Any], timezone: str | None = None) -> bool:
     local = local_time(moment, timezone).time()
-    return any(in_daily_window(local, parse_clock(start), parse_clock(end)) for start, end in quiet_hours)
+    return any(in_daily_window(local, start, end) for start, end in quiet_windows(quiet_hours))
 
 
 def quiet_hours_end(moment: datetime, quiet_hours: Iterable[Any], timezone: str | None = None) -> datetime | None:
@@ -50,7 +105,7 @@ def quiet_hours_end(moment: datetime, quiet_hours: Iterable[Any], timezone: str 
 
     Overlapping or back-to-back windows are treated as one period.
     """
-    windows = [(parse_clock(start), parse_clock(end)) for start, end in quiet_hours]
+    windows = quiet_windows(quiet_hours)
     end_at: datetime | None = None
     current = moment
     for _ in range(len(windows) + 1):
@@ -74,11 +129,12 @@ def check_quiet_hours(quiet_hours: Any) -> list[str]:
     problems = []
     if not isinstance(quiet_hours, (list, tuple)):
         return ["quiet hours must be a list of (start, end) pairs such as [('22:00', '07:00')]"]
-    for window in quiet_hours:
+    for window in [quiet_hours] if _is_pair(quiet_hours) else quiet_hours:
         try:
-            start, end = window
-            parse_clock(start), parse_clock(end)
-        except (TypeError, ValueError):
+            quiet_windows([window])
+        except ValueError as exc:
+            problems.append(str(exc) if "whole day" in str(exc) else f"quiet hours entry {window!r} must be a ('HH:MM', 'HH:MM') pair")
+        except TypeError:
             problems.append(f"quiet hours entry {window!r} must be a ('HH:MM', 'HH:MM') pair")
     return problems
 
@@ -145,16 +201,14 @@ class QuietHours:
                              "(the chat and mail outputs have emit_summary)")
         self.release = release
         self.summary = summary
-        self.windows = [tuple(window) for window in windows]
+        self.windows = [tuple(window) for window in ([windows] if _is_pair(windows) else windows)]
         problems = check_quiet_hours(self.windows)
         if problems:
             raise ValueError("; ".join(problems))
         if timezone:
             to_timezone(timezone)  # raises for an unknown zone
         self.timezone = timezone
-        self.minimum_severity = (
-            minimum_severity if isinstance(minimum_severity, Severity) else Severity[str(minimum_severity).strip().upper()]
-        )
+        self.minimum_severity = coerce_severity(minimum_severity)  # kanary.ERROR, "error", 30
         self.defer = defer
         self._now = now_fn or (lambda: datetime.now(dt_timezone.utc))
         self._lock = threading.Lock()
@@ -330,7 +384,7 @@ class OnCallSchedule:
         default: Iterable[str] = (),
     ) -> None:
         self.timezone = timezone
-        self.default = list(default)
+        self.default = address_list(default)
         self.shifts = [self._parse_shift(index, raw) for index, raw in enumerate(shifts)]
 
     def recipients(self, at: datetime | None = None) -> list[str]:
@@ -347,9 +401,7 @@ class OnCallSchedule:
 
     def _parse_shift(self, index: int, raw: Mapping[str, Any]) -> Shift:
         where = f"shift #{index + 1}"
-        recipients = raw.get("recipients")
-        if isinstance(recipients, str):
-            recipients = [item.strip() for item in recipients.split(",") if item.strip()]
+        recipients = address_list(raw.get("recipients"))
         if not recipients:
             raise ValueError(f"{where} must list recipients")
         if "start" in raw or "end" in raw:
@@ -357,17 +409,16 @@ class OnCallSchedule:
             if start is None or end is None or start >= end:
                 raise ValueError(f"{where} needs start < end")
             return Shift(tuple(recipients), start=start, end=end)
-        weekdays = raw.get("weekdays", [])
-        if isinstance(weekdays, str):
-            weekdays = [weekdays]
         try:
-            days = tuple(_WEEKDAYS.index(str(day).strip().lower()[:3]) for day in weekdays)
-        except ValueError:
-            raise ValueError(f"{where} weekdays must be names such as 'mon'") from None
+            days = parse_weekdays(raw.get("weekdays", []))
+        except ValueError as exc:
+            raise ValueError(f"{where} {exc}") from None
         start_time = parse_clock(raw["from"]) if "from" in raw else None
         end_time = parse_clock(raw["to"]) if "to" in raw else None
         if (start_time is None) != (end_time is None):
             raise ValueError(f"{where} needs both 'from' and 'to'")
+        if start_time is not None and start_time == end_time:
+            raise ValueError(f"{where} 'from' and 'to' are the same time: for the whole day, leave both out")
         return Shift(tuple(recipients), weekdays=days, start_time=start_time, end_time=end_time)
 
     def _localize(self, value: Any) -> datetime | None:

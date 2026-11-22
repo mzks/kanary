@@ -8,6 +8,7 @@ from .constants import ERROR, AlertState, Severity, TransitionKind, coerce_sever
 from .output import Output, _DEFAULT_EXCLUDED_STATES
 from .rule import Rule
 from .schedule import every_seconds, parse_schedule
+from .units import parse_duration
 from .selectors import normalize_rule_inputs
 from .source import Source
 
@@ -195,7 +196,11 @@ def _values_differ(left: Any, right: Any) -> bool:
 
 
 def _annotate_definition_metadata(cls: type[object]) -> None:
-    cls.__kanary_definition_file__ = inspect.getsourcefile(cls)
+    # None for a class without a file: typed into python -c, a REPL, or a notebook.
+    try:
+        cls.__kanary_definition_file__ = inspect.getsourcefile(cls)
+    except (OSError, TypeError):
+        cls.__kanary_definition_file__ = None
 
 
 def prepare_rule_class(cls: type[Any]) -> type[Any]:
@@ -228,8 +233,13 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
     if not hasattr(cls, "tags"):
         cls.tags = []  # allowed, as for a subclass of kanary.Rule; lint warns about it
     tags = getattr(cls, "tags")
+    if isinstance(tags, str):
+        tags = [tags]  # one tag written alone
+    elif isinstance(tags, (tuple, set, frozenset)):
+        tags = list(tags)
     if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
-        raise ValueError(f"rule '{rule_id}' tags must be list[str]")
+        raise ValueError(f"rule '{rule_id}' tags must be a tag or a list of tags, not {tags!r}")
+    cls.tags = tags
 
     evaluate = getattr(cls, "evaluate", None)
     if not callable(evaluate):
@@ -255,7 +265,12 @@ def prepare_rule_class(cls: type[Any]) -> type[Any]:
             raise ValueError(f"rule '{rule_id}' {attr_name} must be a rule id or a list of rule ids")
         setattr(cls, attr_name, value)
 
-    if "normalize_evaluation" not in cls.__dict__:
+    if isinstance(getattr(cls, "evaluation_interval", None), str):  # "30s", "5m", "1h"
+        try:
+            cls.evaluation_interval = parse_duration(cls.evaluation_interval)
+        except ValueError as exc:
+            raise ValueError(f"rule '{rule_id}' evaluation_interval: {exc}") from None
+    if getattr(cls, "normalize_evaluation", None) is None:  # a class that does not subclass kanary.Rule
         cls.normalize_evaluation = Rule.normalize_evaluation
     return cls
 
@@ -278,6 +293,11 @@ def prepare_source_class(cls: type[Any]) -> type[Any]:
     for name in ("init", "poll", "terminate"):
         _check_method("source", source_id, getattr(cls, name), f"{name}(self)", arity=0, removed="the ctx argument")
 
+    if isinstance(getattr(cls, "interval", None), str):  # "30s", "5m", "1h"
+        try:
+            cls.interval = parse_duration(cls.interval)
+        except ValueError as exc:
+            raise ValueError(f"source '{source_id}' interval: {exc}") from None
     schedule = getattr(cls, "schedule", None)
     try:
         every = every_seconds(schedule)

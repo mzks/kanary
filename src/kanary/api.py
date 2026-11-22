@@ -431,21 +431,23 @@ class ControlAPI:
                 if self.path.startswith("/alerts/") and self.path.endswith("/ack"):
                     rule_id = unquote(self.path[len("/alerts/") : -len("/ack")]).strip("/")
                     body = self._read_json_body()
+                    warnings: list[str] = []
                     alert = self._operator_action(body, lambda operator: engine.acknowledge(
-                        rule_id, operator=operator, reason=body.get("reason")
+                        rule_id, operator=operator, reason=body.get("reason"), warnings=warnings
                     ))
                     if alert is not None:
-                        self._write_json(HTTPStatus.OK, {"status": "acked", "rule_id": alert.rule_id})
+                        self._write_json(HTTPStatus.OK, {"status": "acked", "rule_id": alert.rule_id, "warnings": warnings})
                     return
 
                 if self.path.startswith("/alerts/") and self.path.endswith("/unack"):
                     rule_id = unquote(self.path[len("/alerts/") : -len("/unack")]).strip("/")
                     body = self._read_json_body()
+                    warnings = []
                     alert = self._operator_action(body, lambda operator: engine.unacknowledge(
-                        rule_id, operator=operator, reason=body.get("reason")
+                        rule_id, operator=operator, reason=body.get("reason"), warnings=warnings
                     ))
                     if alert is not None:
-                        self._write_json(HTTPStatus.OK, {"status": "unacked", "rule_id": alert.rule_id})
+                        self._write_json(HTTPStatus.OK, {"status": "unacked", "rule_id": alert.rule_id, "warnings": warnings})
                     return
 
                 if self.path == "/silences/duration":
@@ -464,6 +466,7 @@ class ControlAPI:
                             end_at=start_at + _duration_to_timedelta_minutes(duration_minutes),
                             rule_patterns=body.get("rule_patterns"),
                             tags=body.get("tags"),
+                            warnings=warnings,
                         )
                     except KeyError as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
@@ -491,6 +494,7 @@ class ControlAPI:
                             end_at=_parse_datetime(body["end_at"]),
                             rule_patterns=body.get("rule_patterns"),
                             tags=body.get("tags"),
+                            warnings=warnings,
                         )
                     except KeyError as exc:
                         self._write_json(HTTPStatus.BAD_REQUEST, {"error": f"missing field: {exc.args[0]}"})
@@ -507,11 +511,12 @@ class ControlAPI:
                 if self.path.startswith("/silences/") and self.path.endswith("/cancel"):
                     silence_id = unquote(self.path[len("/silences/") : -len("/cancel")]).strip("/")
                     body = self._read_json_body()
+                    warnings = []
                     silence = self._operator_action(body, lambda operator: engine.cancel_silence(
-                        silence_id, operator=operator, reason=body.get("reason")
+                        silence_id, operator=operator, reason=body.get("reason"), warnings=warnings
                     ))
                     if silence is not None:
-                        self._write_json(HTTPStatus.OK, {"status": "unsilenced", "silence_id": silence.silence_id})
+                        self._write_json(HTTPStatus.OK, {"status": "unsilenced", "silence_id": silence.silence_id, "warnings": warnings})
                     return
 
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})

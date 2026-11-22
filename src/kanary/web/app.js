@@ -2456,7 +2456,13 @@ async function postJson(path, body) {
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  return response.json();
+  const payload = await response.json();
+  // Done, with something to know: a peer that did not get the action, a silence that matches nothing.
+  const warnings = Array.isArray(payload && payload.warnings) ? payload.warnings : [];
+  if (warnings.length) {
+    window.alert(`Done, with warnings:\n\n${warnings.join("\n")}`);
+  }
+  return payload;
 }
 
 function reportActionError(error) {

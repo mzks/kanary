@@ -1644,7 +1644,7 @@ class QuietHoursTest(unittest.TestCase):
             kanary.QuietHours([("22:00", "07:00")], timezone="Mars/Base")
 
     def test_timer_sends_held_events_in_real_time(self):
-        quiet = kanary.QuietHours([("00:00", "00:00")])  # placeholder windows; patched below
+        quiet = kanary.QuietHours([("01:00", "02:00")])  # placeholder windows; patched below
         self.addCleanup(quiet.close)
         done = threading.Event()
         soon = datetime.now(timezone.utc) + timedelta(seconds=0.3)

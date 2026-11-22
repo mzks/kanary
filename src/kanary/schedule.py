@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 import re
 
+from .units import parse_duration
 from .values import to_timezone
 
 
@@ -39,14 +40,6 @@ _WEEKDAYS = ("SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "
 # A schedule should run within this long from now; one that does not never runs.
 _HORIZON = timedelta(days=366 * 5)
 _EVERY = re.compile(r"^@every(?:\s+(.*))?$", re.IGNORECASE)
-_DURATION_PART = re.compile(r"(\d+(?:\.\d*)?|\.\d+)\s*([a-zµ]*)", re.IGNORECASE)
-_DURATION_UNITS = {
-    "": 1.0, "s": 1.0, "sec": 1.0, "secs": 1.0, "second": 1.0, "seconds": 1.0,
-    "ms": 0.001, "us": 1e-6, "µs": 1e-6, "ns": 1e-9,
-    "m": 60.0, "min": 60.0, "mins": 60.0, "minute": 60.0, "minutes": 60.0,
-    "h": 3600.0, "hr": 3600.0, "hrs": 3600.0, "hour": 3600.0, "hours": 3600.0,
-    "d": 86400.0, "day": 86400.0, "days": 86400.0,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,17 +160,13 @@ def every_seconds(schedule: object) -> float | None:
     match = _EVERY.match(schedule.strip())
     if match is None:
         return None
-    text = (match.group(1) or "").replace(" ", "")
-    total, position = 0.0, 0
-    for part in _DURATION_PART.finditer(text):
-        if part.start() != position or part.group(2).lower() not in _DURATION_UNITS:
-            break
-        total += float(part.group(1)) * _DURATION_UNITS[part.group(2).lower()]
-        position = part.end()
-    else:
-        if position == len(text) and total > 0:
-            return total
-    raise ValueError(f"{schedule!r}: write the interval as @every 30s, 5m, 1h30m, or 2d")
+    try:
+        seconds = parse_duration(match.group(1) or "")
+    except ValueError:
+        seconds = 0.0
+    if seconds <= 0:
+        raise ValueError(f"{schedule!r}: write the interval as @every 30s, 5m, 1h30m, or 2d")
+    return seconds
 
 
 def _parse_days_of_month(spec: str) -> tuple[set[int], set[int]]:

@@ -95,6 +95,7 @@ request body は JSON object です。それ以外（JSON でないもの、list
 
 ## API の考え方
 
+- ログインも権限の区別もありません。KANARY は閉じたネットワークで動かす前提で、実験に関わる人は誰でもどの alert も扱えます（[deployment_ja.md](deployment_ja.md) の「ネットワークとアクセス」を参照）。もっと広いネットワークから使う場合は、TLS と認証を付ける reverse proxy を前に置いてください。
 - Web viewer と `kanaryctl` は同じ API を使います
 - history は SQLite 永続化が有効なときだけ残ります
 - `/plugins/{type}/{plugin_id}/source` は loaded plugin と DISCOVERED plugin の source code を返します

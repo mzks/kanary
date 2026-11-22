@@ -74,7 +74,7 @@ source と output はそれぞれ専用の thread で動くので、遅いもの
 `schedule` を使う場合は `interval` を同時に指定しないでください。class 自身（class 本体か decorator）に書いた方が、親 class から引き継いだもう一方より優先されます。
 0.8.0 より前の `poll(ctx)`、`init(ctx)`、`terminate(ctx)` は、今はエラーです。`ctx` 引数を外してください。
 
-`interval` は秒単位の polling 間隔です。`interval = 0` は return したらすぐ次の `poll()` を呼びます。値を待つ `poll()` 専用です（「向こうから届く値」参照）。  
+`interval` は秒単位の polling 間隔です。`"30s"`、`"5m"`、`"1h30m"` のような文字列でも書けます。`interval = 0` は return したらすぐ次の `poll()` を呼びます。値を待つ `poll()` 専用です（「向こうから届く値」参照）。  
 `schedule` は Unix cron 互換の 5-field 文字列で、Kanary server の local time
 で解釈されます。`@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` のような
 少数の macro も使えます。
@@ -264,7 +264,7 @@ class の中に書いた場合は、plugin file を読み込むときに読み�
 - `severity`
 - `evaluate(ctx)`
 
-`tags` は省略できますが、書いてください。tag の無い rule は `include_tags` を持たない output にしか届かず、tag を指定した silence の対象にならず、tag で絞り込む remote の取り込みからも漏れます。lint はそのような rule に warning を出します。
+`tags` は tag の list か、1 つなら文字列（`tags="infra"`）です。省略できますが、書いてください。tag の無い rule は `include_tags` を持たない output にしか届かず、tag を指定した silence の対象にならず、tag で絞り込む remote の取り込みからも漏れます。lint はそのような rule に warning を出します。
 
 `source="postgres"` も、`inputs="postgres:*"` の短縮として引き続き使えます。1つの source が公開する全 input に依存したい時の sugar です。
 
@@ -599,7 +599,7 @@ buffer が貯まるまでに何を出すかは source が決めます。`poll()`
 - `"json"`: 数値か object。入れ子の key は `a.b` になる
 - `"auto"`（既定）: 出力の形から上のどれかを選ぶ
 
-input には任意の Python object を入れられますが、rule が比べるのは数値なので、helper は `kanary.to_number()` で変換します（`"85%"` は `85.0`、`true`/`false` は `1.0`/`0.0`）。変換できない値は `metadata["text"]` に残します。result の metadata には program 名だけを入れ、引数は入れません（token を含むことがあるため）。exit code は `exit_code` input として出し（`report_exit_code = False` で省略）、timeout は poll の失敗になります。独自形式は `parse(stdout)` を override します。
+input には任意の Python object を入れられますが、rule が比べるのは数値なので、helper は `kanary.to_number()` で変換します（`"85%"` は `85.0`、`true`/`false` は `1.0`/`0.0`）。変換できない値は `metadata["text"]` に残します。result の metadata には program 名だけを入れ、引数は入れません（token を含むことがあるため）。exit code は `exit_code` input として出し（`report_exit_code = False` で省略）、timeout は poll の失敗になります。独自形式は `parse(stdout)` を override します。`env` の値は文字列として渡し（`{"RETRIES": 3}` でもよい）、相対パスの `cwd` は他の helper と同じく plugin file の隣を基準にします。
 
 `kanary.SSHCommandSource` は `ssh` 経由で `host` 上で command を実行します。`BatchMode=yes` と `ConnectTimeout` を付け、`user`、`port`、`identity_file`、`ssh_options` を使います。remote の command は subshell で実行し、続けて exit code を書いた marker 行を出すので、ssh 自体の失敗（marker が無い）は poll の失敗として raise し、command 自身の exit code は 255 でも `exit_code` として出します。remote の login shell は POSIX 系が前提です。`wrap_exit_code = False` にすると、exit code 255 は常に ssh の失敗として扱います。他のマシンの disk、load、GPU 状態を読むときの基本形です。
 
@@ -607,9 +607,9 @@ input には任意の Python object を入れられますが、rule が比べる
 
 どれも poll ごとに対象を並列に確認し、測ったものを出します:
 
-- `PingSource`: `hosts` で input 名 → host。`<name>.rtt_ms` は system の `ping` command で ICMP echo を 1 回送った往復時間です。
-- `TCPSource`: `targets` で input 名 → `"host:port"`。`<name>.connect_ms` は TCP 接続にかかった時間です。接続後は何も送りません。
-- `HTTPStatusSource`: `urls` で input 名 → URL。`<name>.status` は HTTP status code、`<name>.response_ms` は応答時間です。`503` などの error status は rule で判定する値であり、失敗ではありません。
+- `PingSource`: `hosts` で input 名 → host（host の list でもよく、その場合は host 名がそのまま input 名）。`<name>.rtt_ms` は system の `ping` command で ICMP echo を 1 回送った往復時間です。
+- `TCPSource`: `targets` で input 名 → `"host:port"`（list でもよく、`"db1:5432"` は `db1_5432`）。`<name>.connect_ms` は TCP 接続にかかった時間です。接続後は何も送りません。
+- `HTTPStatusSource`: `urls` で input 名 → URL（list でもよく、`"https://example.org/health"` は `example.org/health`）。`<name>.status` は HTTP status code、`<name>.response_ms` は応答時間です。`503` などの error status は rule で判定する値であり、失敗ではありません。
 
 応答が無いことは結果であって poll の失敗ではありません。その input は値なし（`None`）になり、error の文面が metadata に入ります。rule に `missing_fires = True` を付けるとこれで発報します。たとえば `*.rtt_ms` に `high = 200.0` の `RangeRule`、`*.status` に `expected = 200` の `ExpectedValueRule` です。JSON の応答から値を読むなら `HTTPJSONSource` を使います。
 
@@ -749,7 +749,7 @@ input の値が `expected` でなければ発報します。`expected` は 1 つ
 - timestamp が `future_tolerance` 秒（default は `30 * kanary.minute`）より先の未来なら、"(time zone?)" 付きの `WARN` で `FIRING`。そういう input は決して stale に見えず、たいていは time zone の無い時刻が原因です。`future_tolerance = None` で切れます
 - payload の `values` は input 名から経過秒数への dict
 
-通常、Ruleは関連Sourceの更新時に評価されます。正の秒数を`evaluation_interval`へ指定すると、それとは独立した固定間隔でも評価します。
+通常、Ruleは関連Sourceの更新時に評価されます。正の秒数（`"30s"`や`"5m"`のような文字列でもよい）を`evaluation_interval`へ指定すると、それとは独立した固定間隔でも評価します。
 
 ```python
 @kanary.rule(
@@ -810,7 +810,7 @@ class Value1Threshold(kanary.ThresholdRule):
 #### RemoteAlarm
 
 - 1 個の remote alert を local rule に mirror する
-- `propagate_ack`, `propagate_silence` により operator action を remote へ転送できる
+- `propagate_ack`, `propagate_silence` により operator action を remote へ転送できる。ローカルの ack や silence は必ず成立します。相手に届かない場合（障害中は相手こそ落ちていることがある）は、API の応答、`kanaryctl`、viewer に warning が出ます。相手側で cancel できなかった silence は、相手側では end time に終わります
 
 #### import_remote_alarms
 
@@ -825,7 +825,8 @@ class Value1Threshold(kanary.ThresholdRule):
 #### MailOutput
 
 - SMTP でメールを送る helper class
-- `smtp_host`、`smtp_port`、`sender`、`recipients` を設定し、login が必要なら `smtp_username` と `smtp_password` も設定する
+- `smtp_host`、`smtp_port`、`sender`、`recipients`（list か、1 つの文字列 `"ops@example.org, oncall@example.org"`）を設定し、login が必要なら `smtp_username` と `smtp_password` も設定する
+- port 587 や 25 では STARTTLS を使います（TLS の無い relay なら `use_starttls = False`）。port 465 では最初から TLS で接続します（他の port でそうするなら `use_ssl = True`）
 - `smtp_password` は plugin file に書かない: `smtp_password = os.environ.get("SMTP_PASSWORD")`（または `kanary.load_json()`）
 - mail には plain text と、chat の output と同じ内容（色付きの見出し、message、field の表）の HTML が入る。`subject(event)`、`body(event)`、`html(event)`（`None` を返すと plain text だけ）を上書きでき、`viewer_url` で viewer への link を付けられる
 
@@ -882,7 +883,7 @@ class Slack(kanary.SlackOutput):
         self.quiet.send(event, super().emit)
 ```
 
-- `send(event, callback)` は、event が時間帯（`("HH:MM", "HH:MM")`。日付をまたいでもよい。`timezone` で解釈）に入っていて `minimum_severity` 未満でない限り、すぐ `callback(event)` を呼びます。
+- `send(event, callback)` は、event が時間帯（`("HH:MM", "HH:MM")`。日付をまたいでもよい。`timezone` で解釈。`"24:00"` はその日の終わりの 0 時。1 つだけなら list にしなくてよい）に入っていて `minimum_severity`（他と同じ書き方: `kanary.CRITICAL`、`"critical"`、`40`）未満でない限り、すぐ `callback(event)` を呼びます。一日中を覆う時間帯はエラーです。それには output の `minimum_severity` を使います。
 - 該当する event は静かな時間帯が終わるまで保留します。続けて並んだ時間帯は 1 つとして扱います。終わったときに何を送るかは `release` で選びます: `"all"`（既定）は保留した event を全部、元の順番で `callback` に渡します。`"latest"` は rule ごとに最新の 1 件だけ。`"summary"` は全部をまとめて `summary(events)` を 1 回呼び、1 通の message にします（`SlackOutput`、`MattermostOutput`、`DiscordOutput`、`WebhookOutput`、`MailOutput` は `emit_summary(events)` を持っています。保留が 1 件だけならいつもどおり `callback` に渡します）。`defer=False` にすると保留せず捨てます。
 - ある rule の event をすぐ送るとき（夜間の `CRITICAL` への escalation など）、`"all"` ではその rule の保留分を先に送るので、受け手から順番が逆に見えることはありません。`"latest"` と `"summary"` では、今送る event の方が新しいので保留分は捨てます。
 - `timezone` は `kanary.to_timezone()` が読めるものです: IANA 名（`"Asia/Tokyo"`）、offset（`"+09:00"`、`"+9"`、`"UTC+9"`）、`"UTC"`。省略すると host の local time です。
@@ -895,10 +896,10 @@ class Slack(kanary.SlackOutput):
 
 `kanary.OnCallSchedule(shifts, timezone=None, default=())` は当番を返します: `schedule.recipients(at)`。各 shift は mapping で、通常は `kanary.load_toml()` で読みます:
 
-- 曜日指定: `weekdays`（`"mon"` など）、`from`、`to`（日付をまたいでもよい）、`recipients`
+- 曜日指定: `weekdays`（略しても略さなくてもよい名前 `["mon", "Tuesday"]`、範囲 `"mon-fri"`、`"mon,wed,fri"`。不明な名前はエラー）、`from`、`to`（日付をまたいでもよい。`"24:00"` は 0 時まで。一日中なら両方とも書かない）、`recipients`（list か、カンマ区切りの 1 つの文字列）
 - 日付指定: `start`、`end`、`recipients`。曜日指定より優先
 
-どの shift にも当たらないときは `default` を返します。`oncall` template が `MailOutput.recipients_for()` と `QuietHours` を組み合わせた例です。
+どの shift にも当たらないときは `default`（list か、カンマ区切りの 1 つの文字列）を返します。`oncall` template が `MailOutput.recipients_for()` と `QuietHours` を組み合わせた例です。
 
 ### 不正な設定
 

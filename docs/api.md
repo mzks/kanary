@@ -95,6 +95,7 @@ A request body is a JSON object; anything else (not JSON, a list, a string) retu
 
 ## Design Notes
 
+- There is no login and no roles: KANARY runs on a closed network, where everyone of the experiment may act on any alert (see "Network And Access" in [deployment.md](deployment.md)). For a wider network, put a reverse proxy with TLS and authentication in front.
 - The Web viewer and `kanaryctl` use the same API.
 - History is only persisted when SQLite storage is enabled.
 - `GET /plugins/{type}/{plugin_id}/source` returns source code for loaded and discovered plugins.

@@ -64,9 +64,9 @@ def normalize_rule_inputs(inputs: Any, *, source: str | None = None) -> list[str
         return []
     if isinstance(inputs, str):
         return [inputs]
-    if isinstance(inputs, list) and all(isinstance(item, str) for item in inputs):
+    if isinstance(inputs, (list, tuple)) and all(isinstance(item, str) for item in inputs):
         return list(inputs)
-    raise ValueError("inputs must be a string or list[str]")
+    raise ValueError("inputs must be a selector or a list of selectors, such as 'daq:hv*' or ['a:v', 'b:v']")
 
 
 def resolve_rule_sources(inputs: Iterable[str], available_source_ids: Iterable[str]) -> list[str]:

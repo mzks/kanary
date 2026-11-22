@@ -27,6 +27,7 @@ _PING_TIME = re.compile(r"time[=<]([0-9.]+)\s*ms")
 class PingSource(Source):
     """``<name>.rtt_ms``: the round-trip time of one ICMP echo to each host.
 
+    hosts maps input names to hosts, or lists hosts (each named after itself).
     Uses the system ping command, so no privileges are needed.
     """
 
@@ -35,8 +36,8 @@ class PingSource(Source):
     max_workers: int = 8
 
     def poll(self) -> PollResult:
-        _require(self.hosts, "PingSource.hosts", "input names to host names or addresses")
-        return _check_all(self.hosts, self.ping, ["rtt_ms"], self.max_workers)
+        hosts = _named(self.hosts, "PingSource.hosts", "input names to host names or addresses", str)
+        return _check_all(hosts, self.ping, ["rtt_ms"], self.max_workers)
 
     def ping(self, host: str) -> dict[str, float]:
         wait = str(max(1, math.ceil(self.timeout)))
@@ -52,17 +53,20 @@ class PingSource(Source):
 
 
 class TCPSource(Source):
-    """``<name>.connect_ms``: how long a TCP connect to each "host:port" takes."""
+    """``<name>.connect_ms``: how long a TCP connect to each "host:port" takes.
+
+    targets maps input names to "host:port", or lists them ("db1:5432" is named db1_5432).
+    """
 
     targets: dict[str, str] = {}
     timeout: float = 5.0
     max_workers: int = 8
 
     def poll(self) -> PollResult:
-        _require(self.targets, "TCPSource.targets", "input names to 'host:port'")
-        for name, target in self.targets.items():
+        targets = _named(self.targets, "TCPSource.targets", "input names to 'host:port'", _plain_name)
+        for name, target in targets.items():
             _host_port(name, target)
-        return _check_all(self.targets, self.connect, ["connect_ms"], self.max_workers)
+        return _check_all(targets, self.connect, ["connect_ms"], self.max_workers)
 
     def connect(self, target: str) -> dict[str, float]:
         host, port = _host_port("", target)
@@ -76,6 +80,8 @@ class HTTPStatusSource(Source):
 
     An error status such as 503 is a value, not a failure: check it with a rule.
     Only a connection that gets no HTTP answer at all leaves the values empty.
+    urls maps input names to URLs, or lists them ("https://example.org/health" is
+    named example.org/health).
     """
 
     urls: dict[str, str] = {}
@@ -84,11 +90,11 @@ class HTTPStatusSource(Source):
     max_workers: int = 8
 
     def poll(self) -> PollResult:
-        _require(self.urls, "HTTPStatusSource.urls", "input names to http(s) URLs")
-        for name, url in self.urls.items():
+        urls = _named(self.urls, "HTTPStatusSource.urls", "input names to http(s) URLs", _url_name)
+        for name, url in urls.items():
             if urlsplit(str(url)).scheme not in {"http", "https"}:
                 raise ValueError(f"url {name!r} must start with http:// or https://")
-        return _check_all(self.urls, self.request, ["status", "response_ms"], self.max_workers)
+        return _check_all(urls, self.request, ["status", "response_ms"], self.max_workers)
 
     def request(self, url: str) -> dict[str, float]:
         request = Request(url, headers={"User-Agent": "kanary", **self.headers})
@@ -128,9 +134,34 @@ def _check_all(
     return inputs(items)
 
 
-def _require(mapping: Any, setting: str, what: str) -> None:
-    if not isinstance(mapping, Mapping) or not mapping:
+def _named(targets: Any, setting: str, what: str, name_for: Callable[[str], str]) -> dict[str, str]:
+    """{input name: target} from a dict, or from a list of targets named by name_for."""
+    if isinstance(targets, Mapping):
+        named = {str(name): str(target) for name, target in targets.items()}
+    elif isinstance(targets, (list, tuple, set, frozenset)):
+        named = {}
+        for target in (str(item) for item in targets):
+            name = name_for(target)
+            if name in named:
+                raise ValueError(f"{setting}: {named[name]!r} and {target!r} both get the name {name!r}; use a dict")
+            named[name] = target
+    elif isinstance(targets, str) and targets:
+        named = {name_for(targets): targets}
+    else:
+        raise ValueError(f"{setting} must be a dict of {what}, or a list of them, not {targets!r}")
+    if not named:
         raise ValueError(f"{setting} is empty; map {what}")
+    return named
+
+
+def _plain_name(target: str) -> str:
+    """An input name without ':' (which separates source and input): db1:5432 -> db1_5432."""
+    return target.strip("[]").replace("]:", "_").replace(":", "_")
+
+
+def _url_name(url: str) -> str:
+    parts = urlsplit(url)
+    return _plain_name(f"{parts.netloc}{parts.path}".rstrip("/")) or url
 
 
 def _host_port(name: str, target: str) -> tuple[str, int]:

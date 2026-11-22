@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from ..models import AlertEvent, PollResult
+from ..plugin_files import path_beside_plugin
 from ..output import Output, event_record
 from ..source import Source, inputs, no_data
 from ..values import json_ready, parse_values
@@ -28,8 +29,8 @@ class CommandSource(Source):
     timeout: float = 10.0
     output_format: str = "auto"
     value_name: str = "value"
-    env: dict[str, str] = {}
-    cwd: str | None = None
+    env: dict[str, str] = {}  # values are passed as text: {"RETRIES": 3} is "3"
+    cwd: str | None = None  # a relative path is next to the plugin file, as for other helpers
     report_exit_code: bool = True
 
     def args(self) -> list[str]:
@@ -52,8 +53,8 @@ class CommandSource(Source):
             capture_output=True,
             text=True,
             timeout=self.timeout,
-            env={**os.environ, **self.env} if self.env else None,
-            cwd=self.cwd,
+            env={**os.environ, **_text_env(self.env)} if self.env else None,
+            cwd=path_beside_plugin(self, self.cwd) if self.cwd else None,
         )
 
     def parse(self, stdout: str) -> tuple[dict[str, float], dict[str, str]]:
@@ -84,6 +85,11 @@ class CommandSource(Source):
         if not items:
             return no_data(reason="command printed no values", metadata=metadata)
         return inputs(items, metadata=metadata)
+
+
+def _text_env(env: dict[str, Any]) -> dict[str, str]:
+    """Environment variables as text: a number or a path in env works as written."""
+    return {str(name): "" if value is None else str(value) for name, value in env.items()}
 
 
 _EXIT_MARKER = "__kanary_exit="
@@ -177,7 +183,7 @@ class CommandOutput(Output):
         record = self.record(event)
         env = {
             **os.environ,
-            **self.env,
+            **_text_env(self.env),
             "KANARY_RULE_ID": event.rule_id,
             "KANARY_STATE": event.current_state.value,
             "KANARY_PREVIOUS_STATE": event.previous_state.value if event.previous_state else "",

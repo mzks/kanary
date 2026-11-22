@@ -375,18 +375,27 @@ sudo systemctl restart kanary
 これは runtime reload ではなく deployment operation です。Python package の追加・更新後は
 process restart を行ってください。
 
+## ネットワークとアクセス
+
+KANARY は閉じたネットワーク（実験のネットワークや、実験に関わる人だけが入れる host）で動かす前提です。
+API と Web viewer には、意図してログインも権限の区別もありません。実験に関わる人は誰でも、すべての alert を見て、acknowledge、silence、reload ができ、plugin のソースも読めます。管理者はいません。viewer に届く人は全員が、alert を自分ごととして扱います。操作には、それぞれ operator の名前と理由が記録されます。
+
+- `--api-host` の既定は `0.0.0.0`（すべての interface）です。届く範囲を絞るには、1 つの interface に bind します: `--api-host 127.0.0.1`、または実験のネットワーク側の address。
+- もっと広いネットワークから使う場合は、TLS と認証を付ける reverse proxy を前に置いてください。KANARY をそのまま internet に公開しないでください。
+- Plugins 画面には plugin のソースが表示されます。secret は plugin のコードではなく、環境変数や secrets file（`kanary.load_json()`）に置いてください。
+
 ## runtime option
 
 主な option:
 
 - `--api-host`
-  API と Web viewer の bind host を指定します。既定は `0.0.0.0` です。
+  API と Web viewer の bind host を指定します。既定は `0.0.0.0` です。上の「ネットワークとアクセス」を参照してください。
 - `--api-port`
-  API と Web viewer の port を指定します。文書中の例は `8000` を使っています。
+  API と Web viewer の port を指定します。文書中の例は `8000` を使っています。他の process が使っている port だと、message を出して起動を止めます。
 - `--state-db`
   SQLite に history を保存する path を指定します。
 - `--log-level`
-  runtime logging level を指定します。
+  runtime logging level を指定します: `debug`、`info`、`warning`、`error`、`critical`（大文字小文字は問いません。`--auto-reload` の `off`、`dirty`、`all` も同じです）。
 - `--disable-default-viewer`
   組み込み Web viewer だけを無効化します。HTTP API は引き続き有効です。
 - `--viewer-title`

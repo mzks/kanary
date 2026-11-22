@@ -7,6 +7,7 @@ import smtplib
 
 from ..models import AlertEvent
 from ..output import Output
+from ..values import address_list
 from .notice import describe, digest
 
 
@@ -25,15 +26,17 @@ class MailOutput(Output):
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_timeout: float = 10.0
-    use_starttls: bool = True
+    use_starttls: bool = True  # on a plain connection (port 587, 25)
+    # TLS from the start (SMTPS); None: when smtp_port is 465, the port for it.
+    use_ssl: bool | None = None
     sender: str | None = None
-    recipients: list[str] = []
+    recipients: list[str] = []  # or one string: "ops@example.org, oncall@example.org"
     subject_prefix: str = "[KANARY]"
     viewer_url: str | None = None
 
     def recipients_for(self, event: AlertEvent) -> list[str]:
         """Who receives this event; override to use an OnCallSchedule."""
-        return list(self.recipients)
+        return address_list(self.recipients)
 
     def init(self) -> None:
         # smtp_password is a secret: smtp_password = os.environ.get("SMTP_PASSWORD").
@@ -42,11 +45,11 @@ class MailOutput(Output):
             raise ValueError(f"{name}.smtp_host is not set")
         if not self.sender:
             raise ValueError(f"{name}.sender is not set")
-        if not self.recipients and type(self).recipients_for is MailOutput.recipients_for:
+        if not address_list(self.recipients) and type(self).recipients_for is MailOutput.recipients_for:
             raise ValueError(f"{name}.recipients is empty; set it or override recipients_for()")
 
     def emit(self, event: AlertEvent) -> None:
-        recipients = self.recipients_for(event)
+        recipients = address_list(self.recipients_for(event))
         if not recipients:
             raise RuntimeError(f"no recipients for {event.rule_id}")
         message = self.message(event)
@@ -54,9 +57,14 @@ class MailOutput(Output):
         self.send_mail(message)
 
     def send_mail(self, message: EmailMessage) -> None:
-        """Send a finished mail over SMTP."""
-        with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=self.smtp_timeout) as smtp:
-            if self.use_starttls:
+        """Send a finished mail over SMTP: STARTTLS on port 587 / 25, TLS from the start on 465."""
+        implicit_tls = self.use_ssl if self.use_ssl is not None else int(self.smtp_port) == 465
+        if implicit_tls:
+            connection = smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=self.smtp_timeout)
+        else:
+            connection = smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=self.smtp_timeout)
+        with connection as smtp:
+            if self.use_starttls and not implicit_tls:
                 smtp.starttls()
             if self.smtp_username:
                 smtp.login(self.smtp_username, self.smtp_password or "")
@@ -64,7 +72,7 @@ class MailOutput(Output):
 
     def emit_summary(self, events: list[AlertEvent]) -> None:
         """Send several events as one mail (QuietHours with release="summary")."""
-        recipients = sorted({address for event in events for address in self.recipients_for(event)})
+        recipients = sorted({address for event in events for address in address_list(self.recipients_for(event))})
         if not recipients:
             raise RuntimeError("no recipients for the summary")
         summary = digest(events, viewer_url=self.viewer_url)

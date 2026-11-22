@@ -853,12 +853,19 @@ class Engine:
                 logger.exception("source '%s' init failed during reload", source.source_id)
         return errors
 
-    def acknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
+    def acknowledge(
+        self, rule_id: str, *, operator: str, reason: str | None = None, warnings: list[str] | None = None
+    ) -> Alert:
+        """Acknowledge a FIRING alert. An imported (remote) one is acknowledged at its peer
+        too; when the peer cannot be reached the local ack still holds, and why the peer
+        did not get it is added to ``warnings`` (and logged)."""
         with self._lock:
             rule = self._operator_rule(rule_id)
             self._require_firing(rule_id)
-        # An imported (remote) alarm is acknowledged at its peer first, over the network.
-        self._propagate_remote_ack(rule, operator=operator, reason=reason)
+        self._to_peer(
+            warnings, f"the ack of '{rule_id}' did not reach its peer",
+            getattr(rule, "acknowledge_remote", None), self, operator=operator, reason=reason,
+        )
         with self._lock:
             rule = self._operator_rule(rule_id)
             alert = self._require_firing(rule_id)
@@ -903,13 +910,18 @@ class Engine:
             )
             return alert
 
-    def unacknowledge(self, rule_id: str, *, operator: str, reason: str | None = None) -> Alert:
+    def unacknowledge(
+        self, rule_id: str, *, operator: str, reason: str | None = None, warnings: list[str] | None = None
+    ) -> Alert:
         with self._lock:
             rule = self._operator_rule(rule_id)
             alert = self.alerts.get(rule_id)
             if rule_id not in self.acknowledgements and (alert is None or alert.state != AlertState.ACKED):
                 raise NotApplicable(f"rule '{rule_id}' is not acknowledged")
-        self._propagate_remote_unack(rule, operator=operator, reason=reason)
+        self._to_peer(
+            warnings, f"the unack of '{rule_id}' did not reach its peer",
+            getattr(rule, "unacknowledge_remote", None), self, operator=operator, reason=reason,
+        )
         with self._lock:
             rule = self._operator_rule(rule_id)
             now = self._now_fn()
@@ -965,14 +977,16 @@ class Engine:
         rule_patterns: list[str] | None = None,
         tags: list[str] | None = None,
         reason: str | None = None,
+        warnings: list[str] | None = None,
     ) -> Silence:
+        """Silence the matching rules. Imported (remote) alarms are silenced at their peers
+        too; a peer that cannot be reached does not stop the local silence (see ``warnings``)."""
         start_at, end_at = coerce_datetime(start_at), coerce_datetime(end_at)  # local time without a zone
         if end_at <= start_at:
             raise ValueError("silence end_at must be later than start_at")
         rule_patterns, tags = _silence_targets(rule_patterns, "rule_patterns"), _silence_targets(tags, "tags")
         if not (rule_patterns or tags):
             raise ValueError("silence requires at least one rule pattern or tag")
-        # Imported (remote) alarms are silenced at their peers first, over the network.
         remote_silence_refs = self._propagate_remote_silence(
             operator=operator,
             reason=reason,
@@ -980,6 +994,7 @@ class Engine:
             end_at=end_at,
             rule_patterns=tuple(rule_patterns or []),
             tags=tuple(tags or []),
+            warnings=warnings,
         )
         with self._lock:
             silence = Silence(
@@ -999,7 +1014,11 @@ class Engine:
             self._notify_silence_changed()
             return silence
 
-    def cancel_silence(self, silence_id: str, *, operator: str, reason: str | None = None) -> Silence:
+    def cancel_silence(
+        self, silence_id: str, *, operator: str, reason: str | None = None, warnings: list[str] | None = None
+    ) -> Silence:
+        """Cancel a silence here, and its copies at the peers; one a peer did not cancel
+        ends there at its end_at (see ``warnings``)."""
         with self._lock:
             silence = self.silences.get(silence_id)
             if silence is None:
@@ -1010,6 +1029,7 @@ class Engine:
             silence.remote_silence_refs,
             operator=operator,
             reason=reason,
+            warnings=warnings,
         )
         with self._lock:
             silence.cancelled_at = self._now_fn()
@@ -2164,15 +2184,22 @@ class Engine:
     def _is_rule_excluded(self, rule_id: str) -> bool:
         return any(fnmatch(rule_id, pattern) for pattern in self._exclude_rule_patterns)
 
-    def _propagate_remote_ack(self, rule: Rule, *, operator: str, reason: str | None) -> None:
-        acknowledge_remote = getattr(rule, "acknowledge_remote", None)
-        if callable(acknowledge_remote):
-            acknowledge_remote(self, operator=operator, reason=reason)
+    def _to_peer(self, warnings: list[str] | None, what: str, call: object, *args: object, **kwargs: object) -> object:
+        """Forward an operator action to a peer; a failure is a warning, not the action failing.
 
-    def _propagate_remote_unack(self, rule: Rule, *, operator: str, reason: str | None) -> None:
-        unacknowledge_remote = getattr(rule, "unacknowledge_remote", None)
-        if callable(unacknowledge_remote):
-            unacknowledge_remote(self, operator=operator, reason=reason)
+        During an incident the peer may be the thing that is down: the local ack or
+        silence must still work then.
+        """
+        if not callable(call):
+            return None
+        try:
+            return call(*args, **kwargs)
+        except Exception as exc:
+            message = f"{what}: {type(exc).__name__}: {exc}"
+            logger.warning("%s", message)
+            if warnings is not None:
+                warnings.append(message)
+            return None
 
     def _propagate_remote_silence(
         self,
@@ -2183,6 +2210,7 @@ class Engine:
         end_at: datetime,
         rule_patterns: tuple[str, ...],
         tags: tuple[str, ...],
+        warnings: list[str] | None = None,
     ) -> tuple[str, ...]:
         remote_refs: list[str] = []
         seen_rule_ids: set[str] = set()
@@ -2190,15 +2218,10 @@ class Engine:
             if rule.rule_id in seen_rule_ids:
                 continue
             seen_rule_ids.add(rule.rule_id)
-            create_remote_silence = getattr(rule, "create_remote_silence", None)
-            if not callable(create_remote_silence):
-                continue
-            remote_silence_id = create_remote_silence(
-                self,
-                operator=operator,
-                reason=reason,
-                start_at=start_at.isoformat(),
-                end_at=end_at.isoformat(),
+            remote_silence_id = self._to_peer(
+                warnings, f"the silence of '{rule.rule_id}' did not reach its peer",
+                getattr(rule, "create_remote_silence", None), self,
+                operator=operator, reason=reason, start_at=start_at.isoformat(), end_at=end_at.isoformat(),
             )
             if remote_silence_id:
                 remote_refs.append(f"{rule.source}:{remote_silence_id}")
@@ -2210,15 +2233,17 @@ class Engine:
         *,
         operator: str,
         reason: str | None,
+        warnings: list[str] | None = None,
     ) -> None:
         for ref in remote_silence_refs:
             source_id, _, remote_silence_id = ref.partition(":")
             if not source_id or not remote_silence_id:
                 continue
             source = self.sources.get(source_id)
-            cancel_remote_silence = getattr(source, "cancel_remote_silence", None)
-            if callable(cancel_remote_silence):
-                cancel_remote_silence(remote_silence_id, operator=operator, reason=reason)
+            self._to_peer(
+                warnings, f"silence {remote_silence_id} at '{source_id}' was not cancelled (it ends at its end time)",
+                getattr(source, "cancel_remote_silence", None), remote_silence_id, operator=operator, reason=reason,
+            )
 
     def _initialize_output(self, output_id: str, output: Output) -> None:
         """init() on the output's thread; after a failure it is tried again while the output is idle."""

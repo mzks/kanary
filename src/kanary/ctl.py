@@ -296,6 +296,7 @@ def main() -> int:
                 method="POST",
                 body={"operator": args.operator, "reason": args.reason},
             )
+            print_warnings(payload)
             print(payload.get("status", "unknown"))
             return 0
 
@@ -305,6 +306,7 @@ def main() -> int:
                 method="POST",
                 body={"operator": args.operator, "reason": args.reason},
             )
+            print_warnings(payload)
             print(payload.get("status", "unknown"))
             return 0
 
@@ -321,8 +323,7 @@ def main() -> int:
                     "tags": args.tag,
                 },
             )
-            for warning in payload.get("warnings", []):
-                print(f"warning: {warning}", file=sys.stderr)
+            print_warnings(payload)
             print_silence_window(payload)
             print(payload.get("silence_id", payload.get("status", "unknown")))
             return 0
@@ -340,8 +341,7 @@ def main() -> int:
                     "tags": args.tag,
                 },
             )
-            for warning in payload.get("warnings", []):
-                print(f"warning: {warning}", file=sys.stderr)
+            print_warnings(payload)
             print_silence_window(payload)
             print(payload.get("silence_id", payload.get("status", "unknown")))
             return 0
@@ -352,6 +352,7 @@ def main() -> int:
                 method="POST",
                 body={"operator": args.operator, "reason": args.reason},
             )
+            print_warnings(payload)
             print(payload.get("status", "unknown"))
             return 0
 
@@ -537,6 +538,12 @@ def _error_detail(exc: HTTPError) -> str:
     """The API's own reason for an error answer, when it gave one."""
     error = _error_body(exc).get("error")
     return f": {error}" if error else ""
+
+
+def print_warnings(payload: dict) -> None:
+    """What the API warns about with an action, such as a peer that did not get it, on stderr."""
+    for warning in payload.get("warnings") or []:
+        print(f"warning: {warning}", file=sys.stderr)
 
 
 def _error_body(exc: HTTPError) -> dict:

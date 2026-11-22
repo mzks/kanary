@@ -231,6 +231,18 @@ def parse_values(
     return numbers, texts
 
 
+def address_list(value: Any) -> list[str]:
+    """Addresses (or other names) from a list, or from one string: "a@x, b@y" or "a@x; b@y".
+
+    A single string is never read letter by letter.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):  # a display name may have spaces: "Ops Team <ops@example.org>"
+        return [item.strip() for item in re.split(r"[,;]", value) if item.strip()]
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
 def is_number(value: Any) -> bool:
     """True for an int or a finite float (not a bool, NaN, or infinity)."""
     if isinstance(value, float):

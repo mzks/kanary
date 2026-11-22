@@ -272,6 +272,15 @@ Examples:
 
 `demo/` is for the first working run. For a plugin of your own, start from a template: `kanary new --list` lists them, and [docs/templates.md](docs/templates.md) shows each one.
 
+## Network And Access
+
+KANARY is meant to run on a closed network: the experiment's own network, or a host that only the people of the experiment reach.
+The API and the Web viewer have no login and no roles, on purpose. Everyone who works on the experiment sees every alert and can acknowledge, silence, reload, and read the plugin source; there is no administrator. Each person who reaches the viewer is responsible for the alerts as their own, and every action records the operator's name and reason.
+
+- `--api-host` defaults to `0.0.0.0` (every interface). To narrow who reaches it, bind one interface: `--api-host 127.0.0.1`, or the address on the experiment's network.
+- To reach KANARY from a wider network, put a reverse proxy with TLS and authentication in front of it. Do not expose KANARY to the internet as it is.
+- The Plugins page shows plugin source code: keep secrets in environment variables or a secrets file (`kanary.load_json()`), not in the plugin code.
+
 ## Web Viewer
 
 Kanary includes a built-in Web viewer.

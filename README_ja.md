@@ -261,6 +261,15 @@ Kanary 本体に必須の環境変数はありません。必要に応じて次�
 
 `demo/` は最初の 1 回を動かすための短い例です。自分の plugin は template から始めてください。`kanary new --list` で一覧が出て、[docs/templates_ja.md](docs/templates_ja.md) にそれぞれの中身があります。
 
+## ネットワークとアクセス
+
+KANARY は閉じたネットワーク（実験のネットワークや、実験に関わる人だけが入れる host）で動かす前提です。
+API と Web viewer には、意図してログインも権限の区別もありません。実験に関わる人は誰でも、すべての alert を見て、acknowledge、silence、reload ができ、plugin のソースも読めます。管理者はいません。viewer に届く人は全員が、alert を自分ごととして扱います。操作には、それぞれ operator の名前と理由が記録されます。
+
+- `--api-host` の既定は `0.0.0.0`（すべての interface）です。届く範囲を絞るには、1 つの interface に bind します: `--api-host 127.0.0.1`、または実験のネットワーク側の address。
+- もっと広いネットワークから使う場合は、TLS と認証を付ける reverse proxy を前に置いてください。KANARY をそのまま internet に公開しないでください。
+- Plugins 画面には plugin のソースが表示されます。secret は plugin のコードではなく、環境変数や secrets file（`kanary.load_json()`）に置いてください。
+
 ## Web viewer
 
 Kanary には組み込みの Web viewer が含まれています。  

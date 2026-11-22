@@ -12,7 +12,7 @@ plugin は Source / Rule / Output ごとに独立して load・実行されま�
 kanary lint ./plugins
 ```
 
-`lint ok` は「directory を import して定義を検査できた」ことを示します。外部接続、通知内容、閾値を含むすべての動作を保証するものではありません。decorator 引数の未知の名前（属性名の typo など）や、decorator と class 本体で値が食い違う場合は warning になりますが、class 属性名の typo は検出できません。plugin module の import 時には任意の Python code が実行されるため、外部接続や書込みは `init()` / `poll()` / `emit()` に置き、module top level では行わないでください。
+`lint ok` は「directory を import して定義を検査できた」ことを示します。存在しない directory はエラーです（`kanary run` も同じ）。外部接続、通知内容、閾値を含むすべての動作を保証するものではありません。decorator 引数の未知の名前（属性名の typo など）や、decorator と class 本体で値が食い違う場合は warning になりますが、class 属性名の typo は検出できません。plugin module の import 時には任意の Python code が実行されるため、外部接続や書込みは `init()` / `poll()` / `emit()` に置き、module top level では行わないでください。
 
 本番と同じ plugin と入力を使って routing を確認するには、別 port・別 node ID で shadow instance を起動します。
 

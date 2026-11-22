@@ -62,6 +62,10 @@ class RuleDirectoryLoader:
                 snapshot, report = self.inspect(exclude_patterns)
             report.warnings.extend(notes)
             return snapshot, report
+        missing = [str(path) for path in self.rule_directories if not path.exists()]
+        if missing:
+            # A typo in the path would otherwise load nothing and report no problem.
+            raise ValueError(f"plugin directory not found: {', '.join(missing)}")
         previous_sources = get_source_registry()
         previous_rules = get_rule_registry()
         previous_outputs = get_output_registry()

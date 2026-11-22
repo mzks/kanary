@@ -12,7 +12,7 @@ First, verify that the plugin directory can be loaded.
 kanary lint ./plugins
 ```
 
-`lint ok` means that Kanary could import the directory and inspect its definitions. It does not guarantee every behavior, including external connectivity, notification content, or thresholds. Unknown decorator arguments, such as a misspelled attribute name, and values set differently in the decorator and the class body are reported as warnings, but a typo in a class attribute name is not detected. Importing a plugin module executes arbitrary Python code, so keep external connections and writes in `init()`, `poll()`, or `emit()`, rather than at module top level.
+`lint ok` means that Kanary could import the directory and inspect its definitions; a directory that does not exist is an error (for `kanary run` too). It does not guarantee every behavior, including external connectivity, notification content, or thresholds. Unknown decorator arguments, such as a misspelled attribute name, and values set differently in the decorator and the class body are reported as warnings, but a typo in a class attribute name is not detected. Importing a plugin module executes arbitrary Python code, so keep external connections and writes in `init()`, `poll()`, or `emit()`, rather than at module top level.
 
 To verify routing with the same plugins and inputs as production, start a shadow instance on a different port with a different node ID.
 

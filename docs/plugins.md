@@ -73,7 +73,7 @@ If you omit both `interval` and `schedule`, Kanary uses `interval = 60.0`.
 If you use `schedule`, do not set `interval` at the same time. One written on the class itself (in its body or decorator) replaces the other one inherited from a base class.
 The `poll(ctx)`, `init(ctx)`, and `terminate(ctx)` of KANARY before 0.8.0 are an error now: drop the `ctx` argument.
 
-`interval` is a polling interval in seconds. `interval = 0` calls `poll()` again as soon as it returns; use it only for a `poll()` that waits for data (see "Values that arrive by themselves").
+`interval` is a polling interval in seconds, or text such as `"30s"`, `"5m"`, or `"1h30m"`. `interval = 0` calls `poll()` again as soon as it returns; use it only for a `poll()` that waits for data (see "Values that arrive by themselves").
 `schedule` is a Unix cron-compatible 5-field string interpreted in the local time
 of the Kanary server. A small set of macros is also supported, such as
 `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly`.
@@ -266,7 +266,7 @@ Required:
 - `severity`
 - `evaluate(ctx)`
 
-`tags` is optional, but write it: a rule without tags reaches only the outputs without `include_tags`, cannot be silenced by tag, and is left out by remote imports filtered by tag. Lint warns about such a rule.
+`tags` is a list of tags, or one tag as a string (`tags="infra"`). It is optional, but write it: a rule without tags reaches only the outputs without `include_tags`, cannot be silenced by tag, and is left out by remote imports filtered by tag. Lint warns about such a rule.
 
 `source="postgres"` remains available as a shorthand for `inputs="postgres:*"` when you want to depend on everything exposed by one source.
 
@@ -598,7 +598,7 @@ History lives in the source, not in rules: rules only see the current and previo
 - `"json"`: a number or an object; nested keys become `a.b`
 - `"auto"` (default): chosen from the shape of the output
 
-Inputs can hold any Python object, but the helpers convert values with `kanary.to_number()` (`"85%"` becomes `85.0`, `true`/`false` become `1.0`/`0.0`) because rules compare numbers. Values that do not convert are kept in `metadata["text"]`. The result metadata names only the program, not its arguments, since arguments may carry tokens. The exit code is reported as the `exit_code` input (`report_exit_code = False` leaves it out), and a timeout is a poll failure. Override `parse(stdout)` for custom output.
+Inputs can hold any Python object, but the helpers convert values with `kanary.to_number()` (`"85%"` becomes `85.0`, `true`/`false` become `1.0`/`0.0`) because rules compare numbers. Values that do not convert are kept in `metadata["text"]`. The result metadata names only the program, not its arguments, since arguments may carry tokens. The exit code is reported as the `exit_code` input (`report_exit_code = False` leaves it out), and a timeout is a poll failure. Override `parse(stdout)` for custom output. `env` values are passed as text (`{"RETRIES": 3}` works), and a relative `cwd` is next to the plugin file, as for the other helpers.
 
 `kanary.SSHCommandSource` runs the command on `host` through `ssh` with `BatchMode=yes` and `ConnectTimeout`, using `user`, `port`, `identity_file`, and `ssh_options`. The remote command runs in a subshell followed by a marker line carrying its exit code, so a failure of ssh itself (no marker) is raised as a poll failure while the command's own exit code, even 255, is reported as `exit_code`. This needs a POSIX-like login shell on the remote host; with `wrap_exit_code = False`, exit code 255 is always treated as an ssh failure. This is the usual way to read disk, load, or GPU status of other machines.
 
@@ -606,9 +606,9 @@ Inputs can hold any Python object, but the helpers convert values with `kanary.t
 
 Each checks its targets in parallel once per poll and reports what it measured:
 
-- `PingSource`: `hosts` maps input names to hosts; `<name>.rtt_ms` is the round-trip time of one ICMP echo through the system `ping` command.
-- `TCPSource`: `targets` maps input names to `"host:port"`; `<name>.connect_ms` is how long the TCP connect took. Nothing is sent after connecting.
-- `HTTPStatusSource`: `urls` maps input names to URLs; `<name>.status` is the HTTP status code and `<name>.response_ms` the response time. An error status such as `503` is a value to check with a rule, not a failure.
+- `PingSource`: `hosts` maps input names to hosts (or lists hosts, each named after itself); `<name>.rtt_ms` is the round-trip time of one ICMP echo through the system `ping` command.
+- `TCPSource`: `targets` maps input names to `"host:port"` (or lists them: `"db1:5432"` is named `db1_5432`); `<name>.connect_ms` is how long the TCP connect took. Nothing is sent after connecting.
+- `HTTPStatusSource`: `urls` maps input names to URLs (or lists them: `"https://example.org/health"` is named `example.org/health`); `<name>.status` is the HTTP status code and `<name>.response_ms` the response time. An error status such as `503` is a value to check with a rule, not a failure.
 
 A target that does not answer is a result, not a poll failure: its inputs have no value (`None`) and the error text is in their metadata. Put `missing_fires = True` on the rule so that fires, for example a `RangeRule` with `high = 200.0` on `*.rtt_ms`, or an `ExpectedValueRule` with `expected = 200` on `*.status`. To read values out of a JSON response, use `HTTPJSONSource`.
 
@@ -748,7 +748,7 @@ Fires when an input's value is not `expected`, which is one value or a list such
 - `values` in the payload maps input names to their age in seconds
 - a timestamp more than `future_tolerance` seconds in the future (default `30 * kanary.minute`) fires a `WARN` with "(time zone?)": such an input would never look stale, and it is usually a time written without its time zone. `future_tolerance = None` turns this off
 
-Rules are normally evaluated when one of their Sources updates. Set `evaluation_interval` to a positive number of seconds to also evaluate a Rule on an independent fixed interval:
+Rules are normally evaluated when one of their Sources updates. Set `evaluation_interval` to a positive number of seconds (or text such as `"30s"` or `"5m"`) to also evaluate a Rule on an independent fixed interval:
 
 ```python
 @kanary.rule(
@@ -814,7 +814,7 @@ class Value1Threshold(kanary.ThresholdRule):
 
 - mirrors one remote alert into one local rule via `remote_alarm_id`
 - preserves remote state and severity locally
-- can forward local operator actions when `propagate_ack` or `propagate_silence` is enabled
+- can forward local operator actions when `propagate_ack` or `propagate_silence` is enabled. The local ack or silence always holds: when the peer cannot be reached (during an incident it may be what is down), the API answer, `kanaryctl`, and the viewer show a warning, and a silence the peer did not cancel ends there at its end time
 - carries `origin_node_id`, `origin_rule_id`, and `mirror_path` in the payload
 
 #### import_remote_alarms
@@ -830,7 +830,8 @@ class Value1Threshold(kanary.ThresholdRule):
 #### MailOutput
 
 - sends email through SMTP
-- configured with `smtp_host`, `smtp_port`, `sender`, and `recipients`; `smtp_username` and `smtp_password` when the server needs a login
+- configured with `smtp_host`, `smtp_port`, `sender`, and `recipients` (a list, or one string: `"ops@example.org, oncall@example.org"`); `smtp_username` and `smtp_password` when the server needs a login
+- port 587 or 25 uses STARTTLS (`use_starttls = False` for a relay without TLS); port 465 uses TLS from the start (or set `use_ssl = True` for another port)
 - keep `smtp_password` out of the plugin file: `smtp_password = os.environ.get("SMTP_PASSWORD")` (or `kanary.load_json()`)
 - each mail has a plain-text part and an HTML part with the same content as the chat outputs (colored header, message, a table of fields); override `subject(event)`, `body(event)`, or `html(event)` (return `None` for plain text only), and set `viewer_url` to link the viewer
 
@@ -887,7 +888,7 @@ class Slack(kanary.SlackOutput):
         self.quiet.send(event, super().emit)
 ```
 
-- `send(event, callback)` calls `callback(event)` right away unless the event falls in a window (`("HH:MM", "HH:MM")`, may wrap past midnight, read in `timezone`) and is below `minimum_severity`.
+- `send(event, callback)` calls `callback(event)` right away unless the event falls in a window (`("HH:MM", "HH:MM")`, may wrap past midnight, read in `timezone`; `"24:00"` is the midnight that ends the day; one window may be written without the list) and is below `minimum_severity` (written as anywhere else: `kanary.CRITICAL`, `"critical"`, `40`). A window that covers the whole day is an error: use the output's `minimum_severity` for that.
 - Such events are held until the quiet period ends; back-to-back windows count as one period. `release` decides what goes out then: `"all"` (default) passes every held event to `callback` in its original order; `"latest"` only the newest held event of each rule; `"summary"` calls `summary(events)` once with all of them, for one message instead of many (`SlackOutput`, `MattermostOutput`, `DiscordOutput`, `WebhookOutput`, and `MailOutput` have `emit_summary(events)`; a single held event goes to `callback` as usual). `defer=False` drops held events instead.
 - When an event of a rule is sent right away (for example an escalation to `CRITICAL` at night), that rule's held events are sent first with `"all"`, so the receiver never sees them out of order; with `"latest"` and `"summary"` they are dropped, since the event sent now is newer.
 - `timezone` is anything `kanary.to_timezone()` reads: an IANA name (`"Asia/Tokyo"`), an offset (`"+09:00"`, `"+9"`, `"UTC+9"`), or `"UTC"`; without it, the host's local time.
@@ -900,10 +901,10 @@ See the `quiet-hours` template.
 
 `kanary.OnCallSchedule(shifts, timezone=None, default=())` answers who is on call: `schedule.recipients(at)`. Each shift is a mapping, typically from `kanary.load_toml()`:
 
-- weekly: `weekdays` (`"mon"`...), `from`, `to` (may wrap past midnight), `recipients`
+- weekly: `weekdays` (names, abbreviated or not: `["mon", "Tuesday"]`, a range `"mon-fri"`, or `"mon,wed,fri"`; an unknown name is an error), `from`, `to` (may wrap past midnight; `"24:00"` ends at midnight; leave both out for the whole day), `recipients` (a list, or one comma-separated string)
 - dated: `start`, `end`, `recipients`; dated shifts win over weekly ones
 
-`default` is returned when no shift matches. The `oncall` template combines it with `MailOutput.recipients_for()` and `QuietHours`.
+`default` (a list, or one comma-separated string) is returned when no shift matches. The `oncall` template combines it with `MailOutput.recipients_for()` and `QuietHours`.
 
 ### Invalid Settings
 

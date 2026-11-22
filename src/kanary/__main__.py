@@ -77,12 +77,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--log-level",
         default=DEFAULT_LOG_LEVEL,
+        type=lambda value: value.strip().upper(),  # info, INFO, Info
         choices=LOG_LEVEL_CHOICES,
         help="Logging level for engine/runtime logs.",
     )
     run_parser.add_argument(
         "--auto-reload",
         default="off",
+        type=lambda value: value.strip().lower(),  # dirty, Dirty, DIRTY
         choices=AUTO_RELOAD_CHOICES,
         help="Automatically apply discovered changes: off, dirty, or all. Defaults to off.",
     )
@@ -309,11 +311,29 @@ def main() -> int:
             return 0
         return 1
 
+    missing = [path for path in args.plugin_directories if not Path(path).exists()]
+    if missing:
+        print(f"kanary: plugin directory not found: {', '.join(missing)}", file=sys.stderr)
+        return 2
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    runtime = EngineRuntime(
+    try:
+        runtime = _build_runtime(args)
+    except OSError as exc:  # the API's port is taken, or the host is not this machine
+        print(
+            f"kanary: cannot listen on {args.api_host}:{args.api_port}: {exc.strerror or exc} "
+            "(is another KANARY running there? choose another --api-port)",
+            file=sys.stderr,
+        )
+        return 1
+    runtime.run_forever()
+    return 0
+
+
+def _build_runtime(args: argparse.Namespace) -> EngineRuntime:
+    return EngineRuntime(
         RuntimeConfig(
             rule_directories=[Path(path) for path in args.plugin_directories],
             auto_reload=args.auto_reload,
@@ -328,8 +348,6 @@ def main() -> int:
             node_id=args.node_id,
         )
     )
-    runtime.run_forever()
-    return 0
 
 
 if __name__ == "__main__":
