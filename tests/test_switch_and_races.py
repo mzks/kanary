@@ -237,6 +237,33 @@ class SwitchWithBusyPluginsTest(unittest.TestCase):
         runtime.engine.flush_outputs(5)
         self.assertEqual(SHARED.sent, [])  # not an OK alone
 
+    def test_an_init_retry_of_an_unreachable_output_does_not_hold_the_restart(self):
+        SHARED.retrying = threading.Event()
+        retries = mock.patch.object(engine_module._InitRetry, "FIRST_WAIT", 0.2)
+        retries.start()
+        self.addCleanup(retries.stop)
+        with self.assertLogs("kanary", level="WARNING"):
+            runtime = self.start('''
+                import time
+                import kanary
+                import kanary_test_shared as shared
+
+                @kanary.output(output_id="mail")
+                class Mail:
+                    def init(self):
+                        shared.retrying.set()
+                        time.sleep(1.0)  # a connect timeout: the mail server does not answer
+                        raise ConnectionError("the mail server does not answer")
+
+                    def emit(self, event):
+                        pass
+            ''')
+            time.sleep(0.3)
+            SHARED.retrying.clear()
+            self.assertTrue(SHARED.retrying.wait(5))  # an init() retry is running now
+            with mock.patch.object(runtime_module, "SHUTDOWN_DRAIN_SECONDS", 0.3):
+                self.assertEqual(runtime.reload_now({"full": True})["status"], "reloaded")  # it sends nothing
+
     def test_a_restart_given_up_leaves_each_source_with_its_one_thread(self):
         SHARED.release = threading.Event()
         SHARED.polling = [0]

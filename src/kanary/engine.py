@@ -159,6 +159,7 @@ class _InitRetry:
 
     FIRST_WAIT = 10.0
     LONGEST_WAIT = 300.0
+    sends = False  # it calls init(): a full restart need not wait for it
 
     def __init__(self, engine: "Engine", output_id: str, worker: OutputWorker) -> None:
         self.engine = engine
@@ -799,9 +800,18 @@ class Engine:
                 return False
         return True
 
-    def busy_outputs(self) -> set[str]:
-        """The outputs with events still waiting or being sent."""
-        return {output_id for output_id, worker in list(self._output_workers.items()) if worker.backlog}
+    def flush_sending(self, timeout: float) -> bool:
+        """Wait until no output has an event waiting or being sent (an init() retry may still
+        run: it sends nothing); False on timeout."""
+        deadline = time.monotonic() + timeout
+        for worker in list(self._output_workers.values()):
+            if not worker.flush_sending(max(0.0, deadline - time.monotonic())):
+                return False
+        return True
+
+    def sending_outputs(self) -> set[str]:
+        """The outputs with an event waiting or being sent."""
+        return {output_id for output_id, worker in list(self._output_workers.items()) if worker.sending}
 
     def output_backlog(self, output_id: str) -> dict[str, int]:
         """Events waiting for (or being sent by) an output, and how many it dropped."""

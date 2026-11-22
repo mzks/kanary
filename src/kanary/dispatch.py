@@ -32,7 +32,11 @@ def current_worker() -> "OutputWorker | None":
 
 
 class TimerSource(Protocol):
-    """Something with timed callbacks to run on the worker thread (OutputFollowups)."""
+    """Something with timed callbacks to run on the worker thread (OutputFollowups).
+
+    A source may set ``sends = False`` when its callbacks send nothing (an init() retry):
+    a full restart does not wait for them (see OutputWorker.flush_sending).
+    """
 
     def next_deadline(self) -> float | None: ...
 
@@ -68,6 +72,7 @@ class OutputWorker:
         self._timers: list[TimerSource] = []
         self._timers_changed = False
         self._busy = False
+        self._sending = False  # an event, or a timer callback that sends (not an init() retry)
         self._closing = False
         self._drain_deadline: float | None = None
         self._finalize: Callable[[Any], None] | None = None
@@ -121,6 +126,23 @@ class OutputWorker:
                     return False
                 self._condition.wait(remaining)
         return True
+
+    def flush_sending(self, timeout: float) -> bool:
+        """Wait until no event is waiting or being sent, nor a callback that sends; False on
+        timeout. An init() retry or a control job may still be running."""
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while self._events or self._sending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._thread.is_alive():
+                    return False
+                self._condition.wait(remaining)
+        return True
+
+    @property
+    def sending(self) -> bool:
+        with self._condition:
+            return bool(self._events) or self._sending
 
     def close(self, *, drain_seconds: float, finalize: Callable[[Any], None] | None = None) -> None:
         """Stop taking events, send the queued ones until the deadline, then finalize and stop."""
@@ -194,6 +216,7 @@ class OutputWorker:
                 if job is None and not run_timers and not stop:
                     continue
                 self._busy = True
+                self._sending = is_event
             try:
                 if stop:
                     self._stop()
@@ -209,10 +232,13 @@ class OutputWorker:
                             self.report_error("event", exc)
                 elif run_timers:
                     for timer in timers:
+                        with self._condition:
+                            self._sending = getattr(timer, "sends", True)
                         timer.run_due()
             finally:
                 with self._condition:
                     self._busy = False
+                    self._sending = False
                     self._condition.notify_all()
 
     def _take_locked(self, next_due: float | None) -> tuple[_Job | None, bool, bool, bool]:

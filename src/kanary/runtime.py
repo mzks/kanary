@@ -531,10 +531,12 @@ class EngineRuntime:
             # after the switch could reach its receiver after the new engine's next event
             # of the rule (its FIRING after the OK): the restart waits for the destination
             # instead, and is given up while it does not answer.
-            if not old_engine.flush_outputs(timeout=SHUTDOWN_DRAIN_SECONDS):
-                busy = ", ".join(sorted(old_engine.busy_outputs())) or "an output"
+            # (An init() retry of an output whose destination is down sends nothing: it is
+            # not waited for, so the restart that fixes the output goes through.)
+            if not old_engine.flush_sending(timeout=SHUTDOWN_DRAIN_SECONDS):
+                busy = ", ".join(sorted(old_engine.sending_outputs())) or "an output"
                 return give_up(
-                    f"output {busy} still sending after {SHUTDOWN_DRAIN_SECONDS:.0f} s; "
+                    f"output {busy} still sending after {SHUTDOWN_DRAIN_SECONDS:g} s; "
                     "try again once it has sent (or restart KANARY)"
                 )
             old_engine.save_latest_judgments()  # the values each alert last had come along
