@@ -25,7 +25,7 @@ LEVELS = ("basic", "advanced")
 _CLASS_SUFFIX = {"source": "Source", "rule": "Rule", "output": "Output"}
 # Display order for `kanary new --list`; templates not listed here follow alphabetically.
 _ORDER = (
-    "source", "command", "ssh", "ping", "tcp", "http-status", "file", "log-count", "http-json", "prometheus", "sql-wide", "sql-long",
+    "source", "command", "ssh", "ping", "tcp", "http-status", "file", "log-count", "http-json", "prometheus", "slowdash", "sql-wide", "sql-long",
     "http-push", "mqtt", "plugin-health",
     "push", "buffered", "trend", "spike", "frozen", "remote",
     "rule", "range", "threshold", "expected", "stale", "rate", "difference", "k-of-n", "aggregate", "count",

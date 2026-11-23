@@ -5668,6 +5668,7 @@ class CLIHelpersTest(unittest.TestCase):
         expected["rule"] |= {
             "my.plugin-health.failed", "my.plugin-health.dropped",
             "my.peer.down", "my.peer.plugins_failed", "my.heartbeat.not_delivered",
+            "my.slowdash.down", "my.slowdash.stale", "my.slowdash.missing",
         }
         self.assertEqual(set(combined.sources), expected["source"])
         self.assertEqual(set(combined.rules), expected["rule"])

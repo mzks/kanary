@@ -15,6 +15,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.parse
 import urllib.request
 import unittest
 from unittest import mock
@@ -570,6 +571,144 @@ class PrometheusTest(unittest.TestCase):
                                                               "metrics": {"free": "node_filesystem_avail_bytes"}})()
         with self.assertRaisesRegex(ValueError, r"matches 2 series; .* e\.g\. 'free\.\{device\}'"):
             source.poll()
+
+
+SLOWDASH_START = 1_700_000_000
+SLOWDASH_DATA = {
+    # unordered on purpose: the newest point is chosen by its time
+    "oil.temperature": {"start": SLOWDASH_START, "length": 600, "t": [10.0, 590.5, 300.0], "x": [20.0, 21.5, 21.0]},
+    "oil/level": {"start": SLOWDASH_START, "length": 600, "t": [-3600.0], "x": ["0.8"]},  # a prior point
+    "daq.state": {"start": SLOWDASH_START, "length": 600, "t": [100.0], "x": ["RUN"]},
+    "valve": {"start": SLOWDASH_START, "length": 600, "t": [1.0, 2.0], "x": [True, False]},
+    "broken": {"start": SLOWDASH_START, "length": 600, "t": [5.0], "x": [None]},
+    "spectrum": {"start": SLOWDASH_START, "length": 600, "t": 600, "x": {"bins": {"min": 0, "max": 10}, "counts": [1, 2]}},
+    "hv.pmt.1": {"start": SLOWDASH_START, "length": 600, "t": [1.0], "x": [1500]},
+    "hv.pmt.2": {"start": SLOWDASH_START, "length": 600, "t": [1.0], "x": [1510]},
+    "hv.veto.1": {"start": SLOWDASH_START, "length": 600, "t": [1.0], "x": [900]},
+}
+
+
+class SlowDashTest(unittest.TestCase):
+    def serve(self, document=SLOWDASH_DATA, ping=(200, "pong"), data_status=200):
+        """A SlowDash with /api/ping, /api/channels (the channels of document, and one without data) and /api/data."""
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(self.path)
+                route = self.path.split("/api/", 1)[-1]
+                if route == "ping":
+                    status, body = ping
+                elif route == "channels":
+                    status, body = 200, json.dumps([{"name": name} for name in [*document, "hv.pmt.3"]])
+                else:
+                    path, _, _ = route.partition("?")
+                    wanted = urllib.parse.unquote(path.removeprefix("data/")).split(",")
+                    status, body = data_status, json.dumps({ch: document[ch] for ch in wanted if ch in document})
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body.encode())))
+                self.end_headers()
+                self.wfile.write(body.encode())
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}", received
+
+    def source(self, **settings):
+        return type("Dash", (kanary.SlowDashSource,), {"source_id": "dash", **settings})()
+
+    def test_the_newest_point_of_each_channel_is_an_input_at_its_own_time(self):
+        base, received = self.serve()
+        result = self.source(url=base, channels={
+            "oil_temp": "oil.temperature", "oil_level": "oil/level", "state": "daq.state", "valve": "valve",
+            "broken": "broken", "spectrum": "spectrum", "gone": "not.there",
+        }).poll()
+        values = {m.name: m.value for m in result.inputs}
+        self.assertEqual(values, {"slowdash.up": 1, "slowdash.missing": 1, "oil_temp": 21.5, "oil_level": 0.8, "state": "RUN", "valve": 0.0, "broken": None})
+        stamps = {m.name: m.timestamp for m in result.inputs}
+        at = lambda offset: datetime.fromtimestamp(SLOWDASH_START + offset, tz=timezone.utc)
+        self.assertEqual(stamps["oil_temp"], at(590.5))
+        self.assertEqual(stamps["oil_level"], at(-3600))  # older than the window, from prior_data
+        self.assertEqual(next(m for m in result.inputs if m.name == "oil_level").metadata, {"channel": "oil/level"})
+        self.assertEqual(result.metadata, {"url": base, "missing": ["gone"], "objects": ["spectrum"]})
+        self.assertEqual(next(m for m in result.inputs if m.name == "slowdash.missing").metadata, {"missing": ["gone"]})
+        self.assertEqual(received[0], "/api/ping")
+        path, _, query = received[1].partition("?")
+        self.assertEqual(urllib.parse.unquote(path), "/api/data/oil.temperature,oil/level,daq.state,valve,broken,spectrum,not.there")
+        self.assertEqual(urllib.parse.parse_qs(query), {"length": ["600"], "to": ["0"], "prior_data": ["1"]})
+        self.assertEqual(len(received), 2)  # /api/channels only for patterns
+
+    def test_patterns_take_every_matching_channel(self):
+        base, received = self.serve()
+        listed = self.source(url=base, channels=["hv.pmt.?", "valve"]).poll()
+        self.assertEqual({m.name: m.value for m in listed.inputs},
+                         {"slowdash.up": 1, "slowdash.missing": 1, "hv.pmt.1": 1500.0, "hv.pmt.2": 1510.0, "valve": 0.0})
+        self.assertEqual(listed.metadata["missing"], ["hv.pmt.3"])  # listed by SlowDash, but no data
+        self.assertEqual(received[1], "/api/channels")
+        named = self.source(url=base, channels={"pmt_hv.*": "hv.pmt.*", "hv_*_*": "hv.*.*", "veto": "hv.[v]eto.*",
+                                                "none": "nothing.*"}).poll()
+        self.assertEqual({m.name: m.metadata.get("channel") for m in named.inputs}, {
+            "slowdash.up": None, "slowdash.missing": None, "pmt_hv.1": "hv.pmt.1", "pmt_hv.2": "hv.pmt.2",
+            "hv_pmt_1": "hv.pmt.1", "hv_pmt_2": "hv.pmt.2", "hv_veto_1": "hv.veto.1", "veto": "hv.veto.1",
+        })
+        self.assertEqual(named.metadata["missing"], ["none", "pmt_hv.3", "hv_pmt_3"])
+        self.assertEqual(next(m.value for m in named.inputs if m.name == "slowdash.missing"), 3)
+        data = urllib.parse.unquote(received[-1].partition("?")[0])  # each channel asked for once
+        self.assertEqual(data, "/api/data/hv.pmt.1,hv.pmt.2,hv.pmt.3,hv.veto.1")
+
+    def test_pattern_mistakes_are_explained(self):
+        base, _ = self.serve()
+        for channels, message in (
+            ({"hv": "hv.pmt.*"}, r"'hv\.pmt\.\*' matches 3 channels \(hv\.pmt\.1, hv\.pmt\.2, hv\.pmt\.3\); write \* in the input name 'hv'"),
+            ({"hv_*": "hv.*.*"}, r"the input name 'hv_\*' has 1 \*, and the channel pattern 'hv\.\*\.\*' 2"),
+            ({"hv.pmt.1": "valve", "hv.*": "hv.*"}, r"the input 'hv\.pmt\.1' would be both 'valve' and 'hv\.pmt\.1'"),
+        ):
+            with self.subTest(channels=channels), self.assertRaisesRegex(ValueError, message):
+                self.source(url=base, channels=channels).poll()
+
+    def test_slowdash_not_answering_is_up_0_not_a_failure(self):
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        proxy_error, _ = self.serve(ping=(502, "Bad Gateway"))
+        login_page, _ = self.serve(ping=(200, "<html>login</html>"))
+        for url, error in ((f"http://127.0.0.1:{port}", "URLError"), (proxy_error, "HTTP Error 502"),
+                           (login_page, "answered '<html>login</html>', not 'pong'")):
+            with self.subTest(url=url):
+                result = self.source(url=url, channels=["valve"], timeout=2).poll()
+                self.assertEqual([(m.name, m.value) for m in result.inputs], [("slowdash.up", 0)])
+                self.assertIn(error, result.inputs[0].metadata["error"])
+        failing, _ = self.serve(data_status=500)
+        with self.assertRaises(urllib.error.HTTPError):  # SlowDash answers, but not with data
+            self.source(url=failing, channels=["valve"]).poll()
+
+    def test_url_and_settings_are_accepted_as_written(self):
+        base, received = self.serve()
+        for url in (base + "/dash/slowplot.html?config=slowplot-Oil.json", base + "/dash/", base + "/dash/api"):
+            with self.subTest(url=url):
+                result = self.source(url=url, channels=" oil.temperature, daq.state ", lookback=1 * kanary.minute).poll()
+                self.assertEqual({m.name for m in result.inputs}, {"slowdash.up", "slowdash.missing", "oil.temperature", "daq.state"})
+                self.assertEqual(result.metadata["url"], base + "/dash")
+        self.assertTrue(all(path.startswith("/dash/api/") for path in received))
+        self.assertIn("/dash/api/data/oil.temperature,daq.state?length=60&to=0&prior_data=1", received)
+        for settings, message in (
+            ({"url": base, "channels": {}}, "channels is empty"),
+            ({"url": base, "channels": {"x": "a,b"}}, "must be one channel name"),
+            ({"url": base, "channels": {"slowdash.up": "valve"}}, "is an input of SlowDashSource itself"),
+            ({"url": base, "channels": {"slowdash.missing": "valve"}}, "'slowdash.missing' is an input of SlowDashSource itself"),
+            ({"url": base, "channels": ["a"], "lookback": 0}, "lookback must be a positive"),
+            ({"channels": ["a"]}, "url is not set"),
+            ({"url": "localhost:18881", "channels": ["a"]}, "must be like 'http://host:18881'"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.source(**settings).poll()
 
 
 class InboxTest(unittest.TestCase):

@@ -646,6 +646,26 @@ metrics = {
 
 The labels written must match exactly; the others may be anything. A series selector that matches several series needs the label that varies in the input name: `{sensor}` is replaced by each series' label, giving `temp.temp1`, `temp.temp2`. Without it the poll fails and names the label. A series that is not on the page is listed in the result's `metadata["missing"]`, and `NaN` has no value; the page not answering is a poll failure. A counter (`..._total`) only grows: a `RateRule` on it gives its rate per second.
 
+#### SlowDashSource
+
+`kanary.SlowDashSource` reads the newest point of [SlowDash](https://github.com/slowproj/slowdash) channels through its web API, with `url`, `headers`, and `timeout`. `url` is the SlowDash address as opened in the browser (`http://localhost:18881`); a page address such as `.../slowplot.html?config=...` works too. `channels` maps an input name to a channel, or lists channels, each named after itself:
+
+```python
+channels = {
+    "oil_temperature": "oil.temperature",
+    "run_state": "daq.run_state",
+    "pmt_hv.*": "hv.pmt.*",  # every channel hv.pmt.<x>, as pmt_hv.<x>
+}
+```
+
+A channel with `*`, `?`, or `[...]` is a pattern: it takes every matching channel that SlowDash lists (`GET /api/channels`, asked only when there is a pattern). Listed, a pattern names each channel after itself (`channels = ["hv.pmt.*"]`); in an input name, `*` is replaced by what the pattern's `*` matched, so `hv.pmt.17` above becomes `pmt_hv.17`. A pattern that matches several channels needs a `*` in its input name, and the poll fails naming the channels when it has none. A pattern that matches nothing is counted in `slowdash.missing` (below).
+
+The input `slowdash.up` is 1 while SlowDash answers `GET /api/ping`. When it does not (refused, timed out, or an error from a proxy in front), `slowdash.up` is 0 with the reason in its `metadata["error"]`, and there are no channel inputs: no answer is a value for a rule, not a failure of the source. Check it with an `ExpectedValueRule` with `expected = 1`, and put `suppressed_by` on the rules of the channels, as the `slowdash` template does.
+
+Each poll then asks for the last `lookback` seconds (10 minutes) of every channel in one request, `GET /api/data/CH0,CH1?length=...&prior_data=1`, and takes each channel's newest point. The input's timestamp is that point's own time, so a `StaleRule` on it fires when a channel stops updating. A channel with no point in that time still gets its last point before from SlowDash's SQL data sources (`prior_data`, SlowDash 2026-02 and later), which suits channels written only when they change; other data sources leave it out, and it has no input. Every point in the window is sent, so shorten `lookback` for many fast channels. Numbers and states (`"ON"` becomes 1) are converted as `kanary.to_number()` reads them, other text such as `"RUN"` is kept as it is for an `ExpectedValueRule`, and objects (histograms, tables, trees) are listed in `metadata["objects"]`. SlowDash answering the ping but not the data request is a poll failure.
+
+The input `slowdash.missing` counts the entries of `channels` without a point: a typo, a channel no longer in SlowDash, or, without `prior_data`, no point in `lookback`; a pattern that matches nothing counts too. Their names are in its `metadata["missing"]` and in the result's. A rule on `*` judges only the inputs that are there, so a channel without an input escapes it: a `RangeRule` with `high = 0` on `slowdash.missing` catches it, as the `slowdash` template does.
+
 #### SQLWideSource and SQLLongSource
 
 Usually only settings are needed; the connection and the SELECT are built from them. Which class depends on the shape of the table:

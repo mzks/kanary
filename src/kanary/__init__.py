@@ -60,6 +60,7 @@ from .helpers.prometheus import PrometheusSource
 from .helpers.push import HTTPPushSource, MQTTSource
 from .helpers.probe import HTTPStatusSource, PingSource, TCPSource
 from .helpers.remote import RemoteAlarm, RemoteKanarySource, import_remote_alarms
+from .helpers.slowdash import SlowDashSource
 from .helpers.sql import SQLLongSource, SQLWideSource
 from .helpers.value_rules import ExpectedValueRule, RangeRule, RateRule, StaleRule, ThresholdRule, ValueRule
 
@@ -188,6 +189,7 @@ __all__ = [
     "HTTPStatusSource",
     "PingSource",
     "TCPSource",
+    "SlowDashSource",
     "SQLLongSource",
     "SQLWideSource",
     "parse_values",

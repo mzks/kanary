@@ -645,6 +645,26 @@ metrics = {
 
 書いた label は完全に一致する必要があり、書かなかった label は何でも構いません。series selector が複数の series に一致するときは、input 名に変わる label を書きます。`{sensor}` は各 series の label に置き換わり、`temp.temp1`、`temp.temp2` になります。書かないと poll が失敗し、どの label かを示します。page に無い series は結果の `metadata["missing"]` に並び、`NaN` は値なしになります。page 自体が応答しないのは poll の失敗です。counter（`..._total`）は増える一方なので、`RateRule` を掛けると毎秒あたりの rate になります。
 
+#### SlowDashSource
+
+`kanary.SlowDashSource` は [SlowDash](https://github.com/slowproj/slowdash) の channel の最新点を web API から `url`、`headers`、`timeout` で読みます。`url` は browser で開く SlowDash の address（`http://localhost:18881`）で、`.../slowplot.html?config=...` のような page の address でも構いません。`channels` は input 名 → channel で、channel の list なら各 channel 名がそのまま input 名になります:
+
+```python
+channels = {
+    "oil_temperature": "oil.temperature",
+    "run_state": "daq.run_state",
+    "pmt_hv.*": "hv.pmt.*",  # hv.pmt.<x> の channel 全部を pmt_hv.<x> として
+}
+```
+
+`*`、`?`、`[...]` を含む channel は pattern で、SlowDash が一覧に出す channel（`GET /api/channels`、pattern があるときだけ問い合わせる）のうち一致するものをすべて取ります。list に書いた pattern は各 channel 名をそのまま input 名にします（`channels = ["hv.pmt.*"]`）。input 名の `*` は pattern の `*` に一致した部分に置き換わるので、上の `hv.pmt.17` は `pmt_hv.17` になります。複数の channel に一致する pattern は input 名に `*` が必要で、無いと poll が失敗し、一致した channel を示します。何にも一致しない pattern は `slowdash.missing`（後述）に数えます。
+
+input `slowdash.up` は SlowDash が `GET /api/ping` に応答する間 1 です。応答しない（接続拒否、timeout、前段の proxy の error）ときは `slowdash.up` が 0 になって理由が `metadata["error"]` に入り、channel の input はありません。応答が無いことは rule で判定する値であって、source の失敗ではありません。`expected = 1` の `ExpectedValueRule` で判定し、channel の rule には `suppressed_by` を付けます（`slowdash` template のとおり）。
+
+続いて poll のたびに全 channel の直近 `lookback` 秒（10 分）を 1 回の request（`GET /api/data/CH0,CH1?length=...&prior_data=1`）で取り、各 channel の最新点を使います。input の timestamp はその点自身の時刻なので、`StaleRule` を掛けると channel の更新が止まったときに発報します。その間に点が無い channel も、SlowDash の SQL data source（`prior_data`、SlowDash 2026-02 以降）ならその前の最後の点が返るので、変化したときだけ書かれる channel にも使えます。それ以外の data source では返らず、その channel の input はありません。窓の中の点はすべて送られるので、速い channel が多いときは `lookback` を短くします。数値と状態（`"ON"` は 1）は `kanary.to_number()` と同じく変換し、`"RUN"` のようなその他の text は `ExpectedValueRule` 用にそのまま残し、object（histogram、table、tree）は `metadata["objects"]` に並びます。SlowDash が ping には応答するのに data の request に応答しないのは poll の失敗です。
+
+input `slowdash.missing` は点が得られなかった `channels` の項目の数です。channel 名の typo、SlowDash から消えた channel、`prior_data` が無いときに `lookback` の間に点が無い channel、何にも一致しない pattern が数に入ります。その名前は `metadata["missing"]`（input と結果の両方）にあります。`*` の rule は今ある input しか判定しないので、input の無い channel は見落とします。`slowdash.missing` に `high = 0` の `RangeRule` を掛けるとこれを捕まえられます（`slowdash` template のとおり）。
+
 #### SQLWideSource と SQLLongSource
 
 通常は設定だけで済みます。接続と SELECT は設定から組み立てます。どちらの class を使うかは table の形で決まります:
